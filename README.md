@@ -79,18 +79,19 @@ How the build behaves:
 
 Requirements:
 - One NVIDIA GPU with 24 GB (e.g. 4090, L4, A10) or 40 GB+ (A100-40G, A6000, L40S).
-- CUDA-enabled PyTorch.
+- NVIDIA driver ≥ 570 (CUDA 12.8 runtime) and Python 3.12.
+- The setup script pins **Python 3.12 + PyTorch 2.10.0 (cu128) + causal-conv1d 1.7.0**, all prebuilt wheels with nothing compiled.
 - About 40 GB of disk for the parquet snapshot plus the base model.
 
 ```bash
 git clone https://github.com/hungphongtrn/udm.git && cd udm
 git checkout claude/set-conditioned-reward-model-hvsb9s
 
-# installs requirements-train.txt into .venv (torch, transformers>=5.18, peft, liger-kernel, flash-linear-attention, wandb, ...)
-# --flash-attn also builds flash-attn and causal-conv1d (recommended; otherwise sdpa and torch fallbacks are used)
-# then runs HF + wandb login
-scripts/train/setup.sh --flash-attn
-#   if the default torch wheel does not match your CUDA, first run: pip install torch --index-url https://download.pytorch.org/whl/cu124
+# creates .venv with python3.12, installs torch==2.10.0 from the cu128 index, requirements-train.txt
+# (transformers>=5.18, peft, liger-kernel, flash-linear-attention, wandb, ...) and the prebuilt causal-conv1d wheel
+# (cu12 / torch2.10 / cp312), then runs HF + wandb login. Optional --flash-attn also tries to install flash-attn
+# (it is only used by the 1-in-4 full-attention layers; sdpa is fine without it).
+scripts/train/setup.sh
 
 # 0) optional: CPU smoke test (tiny random Qwen3.5, synthetic data, no downloads)
 scripts/train/smoke_test.sh
