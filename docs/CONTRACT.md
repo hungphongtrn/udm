@@ -60,7 +60,8 @@ are dropped and counted in the build report.
   (streaming or local cache) and only needs: `state_json`, `instruction_json`,
   `options_json`, `tier_json`, `candidate_rows`, `family`, `source_id`,
   `label_kind`, `decision_set_id`.
-* Prompt rendering: instruction text (+ criteria if present), state rendered as
+* Prompt rendering: the whole sequence is one user turn of the tokenizer's chat template, ending right after the
+  assistant header (`<|im_start|>assistant\n`). Inside it: instruction text (+ criteria if present), state rendered as
   text (string as-is; object → pretty JSON), then each candidate wrapped in the
   boundary tokens. Candidate order is randomly shuffled every time in training,
   and kept canonical in eval.

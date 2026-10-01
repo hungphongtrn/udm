@@ -122,7 +122,27 @@ def parse_row(row: dict, use_candidate_rows: bool = True) -> Example | None:
 # ----------------------------------------------------------------------------- tokenisation / assembly
 
 DEFAULT_RENDER = {"max_len": 2048, "cand_max_tokens": 128, "state_max_tokens": 1024, "instr_max_tokens": 256,
-                  "max_candidates": 64, "min_state_tokens": 64, "state_truncate": "middle"}
+                  "max_candidates": 64, "min_state_tokens": 64, "state_truncate": "middle",
+                  # wrap the packed sequence as one user turn of the tokenizer's chat template and end right after
+                  # the assistant header ("<|im_start|>assistant\n"; any <think> the template appends is cut)
+                  "chat_template": True, "system_prompt": None}
+
+_SENTINEL = "@@SCRM_BODY@@"
+
+
+def chat_wrap_text(tokenizer, system_prompt: str | None = None) -> tuple[str, str]:
+    """(prefix, suffix) strings around the user content, from the tokenizer's chat template with
+    add_generation_prompt=True, truncated right after the last assistant header."""
+    msgs = ([{"role": "system", "content": system_prompt}] if system_prompt else []) + \
+        [{"role": "user", "content": _SENTINEL}]
+    text = tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    pre, post = text.split(_SENTINEL)
+    head = post.rfind("assistant")
+    if head < 0:
+        raise ValueError(f"chat template has no assistant header: {post!r}")
+    nl = post.find("\n", head)
+    post = post[: (nl + 1) if nl >= 0 else head + len("assistant")]
+    return pre, post
 
 
 @dataclass
@@ -204,6 +224,14 @@ class Renderer:
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
         self.marker = tokenizer("\n...\n", add_special_tokens=False)["input_ids"]
         self.nl2 = tokenizer("\n\n", add_special_tokens=False)["input_ids"]
+        self.chat_prefix, self.chat_suffix = [], []
+        if self.cfg.get("chat_template"):
+            if not getattr(tokenizer, "chat_template", None):
+                raise ValueError("render.chat_template=true but the tokenizer has no chat template "
+                                 "(set data.render.chat_template=false to disable)")
+            pre, post = chat_wrap_text(tokenizer, self.cfg.get("system_prompt"))
+            self.chat_prefix = tokenizer(pre, add_special_tokens=False)["input_ids"]
+            self.chat_suffix = tokenizer(post, add_special_tokens=False)["input_ids"]
 
     # --- tokenisation
     def tokenize(self, ex: Example) -> TokExample:
@@ -252,7 +280,7 @@ class Renderer:
         else:
             idxs = list(kept)
         cand = t.cand_ids if cap is None else [x[:cap] for x in t.cand_ids]
-        overhead = 1 + len(t.instr_ids) + 3
+        overhead = 1 + len(t.instr_ids) + 3 + len(self.chat_prefix) + len(self.chat_suffix)
         min_state = min(len(t.state_ids), c["min_state_tokens"])
 
         def cost(ix):
@@ -292,7 +320,7 @@ class Renderer:
         sb = min(avail_state, c["state_max_tokens"] or avail_state)
         state = self._truncate_state(t.state_ids, sb)
         sp = self.sp
-        ids = [sp["<|state_start|>"]] + t.instr_ids + state + [sp["<|state_end|>"], sp["<|candidate_set_start|>"]]
+        ids = list(self.chat_prefix) + [sp["<|state_start|>"]] + t.instr_ids + state + [sp["<|state_end|>"], sp["<|candidate_set_start|>"]]
         pos = []
         for i in order:
             ids.append(sp["<|candidate_start|>"])
@@ -300,6 +328,7 @@ class Renderer:
             ids.append(sp["<|candidate_end|>"])
             pos.append(len(ids) - 1)
         ids.append(sp["<|candidate_set_end|>"])
+        ids.extend(self.chat_suffix)
         order_a = np.asarray(order)
         it = Item(np.asarray(ids, dtype=np.int64), np.asarray(pos, dtype=np.int64), tiers[order_a].astype(np.int64),
                   order_a, [t.ex.choice_ids[i] for i in order], t.ex.family, t.ex.source_id, t.ex.decision_set_id,

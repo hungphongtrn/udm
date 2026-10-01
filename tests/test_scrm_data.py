@@ -106,8 +106,10 @@ def test_truncation_budget_and_tier0(tok):
     assert (it.tiers == 0).sum() == 2 and len(it.order) <= 20 and (it.tiers > 0).any()
     # the budget loop must have dropped candidates for the minimal state to fit
     ids = it.input_ids.tolist()
-    assert ids[0] == tok.convert_tokens_to_ids(SPECIAL_TOKENS[0])
-    assert ids[-1] == tok.convert_tokens_to_ids(SPECIAL_TOKENS[-1])
+    body = ids[len(r.chat_prefix): len(ids) - len(r.chat_suffix)]        # chat-template wrapper around the body
+    assert ids[:len(r.chat_prefix)] == r.chat_prefix and ids[len(ids) - len(r.chat_suffix):] == r.chat_suffix
+    assert body[0] == tok.convert_tokens_to_ids(SPECIAL_TOKENS[0])
+    assert body[-1] == tok.convert_tokens_to_ids(SPECIAL_TOKENS[-1])
 
 
 def test_example_dropped_when_no_pair_possible(tok):
@@ -168,3 +170,17 @@ def test_eval_set_deterministic_and_excludes_ood(synth, tok):
     assert rows and all(x["source_split"] != "ood" for x in rows)
     from collections import Counter
     assert max(Counter(x["source_id"] for x in rows).values()) <= 10
+
+
+def test_chat_template_wraps_and_stops_at_assistant_header(tok):
+    r = Renderer(tok, {"max_len": 256})
+    it = r.assemble(r.tokenize(mk_example(4)), None, False)
+    text = tok.decode(it.input_ids.tolist())
+    assert text.startswith("<|im_start|>user\n<|state_start|>")
+    assert text.endswith("<|candidate_set_end|><|im_end|>\n<|im_start|>assistant\n")   # no <think>, nothing after
+    end_id = tok.convert_tokens_to_ids(CAND_END)
+    assert all(it.input_ids[p] == end_id for p in it.cand_pos)
+    assert len(it.input_ids) <= 256
+    off = Renderer(tok, {"max_len": 256, "chat_template": False}).assemble(r.tokenize(mk_example(4)), None, False)
+    assert len(it.input_ids) - len(off.input_ids) == len(r.chat_prefix) + len(r.chat_suffix)
+    assert tok.decode(off.input_ids.tolist()).startswith("<|state_start|>")

@@ -1,7 +1,10 @@
 # SCRM training guide
 
-Set-Conditioned Reward Model: a Qwen3.5-4B text backbone (+LoRA, Liger kernels) reads one packed sequence
-`<|state_start|> instruction + state <|state_end|><|candidate_set_start|> <|candidate_start|> text <|candidate_end|> ... <|candidate_set_end|>`.
+Set-Conditioned Reward Model: a Qwen3.5-4B text backbone (+LoRA, Liger kernels) reads one packed sequence, wrapped in the
+tokenizer's chat template as a single user turn and ending right after the assistant header (generation prompt; Qwen3.5's
+`<think>` line is cut):
+`<|im_start|>user\n<|state_start|> instruction + state <|state_end|><|candidate_set_start|> <|candidate_start|> text <|candidate_end|> ... <|candidate_set_end|><|im_end|>\n<|im_start|>assistant\n`.
+Controlled by `data.render.chat_template` (default true) and `data.render.system_prompt` (default none).
 The hidden state at every `<|candidate_end|>` is projected (d -> 768), passed through a 2-layer bidirectional
 pre-LN transformer encoder **without positional embeddings** (so scores do not depend on candidate order), and an MLP head
 returns one unbounded scalar reward per candidate. Training uses Bradley-Terry over tier pairs

@@ -19,10 +19,19 @@ def make_tiny_tokenizer(vocab_size: int = 400):
     tk = Tokenizer(models.BPE())
     tk.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     tk.decoder = decoders.ByteLevel()
-    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<|endoftext|>"],
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<|endoftext|>", "<|im_start|>", "<|im_end|>"],
                                   initial_alphabet=pre_tokenizers.ByteLevel.alphabet())
     tk.train_from_iterator(_CORPUS * 4, trainer)
-    return PreTrainedTokenizerFast(tokenizer_object=tk, eos_token="<|endoftext|>", pad_token="<|endoftext|>")
+    tok = PreTrainedTokenizerFast(tokenizer_object=tk, eos_token="<|endoftext|>", pad_token="<|endoftext|>")
+    tok.chat_template = CHATML_TEMPLATE
+    return tok
+
+
+# Minimal ChatML (Qwen-style) template, incl. a <think> generation prompt like Qwen3.5's.
+CHATML_TEMPLATE = (
+    "{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
+    "{% if add_generation_prompt %}<|im_start|>assistant\n<think>\n{% endif %}"
+)
 
 
 def make_tiny_backbone(tiny_cfg: dict, vocab_size: int, dtype=torch.float32):
