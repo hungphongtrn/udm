@@ -90,7 +90,7 @@ def assert_contract_row(row, split=None):
                 assert tier == sorted(ids[j] for j in range(n) if abs(j - ti) == k)
     elif kind == "noul":
         assert {"target", "threshold"} <= set(sl) and sl["threshold"] == 0.5
-        assert "p_yes" in sl and sl["options"] == ["no", "yes"] or "p_yes" not in sl
+        assert "p_yes" not in sl or sorted(sl["options"]) == ["no", "yes"]
         if "p_yes" in sl:
             assert sorted(opts.values()) == ["no", "yes"]
             yes = sha("yes")

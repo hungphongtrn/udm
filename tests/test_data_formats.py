@@ -254,8 +254,9 @@ def test_trainer_round_trip_through_real_build_path(tmp_path):
         for row, it in zip(sorted(rows, key=lambda r: r["decision_set_id"]),
                            sorted(es.items, key=lambda i: i.decision_set_id)):
             assert row["decision_set_id"] == it.decision_set_id
-            assert int((it.input_ids == end_id).sum()) == row["candidate_count"]       # every candidate rendered
-            assert len(it.cand_pos) == row["candidate_count"]
+            n_opts = len(json.loads(row["options_json"]))
+            assert int((it.input_ids == end_id).sum()) == n_opts                      # every candidate rendered
+            assert len(it.cand_pos) == n_opts
             families.add(it.family)
         for b in es.batches():
             assert b["pair_mask"].flatten(1).any(1).all()                              # trainable pairs exist
