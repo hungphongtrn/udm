@@ -1,0 +1,9 @@
+# 40 GB GPU (A100-40G / A6000 48G): 4096-token sequences, 8192 padded tokens per micro-batch.
+base: scrm_qwen3_4b_24gb.yaml
+output_dir: outputs/scrm_qwen3_4b_40gb
+data:
+  render: {max_len: 4096, cand_max_tokens: 256, state_max_tokens: 3072, max_candidates: 64}
+  batch: {max_tokens_per_batch: 8192, max_batch_size: 24, bucket_size: 256}
+train:
+  grad_accum: 4
+wandb: {tags: [qwen3-4b, 40gb]}

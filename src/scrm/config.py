@@ -98,11 +98,22 @@ def parse_overrides(items: list[str]) -> dict:
     return out
 
 
+def _load_yaml(path: str) -> dict:
+    """YAML with optional `base: other.yaml` (relative to this file) inheritance."""
+    import os
+    with open(path) as f:
+        y = yaml.safe_load(f) or {}
+    base = y.pop("base", None)
+    if base:
+        b = _load_yaml(os.path.join(os.path.dirname(os.path.abspath(path)), base))
+        y = deep_update(b, y)
+    return y
+
+
 def load_config(path: str | None, overrides: list[str] | None = None) -> dict:
     cfg = copy.deepcopy(DEFAULTS)
     if path:
-        with open(path) as f:
-            deep_update(cfg, yaml.safe_load(f) or {})
+        deep_update(cfg, _load_yaml(path))
     if overrides:
         deep_update(cfg, parse_overrides(overrides))
     return cfg

@@ -30,3 +30,11 @@ def collate(items, pad_id: int = 0) -> dict:
 
 def to_device(batch: dict, device) -> dict:
     return {k: (v.to(device, non_blocking=True) if torch.is_tensor(v) else v) for k, v in batch.items()}
+
+
+def align_slots(order_from, order_to):
+    """For each slot k of `order_from`, the slot index j in `order_to` holding the same candidate."""
+    import numpy as np
+    order_to = np.asarray(order_to)
+    sorter = np.argsort(order_to)
+    return sorter[np.searchsorted(order_to, np.asarray(order_from), sorter=sorter)]

@@ -277,12 +277,6 @@ def select_eval_rows(dcfg: dict, split: str, filters: dict, max_rows, per_source
         src = np.asarray(table.column("source_id").to_numpy(zero_copy_only=False))
         srcs = sorted(set(src[keep].tolist()))
         per = per_source
-        if max_rows and srcs:
-            per = min(per or max_rows, max(1, max_rows // len(srcs)))
-            tot = sum(min(per, int((keep & (src == s)).sum())) for s in srcs)
-            # redistribute leftover budget to larger sources
-            if tot < max_rows and (per_source is None or per < per_source):
-                per = min(per_source or max_rows, per * 2)
         idx = []
         rng = np.random.default_rng(seed)
         for s in srcs:
