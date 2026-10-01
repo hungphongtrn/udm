@@ -88,3 +88,18 @@ body
     assert "- config_name: default" in new
     again = push.update_readme_text(new, stats, rec)       # re-running must not double count
     assert again == new
+
+
+def test_build_counts_converter_drops_in_receipt(tmp_path):
+    root, out = tmp_path / "src", tmp_path / "out"
+    bad = [mk(1, "dev"), mk(2, "dev", kind="noul"), mk(3, "dev", kind="noul"), mk(4, "dev")]
+    bad[1]["target"] = [0.5]                                  # noul tie
+    bad[2]["options"], bad[2]["kind"], bad[2]["target"] = [], "choice", []     # target/options mismatch -> drop
+    bad[3]["target"] = [0.3, 0.3, 0.3]                       # no trainable pair
+    write(str(root / "data/validation-00000-of-00001.parquet"), bad)
+    assert build.main(["--source", "tasksource", "--out", str(out), "--workers", "1", "--local-root", str(root),
+                       "--unit-filter", "^validation-00000-of-00001$"]) == 0
+    r = json.load(open(out / "receipts" / "tasksource.json"))
+    assert r["rows_written"] == {"validation": 1}
+    assert r["drops"]["noul_tie"] == 1 and r["drops"]["no_trainable_pair"] == 1
+    assert sum(r["drops"].values()) == 3 and r["raw_rows_read"] == 4
