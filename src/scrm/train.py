@@ -233,7 +233,7 @@ def train(cfg: dict, resume: str | None = None):
             for k, v in lo.parts.items():
                 parts_acc[k] = parts_acc.get(k, 0.0) + float((v.detach() * lo.valid).sum()) / n_valid
             pairs += int(lo.n_pairs.sum()); ex_n += r.size(0)
-            tok_acc += int(b["attention_mask"].numel()); real_tok_acc += int(b["attention_mask"].sum())
+            tok_acc += int(b["n_padded_tokens"]); real_tok_acc += int(b["n_tokens"])
             last_r, last_b = r.detach(), bd
         params = [p for g in opt.param_groups for p in g["params"] if p.grad is not None]
         gnorm = float(torch.nn.utils.clip_grad_norm_(params, tcfg["grad_clip"]))

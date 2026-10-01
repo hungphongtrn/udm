@@ -18,8 +18,11 @@ DEFAULTS: dict[str, Any] = {
                  "linear_num_key_heads": 2, "linear_num_value_heads": 4, "linear_key_head_dim": 16,
                  "linear_value_head_dim": 16, "seed": 0},
         "dtype": "bfloat16",               # backbone dtype (bfloat16 | float32)
-        "attn_implementation": "auto",     # auto -> flash_attention_2 if installed else sdpa
+        "attn_implementation": "auto",     # auto -> sdpa with prefix_cache, else flash_attention_2 if installed
         "gradient_checkpointing": True,
+        # encode the prompt shared by all graded options of a set once and reuse its states (KV + Gated DeltaNet
+        # conv/recurrent state) for every option; false = re-encode the prompt per option (reference path)
+        "prefix_cache": True,
         "liger_kernel": True,              # Liger RMSNorm + SwiGLU via liger_kernel.transformers (CUDA only)
         "freeze_backbone": False,          # frozen-backbone ablation (no LoRA, no grads through backbone)
         "quantize_4bit": False,            # QLoRA (bitsandbytes nf4)
@@ -57,10 +60,10 @@ DEFAULTS: dict[str, Any] = {
         "eval_max_rows_per_source": 200,
         "eval_max_scan_rows": 200000,      # streaming eval: max rows scanned
         "perm_eval_rows": 64,
-        "render": {"max_len": 2048, "cand_max_tokens": 128, "state_max_tokens": 1024,
-                   "instr_max_tokens": 256, "max_candidates": 64, "min_state_tokens": 64,
+        "render": {"max_len": 8192, "cand_max_tokens": 256, "state_max_tokens": 6144,
+                   "instr_max_tokens": 512, "max_candidates": 64, "min_state_tokens": 64,
                    "state_truncate": "middle"},
-        "batch": {"max_tokens_per_batch": 4096, "max_batch_size": 16, "bucket_size": 128},
+        "batch": {"max_tokens_per_batch": 8192, "max_batch_size": 16, "bucket_size": 128},
         "num_workers": 2,
         "prefetch_factor": 4,
     },

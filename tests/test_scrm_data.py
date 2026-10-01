@@ -58,23 +58,26 @@ def test_parse_row_drops_untrainable():
     assert parse_row(row) is None
 
 
-def test_collator_one_row_per_graded_option_read_at_end_of_turn(tok):
+def test_collator_shared_prefix_and_per_option_suffixes(tok):
     r = Renderer(tok, {"max_len": 512})
     items = [r.assemble(r.tokenize(mk_example(n)), np.random.default_rng(i), True) for i, n in enumerate([5, 9, 3])]
     b = collate(items, r.pad_id)
-    S = sum(len(i.seqs) for i in items)
-    assert b["input_ids"].shape[0] == S == 17 and b["read_pos"].shape == (S,)
-    for row in range(S):
-        assert b["input_ids"][row, b["read_pos"][row]] == r.chat_suffix[-1]             # "\n" after "assistant"
-        assert b["attention_mask"][row, : b["read_pos"][row] + 1].all()
-        assert not b["attention_mask"][row, b["read_pos"][row] + 1:].any()
-    assert sorted(zip(b["seq_b"].tolist(), b["seq_slot"].tolist())) == \
-        [(bi, k) for bi, it in enumerate(items) for k in range(len(it.seqs))]
+    assert len(b["sets"]) == 3
+    for it, st in zip(items, b["sets"]):
+        n = len(it.suffixes)
+        assert st["suffix"].shape[0] == n and torch.equal(st["prefix"], torch.from_numpy(it.prefix))
+        for k in range(n):
+            rp = int(st["read_pos"][k])
+            assert st["suffix"][k, rp] == r.chat_suffix[-1]                       # "\n" after "assistant"
+            assert st["suffix_mask"][k, : rp + 1].all() and not st["suffix_mask"][k, rp + 1:].any()
+            full = torch.cat([st["prefix"], st["suffix"][k, : rp + 1]]).numpy()
+            assert np.array_equal(full, it.seqs[k])                               # prefix + suffix == full row
     B, N = b["candidate_mask"].shape
-    assert (B, N) == (3, 9) and b["candidate_mask"].sum() == S
+    assert (B, N) == (3, 9) and b["candidate_mask"].sum() == 17
     assert (b["tiers"][~b["candidate_mask"]] == -1).all() and (b["tiers"][b["candidate_mask"]] >= 0).all()
     assert b["pair_mask"].shape == (3, N, N)
     assert (b["pair_mask"][~b["candidate_mask"]]).sum() == 0
+    assert b["n_tokens"] == sum(len(i.prefix) + sum(len(x) for x in i.suffixes) for i in items)
 
 
 def test_truncation_budget_and_tier0(tok):
@@ -128,7 +131,7 @@ def test_train_loader_batches_respect_budget(synth, tok):
     loader, stream = make_train_loader(cfg, r, 0)
     n = 0
     for b in loader:
-        assert b["input_ids"].numel() <= 600 or b["candidate_mask"].size(0) == 1
+        assert b["n_padded_tokens"] <= 600 or b["candidate_mask"].size(0) == 1
         assert b["candidate_mask"].size(0) <= 6 and b["pair_mask"].flatten(1).any(1).all()
         n += 1
         if n >= 8:

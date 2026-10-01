@@ -61,27 +61,40 @@ class SCRM(nn.Module):
         with ctx:
             return self.backbone(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
 
-    def forward(self, input_ids, attention_mask, read_pos, seq_b, seq_slot, candidate_mask, max_tokens=None):
-        """input_ids [S, L]: one row per graded option (shared prompt listing all options + that option as the
-        assistant response). The end-of-turn hidden state of each row is that option's embedding; the set encoder
-        then scores the options of each set jointly. Returns rewards [B, N] (0 at padded slots).
-        max_tokens: optional cap on padded tokens per backbone call (rows are processed in chunks)."""
-        S, L = input_ids.shape
-        step = S if not max_tokens else max(1, int(max_tokens) // max(L, 1))
+    def embed_set(self, st: dict, max_tokens=None) -> torch.Tensor:
+        """One decision set -> [n_graded, d]: hidden state at the last token of each per-option sequence."""
+        if self.cfg.get("prefix_cache", True):
+            from .prefix_cache import encode_shared_prefix
+            ctx = contextlib.nullcontext() if self.backbone_trainable else torch.no_grad()
+            with ctx:
+                return encode_shared_prefix(self.backbone, st["prefix"], st["suffix"], st["suffix_mask"], st["read_pos"],
+                                            max_tokens=max_tokens)
+        # reference path: n full sequences (prefix re-encoded per option)
+        P = st["prefix"].numel()
+        n, S = st["suffix"].shape
+        ids = torch.cat([st["prefix"][None].expand(n, P), st["suffix"]], 1)
+        am = torch.cat([torch.ones(n, P, dtype=st["suffix_mask"].dtype, device=ids.device), st["suffix_mask"]], 1)
+        step = n if not max_tokens else max(1, int(max_tokens) // (P + S))
         outs = []
-        for a in range(0, S, step):
-            h = self.encode(input_ids[a:a + step], attention_mask[a:a + step])
-            outs.append(h[torch.arange(h.size(0), device=h.device), read_pos[a:a + step]])
-        e = torch.cat(outs, 0)
+        for a in range(0, n, step):
+            h = self.encode(ids[a:a + step], am[a:a + step])
+            outs.append(h[torch.arange(h.size(0), device=h.device), P + st["read_pos"][a:a + step]])
+        return torch.cat(outs, 0)
+
+    def forward(self, sets: list, candidate_mask: torch.Tensor, max_tokens=None) -> torch.Tensor:
+        """sets[b]: shared prefix + per-option suffixes of decision set b (see collator). Each graded option's
+        embedding is the hidden state at the end of its sequence (assistant header); the set encoder then scores the
+        options of each set jointly. Returns rewards [B, N] (0 at padded slots)."""
         B, N = candidate_mask.shape
-        E = e.new_zeros(B, N, e.size(-1))
-        E = E.index_put((seq_b, seq_slot), e)
+        rows = [self.embed_set(st, max_tokens) for st in sets]
+        E = rows[0].new_zeros(B, N, rows[0].size(-1))
+        for b, e in enumerate(rows):
+            E[b, :e.size(0)] = e
         return self.set_encoder(E, candidate_mask)
 
     def score(self, b: dict, max_tokens=None):
         """Forward on a collated batch dict."""
-        return self(b["input_ids"], b["attention_mask"], b["read_pos"], b["seq_b"], b["seq_slot"],
-                    b["candidate_mask"], max_tokens=max_tokens)
+        return self(b["sets"], b["candidate_mask"], max_tokens=max_tokens)
 
     # ----- parameter groups / persistence -----
     def head_state_dict(self) -> dict:
@@ -189,7 +202,10 @@ def _load_backbone(mcfg: dict, device: torch.device, tokenizer_len: int):
         from .tiny import make_tiny_backbone
         return make_tiny_backbone(mcfg["tiny"], 512, dtype=torch.float32).to(device)
     _apply_liger(mcfg, device)
-    kw: dict[str, Any] = {"attn_implementation": _resolve_attn(mcfg["attn_implementation"], device)}
+    impl = mcfg["attn_implementation"]
+    if impl == "auto" and mcfg.get("prefix_cache", True):
+        impl = "sdpa"      # the shared-prefix suffix pass needs explicit 4D masks (flash-attn-2 takes none)
+    kw: dict[str, Any] = {"attn_implementation": _resolve_attn(impl, device)}
     kw["dtype" if int(transformers.__version__.split(".")[0]) >= 5 else "torch_dtype"] = dtype
     if mcfg.get("quantize_4bit"):
         from transformers import BitsAndBytesConfig
@@ -226,6 +242,8 @@ def build_scrm(mcfg: dict, device: torch.device | str = "cpu", tokenizer=None, a
     if mcfg["gradient_checkpointing"] and not freeze:
         backbone.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         backbone.config.use_cache = False
+        from .prefix_cache import enable_cache_under_checkpointing
+        enable_cache_under_checkpointing(backbone)     # our prefix caches are side-effect free
     backbone_trainable = False
     if lora["enabled"] and not freeze:
         from peft import LoraConfig, get_peft_model, PeftModel

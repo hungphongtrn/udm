@@ -87,29 +87,38 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
 
 ## Memory: 24 GB vs 40 GB
 
-Cost note: a set with n graded options costs n rows of (prompt + response) tokens, i.e. about n x the single-sequence cost.
-`data.render.max_graded` (8 on 24 GB, 12 on 40 GB) bounds this in training; `data.batch.max_tokens_per_batch` is the padded
-token budget per backbone call (a set bigger than that is run in row chunks, so it never OOMs on one huge set). Eval grades
-every option and is chunked the same way. A future speed-up is to encode the shared prompt once and reuse its cache
-(KV + Gated DeltaNet state) for every graded option.
+Context: `data.render.max_len` is the per-sequence context (prompt + graded option): **8192** on 24 GB, **16384** on
+40 GB (state up to 6k / 12k tokens).
+
+Shared-prompt KV cache (`model.prefix_cache: true`, default; `src/scrm/prefix_cache.py`): all graded options of a set
+share the prompt up to "Grade this choice: ". It is encoded once; its per-layer states (K/V after RoPE for the
+full-attention layers, last conv inputs + final recurrent state for the Gated DeltaNet layers) are then reused by every
+graded option, whose short suffixes run as one batch. A set costs ~ prompt + n_graded x suffix tokens instead of
+n_graded x prompt. It is exact (tested against re-encoding every full sequence, forward and LoRA gradients, with
+gradient checkpointing) and trains end to end: gradients from every option flow back into the shared prompt. HF's own
+cache classes update buffers in place and are dropped under gradient checkpointing, so two small side-effect-free cache
+objects are used instead. The suffix pass needs explicit 4D masks, so full attention uses SDPA (`attn_implementation:
+auto` picks it). `data.render.max_graded` (8 on 24 GB, 12 on 40 GB) bounds options graded per set in training;
+`data.batch.max_tokens_per_batch` is the token budget per micro-batch (suffix rows are chunked to fit it).
 
 The Qwen3.5-4B text decoder has 4.21B params (8.4 GB in bf16). LoRA r=64 all-linear = ~130M params: fp32 weights + grads + Adam
 = ~2 GB. Gradient checkpointing keeps ~0.16 MB/token of layer inputs (32 layers x 2560 x bf16) plus one layer of
-recompute activations. Hence at `max_tokens_per_batch=4096` (padded tokens per micro-batch) the estimated peak is
-roughly 14-17 GB (not measured on a GPU in this repo's CI; sdpa/flash-attn does not materialise attention matrices).
+recompute activations (8k tokens: ~1.3 GB saved inputs + a few hundred MB per recomputed layer). With an 8k-token
+prompt per micro-batch the estimated peak is roughly 16-20 GB (NOT measured on a GPU; SDPA does not materialise
+attention matrices).
 
 | config | max_len | tokens / micro-batch | est. peak | notes |
 |---|---|---|---|---|
-| `scrm_qwen3_5_4b_24gb.yaml` | 2048 | 4096 | ~14-17 GB | bf16 base + LoRA |
-| same + `model.quantize_4bit=true` | 2048 | 4096 | ~9-11 GB | QLoRA (nf4), a bit slower, needs bitsandbytes |
-| `scrm_qwen3_5_4b_40gb.yaml` | 4096 | 8192 | ~26-32 GB | |
-| `ablation_frozen.yaml` | 2048 | 16384 | <14 GB | no grads through backbone |
+| `scrm_qwen3_5_4b_24gb.yaml` | 8192 | 8192 | ~16-20 GB | bf16 base + LoRA, prefix cache |
+| same + `model.quantize_4bit=true` | 8192 | 8192 | ~11-14 GB | QLoRA (nf4), a bit slower, needs bitsandbytes |
+| `scrm_qwen3_5_4b_40gb.yaml` | 16384 | 16384 | ~26-34 GB | |
+| `ablation_frozen.yaml` | 8192 | see config | <16 GB | no grads through backbone |
 
 Knobs if you hit OOM: lower `data.batch.max_tokens_per_batch` (micro-batch) and raise `train.grad_accum`; lower
 `data.render.max_len` / `cand_max_tokens`; `model.quantize_4bit=true`. Batches are token-budgeted (examples sorted by length within a
 `bucket_size` pool), so micro-batch example counts vary; the loss is normalised by the number of examples with a trainable pair
 over the whole accumulation window, so this does not bias the gradient. Install flash-attn (`setup.sh --flash-attn`) for
-extra speed (`model.attn_implementation=auto` picks it up).
+extra speed only with `model.prefix_cache=false` (the prefix-cache suffix pass needs SDPA's explicit masks).
 
 ## Data: filters, mixing, truncation
 
@@ -143,7 +152,7 @@ data:
   other_weight: 0.4
 ```
 
-Rendering/truncation (`data.render`): `max_len` total tokens (2048 for 24 GB, 4096 for 40 GB); `instr_max_tokens`,
+Rendering/truncation (`data.render`): `max_len` tokens per sequence = prompt + graded option (8192 for 24 GB, 16384 for 40 GB); `instr_max_tokens`,
 `cand_max_tokens` (head-truncated per candidate), `state_max_tokens`, `state_truncate: middle|left|right` (middle keeps head+tail
 and inserts `...`), `min_state_tokens`. If the candidates do not fit, unprotected candidates are dropped first (all tier-0 items
 and one item per other tier are protected), then per-candidate tokens shrink; examples with no trainable pair left are dropped.

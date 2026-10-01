@@ -1,6 +1,6 @@
 # SCRM, Qwen3.5-4B (text decoder only) + LoRA r=64, single 24 GB GPU (bf16 base, grad checkpointing, no LM head).
-# Expected peak ~14-17 GB at 4096 padded tokens / micro-batch. If you still OOM: model.quantize_4bit=true
-# (QLoRA, ~9-11 GB) or data.batch.max_tokens_per_batch=2048.
+# Expected peak ~16-20 GB with an 8k-token prompt per micro-batch (not measured). If you still OOM: model.quantize_4bit=true
+# (QLoRA) or data.render.max_len=4096.
 seed: 1234
 output_dir: outputs/scrm_qwen3_5_4b_24gb
 model:
@@ -8,6 +8,7 @@ model:
   dtype: bfloat16
   attn_implementation: auto      # flash_attention_2 if installed, else sdpa
   gradient_checkpointing: true
+  prefix_cache: true             # encode the shared prompt once per set, reuse its states for each graded option
   liger_kernel: true             # Liger RMSNorm + SwiGLU (HF integration, CUDA only)
   quantize_4bit: false           # set true for QLoRA (24 GB safety margin)
   lora: {enabled: true, r: 64, alpha: 16, dropout: 0.05, use_rslora: true, target_modules: all-linear}  # scale 16/sqrt(64)=2
@@ -29,12 +30,14 @@ data:
   other_weight: 0.05
   eval_max_rows: 2000
   eval_max_rows_per_source: 200
-  # One row per GRADED option (user turn lists all shown options, then "Grade this choice: Option k: ..."), so a set costs
-  # max_graded x row length tokens. max_len is per row. Eval / rank() grade every shown option.
-  render: {max_len: 2048, cand_max_tokens: 128, state_max_tokens: 1536, instr_max_tokens: 256, max_candidates: 64,
+  # One sequence per GRADED option: "{state}\n\n{instruction}\n\nOptions:\n...\n\nGrade this choice: Option k: ..."
+  # ending at the assistant header. The shared prompt is encoded ONCE per set (model.prefix_cache) and its states
+  # are reused by every graded option, so a set costs ~ prompt + max_graded x (short option suffix) tokens.
+  # max_len is the per-sequence context (prompt + graded option). Eval / rank() grade every shown option.
+  render: {max_len: 8192, cand_max_tokens: 256, state_max_tokens: 6144, instr_max_tokens: 512, max_candidates: 64,
            max_graded: 8}
-  # padded tokens per backbone call (sets larger than this are run in row chunks)
-  batch: {max_tokens_per_batch: 4096, max_batch_size: 16, bucket_size: 256}
+  # token budget per micro-batch (sets sorted by length; one long set may exceed it alone)
+  batch: {max_tokens_per_batch: 8192, max_batch_size: 16, bucket_size: 256}
   num_workers: 3
 train:
   max_steps: 20000

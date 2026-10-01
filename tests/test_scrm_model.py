@@ -34,20 +34,29 @@ def test_no_set_layers_ablation_is_per_candidate():
     assert torch.allclose(enc(E, m)[:, :2], enc(E[:, :2], m[:, :2]), atol=1e-6)
 
 
+def _sets(n_list, P=11, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    sets = []
+    for n in n_list:
+        lens = [3 + (k * 2) % 5 for k in range(n)]
+        S = max(lens)
+        suf = torch.zeros(n, S, dtype=torch.long); sm = torch.zeros(n, S, dtype=torch.long)
+        for k, l in enumerate(lens):
+            suf[k, :l] = torch.randint(0, 300, (l,), generator=g); sm[k, :l] = 1
+        sets.append({"prefix": torch.randint(0, 300, (P,), generator=g), "suffix": suf, "suffix_mask": sm,
+                     "read_pos": sm.sum(1) - 1})
+    cm = torch.zeros(len(n_list), max(n_list), dtype=torch.bool)
+    for b, n in enumerate(n_list):
+        cm[b, :n] = True
+    return sets, cm
+
+
 def test_full_model_forward_no_new_tokens():
     from scrm.tiny import make_tiny_tokenizer
     model, tok = build_scrm(TINY, "cpu")
     assert len(tok) == len(make_tiny_tokenizer())                        # no tokens added
-    S, L = 3, 12                                                         # 3 rows: set 0 grades 2 options, set 1 grades 1
-    x = torch.randint(0, 300, (S, L))
-    am = torch.ones(S, L, dtype=torch.long); am[2, 9:] = 0
-    read = torch.tensor([11, 11, 8]); sb = torch.tensor([0, 0, 1]); sl = torch.tensor([0, 1, 0])
-    cm = torch.tensor([[1, 1], [1, 0]], dtype=torch.bool)
-    model.eval()
-    with torch.no_grad():                                                # chunked backbone calls == one call
-        assert torch.allclose(model(x, am, read, sb, sl, cm), model(x, am, read, sb, sl, cm, max_tokens=12), atol=1e-5)
-    model.train()
-    r = model(x, am, read, sb, sl, cm)
+    sets, cm = _sets([2, 1])
+    r = model(sets, cm)
     assert r.shape == (2, 2) and r[1, 1] == 0 and r.dtype == torch.float32
     # trainable: lora + head, but not base weights
     names = [n for n, p in model.named_parameters() if p.requires_grad]
@@ -57,13 +66,34 @@ def test_full_model_forward_no_new_tokens():
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for n, p in model.named_parameters() if "lora_" in n)
 
 
+def test_prefix_cache_matches_full_sequences_forward_and_grad():
+    """Shared-prefix encoding (prompt encoded once, states reused per option) == encoding every full row,
+    with gradient checkpointing on, in train mode (no dropout)."""
+    cfg = dict(TINY, set_dropout=0.0)
+    model, _ = build_scrm(cfg, "cpu")
+    model.train()
+    sets, cm = _sets([4, 2], P=37)
+
+    def run(cache):
+        model.cfg["prefix_cache"] = cache
+        model.zero_grad()
+        r = model(sets, cm, max_tokens=24)                                # also exercises suffix-row chunking
+        (r.square().sum()).backward()
+        return r.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+
+    r_ref, g_ref = run(False)
+    r_pc, g_pc = run(True)
+    assert torch.allclose(r_ref, r_pc, atol=1e-5)
+    assert g_ref.keys() == g_pc.keys() and any("lora_" in n for n in g_pc)
+    for n in g_ref:   # gate params of the delta rule accumulate a little fp32 noise; everything else is ~exact
+        assert (g_ref[n] - g_pc[n]).abs().max() <= 2e-2 * g_ref[n].abs().max() + 1e-6, n
+
+
 def test_frozen_backbone_has_no_backbone_grads():
     cfg = dict(TINY, freeze_backbone=True)
     model, tok = build_scrm(cfg, "cpu")
     assert not any(p.requires_grad for p in model.backbone.parameters())
-    x = torch.randint(0, 300, (1, 6))
-    x = torch.randint(0, 300, (2, 6))
-    r = model(x, torch.ones(2, 6, dtype=torch.long), torch.tensor([5, 5]), torch.tensor([0, 0]), torch.tensor([0, 1]),
-              torch.ones(1, 2, dtype=torch.bool))
+    sets, cm = _sets([2])
+    r = model(sets, cm)
     r.sum().backward()
     assert model.set_encoder.proj.weight.grad is not None

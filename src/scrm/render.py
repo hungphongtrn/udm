@@ -120,7 +120,7 @@ def parse_row(row: dict, use_candidate_rows: bool = True) -> Example | None:
 
 # ----------------------------------------------------------------------------- tokenisation / assembly
 
-DEFAULT_RENDER = {"max_len": 2048, "cand_max_tokens": 128, "state_max_tokens": 1024, "instr_max_tokens": 256,
+DEFAULT_RENDER = {"max_len": 8192, "cand_max_tokens": 256, "state_max_tokens": 6144, "instr_max_tokens": 512,
                   "max_candidates": 64, "min_state_tokens": 64, "state_truncate": "middle",
                   # wrap the sequence as one user turn of the tokenizer's chat template and end right after
                   # the assistant header ("<|im_start|>assistant\n"; any <think> the template appends is cut)
@@ -165,8 +165,10 @@ class TokExample:
 
 @dataclass
 class Item:
-    """One decision set = one sequence per graded option (same prompt listing all options, different graded option)."""
-    seqs: list                 # list[np.ndarray] token ids, one per graded slot
+    """One decision set = one sequence per graded option: a shared prefix (state, instruction, all options,
+    "Grade this choice: ") + a per-option suffix ("Option k: {text}" + end of user turn + assistant header)."""
+    prefix: np.ndarray         # shared token ids
+    suffixes: list             # list[np.ndarray], one per graded slot
     tiers: np.ndarray          # tier per graded slot
     order: np.ndarray          # tokex candidate index for each graded slot (display order)
     choice_ids: list[str]
@@ -179,13 +181,14 @@ class Item:
     graded: list = field(default_factory=list)   # graded candidates (tokex indices, sorted)
 
     @property
-    def read_pos(self) -> np.ndarray:   # last token = end of the assistant header
-        return np.asarray([len(x) - 1 for x in self.seqs], dtype=np.int64)
+    def seqs(self) -> list:
+        """Full per-option sequences (prefix + suffix)."""
+        return [np.concatenate([self.prefix, x]) for x in self.suffixes]
 
     @property
     def n_tokens(self) -> int:
-        """Padded token cost of this item alone (n_seqs x longest seq)."""
-        return len(self.seqs) * max(len(x) for x in self.seqs)
+        """Token cost with the shared prefix encoded once: prefix + n_graded x longest suffix."""
+        return len(self.prefix) + len(self.suffixes) * max(len(x) for x in self.suffixes)
 
 
 def subsample_indices(tiers: np.ndarray, max_n: int, rng: np.random.Generator) -> np.ndarray:
@@ -361,16 +364,17 @@ class Renderer:
             prompt += state + self.nl2
         prompt += t.instr_ids + self.header
         gset = set(graded)
-        order, seqs = [], []
+        order = []
         for k, i in enumerate(display, 1):
             prompt += self.label(k) + cand[i] + [self.option_end_id]
         prompt += self.grade
+        sufs = []
         for k, i in enumerate(display, 1):
             if i in gset:
                 order.append(i)
-                seqs.append(np.asarray(prompt + self.label(k) + cand[i] + self.chat_suffix, dtype=np.int64))
+                sufs.append(np.asarray(self.label(k) + cand[i] + self.chat_suffix, dtype=np.int64))
         order_a = np.asarray(order)
-        it = Item(seqs, tiers[order_a].astype(np.int64), order_a, [t.ex.choice_ids[i] for i in order], t.ex.family,
+        it = Item(np.asarray(prompt, dtype=np.int64), sufs, tiers[order_a].astype(np.int64), order_a, [t.ex.choice_ids[i] for i in order], t.ex.family,
                   t.ex.source_id, t.ex.decision_set_id, tok=t, cap=cap)
         it.kept = kept_final
         it.graded = sorted(graded)

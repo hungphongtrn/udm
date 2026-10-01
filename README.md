@@ -7,6 +7,8 @@ A reward model that scores every candidate **in the context of the whole candida
   option there is one sequence: the user turn shows the state, the instruction, **all** options (`Option 1: …`,
   `Option 2: …`) and then `Grade this choice: Option k: …`; the sequence stops at the assistant header
   (`<|im_end|>\n<|im_start|>assistant\n`). The LLM sees every option but grades one.
+- The prompt shared by all options of a set is encoded once and its KV / linear-attention state is reused for every graded
+  option (exact, gradients flow through it). Context length: 8k tokens (24 GB config), 16k (40 GB).
 - The hidden state of that last token is the option's embedding; it is projected 2560 → 768.
 - A 2-layer bidirectional Set Transformer (no positional embeddings) runs over those vectors.
 - An MLP head gives one scalar reward per candidate.
