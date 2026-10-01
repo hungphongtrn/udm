@@ -10,7 +10,7 @@ model:
   gradient_checkpointing: true
   liger_kernel: true             # Liger RMSNorm + SwiGLU (HF integration, CUDA only)
   quantize_4bit: false           # set true for QLoRA (24 GB safety margin)
-  lora: {enabled: true, r: 64, alpha: 128, dropout: 0.05}
+  lora: {enabled: true, r: 64, alpha: 16, dropout: 0.05, use_rslora: true, target_modules: all-linear}  # scale 16/sqrt(64)=2
   d_set: 768
   set_layers: 2
 loss: {tau: 1.0, margin_alpha: 0.0, w_bt: 1.0}

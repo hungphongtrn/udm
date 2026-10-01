@@ -224,3 +224,4 @@ __marimo__/
 wandb/
 *.parquet
 /data_cache/
+/build/

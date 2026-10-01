@@ -247,7 +247,8 @@ def build_scrm(mcfg: dict, device: torch.device | str = "cpu", tokenizer=None, a
             backbone = PeftModel.from_pretrained(backbone, adapter_dir, is_trainable=True)
         else:
             lc = LoraConfig(r=lora["r"], lora_alpha=lora["alpha"], lora_dropout=lora["dropout"],
-                            target_modules=lora["target_modules"], bias="none")
+                            target_modules=lora["target_modules"], bias="none",
+                            use_rslora=lora.get("use_rslora", True))
             backbone = get_peft_model(backbone, lc)
         backbone_trainable = True
     model = SCRM(backbone, hidden, [sp_map[t] for t in SPECIAL_TOKENS], init, mcfg,

@@ -23,11 +23,10 @@ DEFAULTS: dict[str, Any] = {
         "liger_kernel": True,              # Liger RMSNorm + SwiGLU via liger_kernel.transformers (CUDA only)
         "freeze_backbone": False,          # frozen-backbone ablation (no LoRA, no grads through backbone)
         "quantize_4bit": False,            # QLoRA (bitsandbytes nf4)
-        "lora": {"enabled": True, "r": 64, "alpha": 128, "dropout": 0.05,
-                 # full-attention layers + Gated DeltaNet (linear-attention) layers + MLP
-                 "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
-                                    "in_proj_qkv", "in_proj_z", "out_proj",
-                                    "gate_proj", "up_proj", "down_proj"]},
+        # rsLoRA: scaling = alpha / sqrt(r) (r=64, alpha=16 -> 2.0). "all-linear" = every nn.Linear in the
+        # text decoder: full-attention q/k/v/o, Gated DeltaNet in_proj_qkv/z/a/b + out_proj, MLP gate/up/down.
+        "lora": {"enabled": True, "r": 64, "alpha": 16, "dropout": 0.05, "use_rslora": True,
+                 "target_modules": "all-linear"},
         "train_special_tokens": "auto",    # auto -> True unless freeze_backbone
         "input_norm": True,                # LayerNorm(d) before the d->d_set projection
         "d_set": 768,

@@ -42,7 +42,8 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
   `language_model`). It is loaded with `AutoModel.from_pretrained`, the vision tower (0.33B) is deleted and only the
   `Qwen3_5TextModel` (4.21B, hidden 2560, 32 layers) is kept. Layers are hybrid: 3 of every 4 are Gated DeltaNet
   (linear attention, projections `in_proj_qkv`, `in_proj_z`, `out_proj`), every 4th is gated full attention
-  (`q/k/v/o_proj`). LoRA targets both kinds plus the MLP (r=64: ~122M params). Install `flash-linear-attention`
+  (`q/k/v/o_proj`). LoRA uses `target_modules: all-linear` (every `nn.Linear` of the decoder: both layer kinds incl.
+  `in_proj_a/b`, plus the MLP) with **rsLoRA** (`use_rslora: true`, scaling = alpha/sqrt(r); r=64, alpha=16 -> 2.0). Install `flash-linear-attention`
   (in `requirements-train.txt`) and optionally `causal-conv1d` (`setup.sh --flash-attn`); without them transformers
   falls back to a slow, memory-hungry torch implementation of the delta rule. Text-only inputs use plain 1D positions.
 * **Liger kernels.** `model.liger_kernel=true` (default) applies Liger through its HF integration
@@ -65,7 +66,7 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
 
 ## Memory: 24 GB vs 40 GB
 
-The Qwen3.5-4B text decoder has 4.21B params (8.4 GB in bf16). LoRA r=64 = 122M params: fp32 weights + grads + Adam
+The Qwen3.5-4B text decoder has 4.21B params (8.4 GB in bf16). LoRA r=64 all-linear = ~130M params: fp32 weights + grads + Adam
 = ~2 GB. Gradient checkpointing keeps ~0.16 MB/token of layer inputs (32 layers x 2560 x bf16) plus one layer of
 recompute activations. Hence at `max_tokens_per_batch=4096` (padded tokens per micro-batch) the estimated peak is
 roughly 14-17 GB (not measured on a GPU in this repo's CI; sdpa/flash-attn does not materialise attention matrices).
