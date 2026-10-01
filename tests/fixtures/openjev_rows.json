@@ -1,0 +1,915 @@
+[
+ {
+  "config": "amount-extraction-control-v1",
+  "raw_split": "train",
+  "raw": {
+   "id": "amount-extraction-control-v1:1:choice",
+   "group_id": "amount-extraction-control-v1:g1",
+   "split": "train",
+   "source": "amount-extraction-control-v1",
+   "kind": "choice",
+   "question": "For the actual selected complete amount, identify a supported currency; otherwise review.",
+   "options": [
+    "USD: US dollars under the supplied policy",
+    "EUR: Euros under the supplied policy",
+    "GBP: Pounds sterling under the supplied policy",
+    "review: Currency unsupported, unknown, or selected amount partial"
+   ],
+   "target": [
+    0.0,
+    1.0,
+    0.0,
+    0.0
+   ],
+   "state_json": "{\"policy\": {\"currency_rule\": \"EUR for the euro sign\"}, \"document\": \"Total: \\u20ac120.00\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"amount-extraction-control-v1:1:choice\", \"group_id\": \"amount-extraction-control-v1:g1\", \"split\": \"train\", \"source\": \"amount-extraction-control-v1\", \"kind\": \"choice\", \"question\": \"For the actual selected complete amount, identify a supported currency; otherwise review.\", \"options\": [\"USD: US dollars under the supplied policy\", \"EUR: Euros under the supplied policy\", \"GBP: Pounds sterling under the supplied policy\", \"review: Currency unsupported, unknown, or selected amount partial\"], \"target\": [0.0, 1.0, 0.0, 0.0], \"state\": {\"policy\": {\"currency_rule\": \"EUR for the euro sign\"}, \"document\": \"Total: \\u20ac120.00\"}}",
+   "original_line_number": 1
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "source_dataset_label",
+   "tiers": [
+    [
+     "EUR: Euros under the supplied policy"
+    ],
+    [
+     "USD: US dollars under the supplied policy",
+     "GBP: Pounds sterling under the supplied policy",
+     "review: Currency unsupported, unknown, or selected amount partial"
+    ]
+   ],
+   "probs": null
+  }
+ },
+ {
+  "config": "amount-extraction-control-v1",
+  "raw_split": "calibration",
+  "raw": {
+   "id": "amount-extraction-control-v1:2:noul",
+   "group_id": "amount-extraction-control-v1:g2",
+   "split": "calibration",
+   "source": "amount-extraction-control-v1",
+   "kind": "noul",
+   "question": "Is the actual selected amount complete and valid?",
+   "options": [
+    "no",
+    "yes"
+   ],
+   "target": [
+    0.0,
+    1.0
+   ],
+   "state_json": "{\"policy\": {\"currency_rule\": \"x\"}, \"document\": \"Total: 12\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"amount-extraction-control-v1:2:noul\", \"group_id\": \"amount-extraction-control-v1:g2\", \"split\": \"calibration\", \"source\": \"amount-extraction-control-v1\", \"kind\": \"noul\", \"question\": \"Is the actual selected amount complete and valid?\", \"options\": [\"no\", \"yes\"], \"target\": [0.0, 1.0], \"state\": {\"policy\": {\"currency_rule\": \"x\"}, \"document\": \"Total: 12\"}}",
+   "original_line_number": 2
+  },
+  "expect": {
+   "split": "validation",
+   "label_kind": "independent_labels_binary_tiers",
+   "tiers": [
+    [
+     "yes"
+    ],
+    [
+     "no"
+    ]
+   ],
+   "probs": {
+    "no": 0.0,
+    "yes": 1.0
+   }
+  }
+ },
+ {
+  "config": "citation-control-v1",
+  "raw_split": "ood",
+  "raw": {
+   "id": "citation-control-v1:3:choice",
+   "group_id": "citation-control-v1:g3",
+   "split": "ood",
+   "source": "citation-control-v1",
+   "kind": "choice",
+   "question": "Is the claim supported by the quote?",
+   "options": [
+    "supported: The quote supports the claim",
+    "contradicted: The quote contradicts the claim",
+    "insufficient: The quote neither supports nor contradicts"
+   ],
+   "target": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "state_json": "{\"document\": \"Policy A\", \"quote\": \"Refunds within 30 days\", \"claim\": \"Refunds in 60 days\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"citation-control-v1:3:choice\", \"group_id\": \"citation-control-v1:g3\", \"split\": \"ood\", \"source\": \"citation-control-v1\", \"kind\": \"choice\", \"question\": \"Is the claim supported by the quote?\", \"options\": [\"supported: The quote supports the claim\", \"contradicted: The quote contradicts the claim\", \"insufficient: The quote neither supports nor contradicts\"], \"target\": [0.0, 0.0, 1.0], \"state\": {\"document\": \"Policy A\", \"quote\": \"Refunds within 30 days\", \"claim\": \"Refunds in 60 days\"}}",
+   "original_line_number": 3
+  },
+  "expect": {
+   "split": "test",
+   "label_kind": "source_dataset_label",
+   "tiers": [
+    [
+     "insufficient: The quote neither supports nor contradicts"
+    ],
+    [
+     "supported: The quote supports the claim",
+     "contradicted: The quote contradicts the claim"
+    ]
+   ],
+   "probs": null
+  }
+ },
+ {
+  "config": "email-selection-control-v1",
+  "raw_split": "train",
+  "raw": {
+   "id": "email-selection-control-v1:4:choice",
+   "group_id": "email-selection-control-v1:g4",
+   "split": "train",
+   "source": "email-selection-control-v1",
+   "kind": "choice",
+   "question": "Which candidate is the sender's contact email?",
+   "options": [
+    "span_0: a@x.com",
+    "span_1: b@x.com",
+    "span_2: c@x.com",
+    "span_3: d@x.com",
+    "span_4: e@x.com",
+    "none: no candidate"
+   ],
+   "target": [
+    0,
+    0,
+    0,
+    1,
+    0,
+    0
+   ],
+   "state_json": "{\"text\": \"Contact d@x.com\", \"candidates\": [\"a\", \"b\", \"c\", \"d\", \"e\"]}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"email-selection-control-v1:4:choice\", \"group_id\": \"email-selection-control-v1:g4\", \"split\": \"train\", \"source\": \"email-selection-control-v1\", \"kind\": \"choice\", \"question\": \"Which candidate is the sender's contact email?\", \"options\": [\"span_0: a@x.com\", \"span_1: b@x.com\", \"span_2: c@x.com\", \"span_3: d@x.com\", \"span_4: e@x.com\", \"none: no candidate\"], \"target\": [0, 0, 0, 1, 0, 0], \"state\": {\"text\": \"Contact d@x.com\", \"candidates\": [\"a\", \"b\", \"c\", \"d\", \"e\"]}}",
+   "original_line_number": 4
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "source_dataset_label",
+   "tiers": [
+    [
+     "span_3: d@x.com"
+    ],
+    [
+     "span_0: a@x.com",
+     "span_1: b@x.com",
+     "span_2: c@x.com",
+     "span_4: e@x.com",
+     "none: no candidate"
+    ]
+   ],
+   "probs": null
+  }
+ },
+ {
+  "config": "phone-extraction-control-v1",
+  "raw_split": "validation",
+  "raw": {
+   "id": "phone-extraction-control-v1:5:choice",
+   "group_id": "phone-extraction-control-v1:g5",
+   "split": "validation",
+   "source": "phone-extraction-control-v1",
+   "kind": "choice",
+   "question": "Which candidate is the callback number?",
+   "options": [
+    "span_0: +1 555 0100",
+    "span_1: +1 555 0199",
+    "none: none"
+   ],
+   "target": [
+    0.5,
+    0.5,
+    0.0
+   ],
+   "state_json": "{\"text\": \"call +1 555 0100 or 0199\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"phone-extraction-control-v1:5:choice\", \"group_id\": \"phone-extraction-control-v1:g5\", \"split\": \"validation\", \"source\": \"phone-extraction-control-v1\", \"kind\": \"choice\", \"question\": \"Which candidate is the callback number?\", \"options\": [\"span_0: +1 555 0100\", \"span_1: +1 555 0199\", \"none: none\"], \"target\": [0.5, 0.5, 0.0], \"state\": {\"text\": \"call +1 555 0100 or 0199\"}}",
+   "original_line_number": 5
+  },
+  "expect": {
+   "split": "validation",
+   "label_kind": "soft_choice_distribution",
+   "tiers": [
+    [
+     "span_0: +1 555 0100",
+     "span_1: +1 555 0199"
+    ],
+    [
+     "none: none"
+    ]
+   ],
+   "probs": {
+    "span_0: +1 555 0100": 0.5,
+    "span_1: +1 555 0199": 0.5,
+    "none: none": 0.0
+   }
+  }
+ },
+ {
+  "config": "context-retention-control-v1",
+  "raw_split": "train",
+  "raw": {
+   "id": "context-retention-control-v1:6:noul",
+   "group_id": "context-retention-control-v1:g6",
+   "split": "train",
+   "source": "context-retention-control-v1",
+   "kind": "noul",
+   "question": "Keep this tool-call record under the policy?",
+   "options": [
+    "no",
+    "yes"
+   ],
+   "target": [
+    0.75,
+    0.25
+   ],
+   "state_json": "{\"goal\": \"g\", \"history\": [{\"call\": \"read\", \"pinned\": false}]}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"context-retention-control-v1:6:noul\", \"group_id\": \"context-retention-control-v1:g6\", \"split\": \"train\", \"source\": \"context-retention-control-v1\", \"kind\": \"noul\", \"question\": \"Keep this tool-call record under the policy?\", \"options\": [\"no\", \"yes\"], \"target\": [0.75, 0.25], \"state\": {\"goal\": \"g\", \"history\": [{\"call\": \"read\", \"pinned\": false}]}}",
+   "original_line_number": 6
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "independent_labels_binary_tiers",
+   "tiers": [
+    [
+     "no"
+    ],
+    [
+     "yes"
+    ]
+   ],
+   "probs": {
+    "no": 0.75,
+    "yes": 0.25
+   }
+  }
+ },
+ {
+  "config": "sponsor-segment-control-v1",
+  "raw_split": "test",
+  "raw": {
+   "id": "sponsor-segment-control-v1:7:choice",
+   "group_id": "sponsor-segment-control-v1:g7",
+   "split": "test",
+   "source": "sponsor-segment-control-v1",
+   "kind": "choice",
+   "question": "Categorize the segment.",
+   "options": [
+    "sponsor: paid promotion",
+    "self_promo: creator promotion",
+    "intro: intro",
+    "outro: outro",
+    "recap: recap",
+    "content: main content",
+    "other: other"
+   ],
+   "target": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    1,
+    0
+   ],
+   "state_json": "{\"segment\": \"Today we look at gardening\", \"t0\": 12.5}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"sponsor-segment-control-v1:7:choice\", \"group_id\": \"sponsor-segment-control-v1:g7\", \"split\": \"test\", \"source\": \"sponsor-segment-control-v1\", \"kind\": \"choice\", \"question\": \"Categorize the segment.\", \"options\": [\"sponsor: paid promotion\", \"self_promo: creator promotion\", \"intro: intro\", \"outro: outro\", \"recap: recap\", \"content: main content\", \"other: other\"], \"target\": [0, 0, 0, 0, 0, 1, 0], \"state\": {\"segment\": \"Today we look at gardening\", \"t0\": 12.5}}",
+   "original_line_number": 7
+  },
+  "expect": {
+   "split": "test",
+   "label_kind": "source_dataset_label",
+   "tiers": [
+    [
+     "content: main content"
+    ],
+    [
+     "sponsor: paid promotion",
+     "self_promo: creator promotion",
+     "intro: intro",
+     "outro: outro",
+     "recap: recap",
+     "other: other"
+    ]
+   ],
+   "probs": null
+  }
+ },
+ {
+  "config": "silent-failure-control-v1",
+  "raw_split": "train",
+  "raw": {
+   "id": "silent-failure-control-v1:8:noul",
+   "group_id": "silent-failure-control-v1:g8",
+   "split": "train",
+   "source": "silent-failure-control-v1",
+   "kind": "noul",
+   "question": "Is the response body a silent failure?",
+   "options": [
+    "no",
+    "yes"
+   ],
+   "target": [
+    1.0,
+    0.0
+   ],
+   "state_json": "\"<html>Please sign in</html>\"",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"silent-failure-control-v1:8:noul\", \"group_id\": \"silent-failure-control-v1:g8\", \"split\": \"train\", \"source\": \"silent-failure-control-v1\", \"kind\": \"noul\", \"question\": \"Is the response body a silent failure?\", \"options\": [\"no\", \"yes\"], \"target\": [1.0, 0.0], \"state\": \"<html>Please sign in</html>\"}",
+   "original_line_number": 8
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "independent_labels_binary_tiers",
+   "tiers": [
+    [
+     "no"
+    ],
+    [
+     "yes"
+    ]
+   ],
+   "probs": {
+    "no": 1.0,
+    "yes": 0.0
+   }
+  }
+ },
+ {
+  "config": "ir-control-v1",
+  "raw_split": "train",
+  "raw": {
+   "id": "ir-control-v1:9:score",
+   "group_id": "ir-control-v1:g9",
+   "split": "train",
+   "source": "ir-control-v1",
+   "kind": "score",
+   "question": "How completely does this passage answer the query?",
+   "options": [
+    "0: About a different system.",
+    "1: About the requested system but no applicable current answer.",
+    "2: Current guidance gives one requested value.",
+    "3: Current guidance gives both requested values."
+   ],
+   "target": [
+    0.0,
+    0.0,
+    1.0,
+    0.0
+   ],
+   "state_json": "{\"passage\": \"System: Relay-1\\nStatus: current\", \"query\": \"retry ceiling\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"ir-control-v1:9:score\", \"group_id\": \"ir-control-v1:g9\", \"split\": \"train\", \"source\": \"ir-control-v1\", \"kind\": \"score\", \"question\": \"How completely does this passage answer the query?\", \"options\": [\"0: About a different system.\", \"1: About the requested system but no applicable current answer.\", \"2: Current guidance gives one requested value.\", \"3: Current guidance gives both requested values.\"], \"target\": [0.0, 0.0, 1.0, 0.0], \"state\": {\"passage\": \"System: Relay-1\\nStatus: current\", \"query\": \"retry ceiling\"}}",
+   "original_line_number": 9
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "ordinal_score_distance_tiers",
+   "tiers": [
+    [
+     "2: Current guidance gives one requested value."
+    ],
+    [
+     "1: About the requested system but no applicable current answer.",
+     "3: Current guidance gives both requested values."
+    ],
+    [
+     "0: About a different system."
+    ]
+   ],
+   "probs": {
+    "0: About a different system.": 0.0,
+    "1: About the requested system but no applicable current answer.": 0.0,
+    "2: Current guidance gives one requested value.": 1.0,
+    "3: Current guidance gives both requested values.": 0.0
+   }
+  }
+ },
+ {
+  "config": "ir-control-v1",
+  "raw_split": "train",
+  "raw": {
+   "id": "ir-control-v1:10:choice",
+   "group_id": "ir-control-v1:g10",
+   "split": "train",
+   "source": "ir-control-v1",
+   "kind": "choice",
+   "question": "Which passage best answers the query?",
+   "options": [
+    "A: Passage A",
+    "B: Passage B"
+   ],
+   "target": [
+    0.0,
+    1.0
+   ],
+   "state_json": "{\"passage_A\": \"a\", \"passage_B\": \"b\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"ir-control-v1:10:choice\", \"group_id\": \"ir-control-v1:g10\", \"split\": \"train\", \"source\": \"ir-control-v1\", \"kind\": \"choice\", \"question\": \"Which passage best answers the query?\", \"options\": [\"A: Passage A\", \"B: Passage B\"], \"target\": [0.0, 1.0], \"state\": {\"passage_A\": \"a\", \"passage_B\": \"b\"}}",
+   "original_line_number": 10
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "source_dataset_label",
+   "tiers": [
+    [
+     "B: Passage B"
+    ],
+    [
+     "A: Passage A"
+    ]
+   ],
+   "probs": null
+  }
+ },
+ {
+  "config": "mailroom-control-v1",
+  "raw_split": "train",
+  "raw": {
+   "id": "mailroom-control-v1:11:choice",
+   "group_id": "mailroom-control-v1:g11",
+   "split": "train",
+   "source": "mailroom-control-v1",
+   "kind": "choice",
+   "question": "What is this email doing to the reader?",
+   "options": [
+    "invoice: An issued bill",
+    "payment_confirmation: Confirmation of money paid",
+    "account_statement: Periodic statement",
+    "receipt: Proof of purchase",
+    "quote: Price quote",
+    "other: Other mail"
+   ],
+   "target": [
+    0,
+    0,
+    1,
+    0,
+    0,
+    0
+   ],
+   "state_json": "{\"email\": {\"subject\": \"Your statement\", \"body\": \"Activity attached\"}}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"mailroom-control-v1:11:choice\", \"group_id\": \"mailroom-control-v1:g11\", \"split\": \"train\", \"source\": \"mailroom-control-v1\", \"kind\": \"choice\", \"question\": \"What is this email doing to the reader?\", \"options\": [\"invoice: An issued bill\", \"payment_confirmation: Confirmation of money paid\", \"account_statement: Periodic statement\", \"receipt: Proof of purchase\", \"quote: Price quote\", \"other: Other mail\"], \"target\": [0, 0, 1, 0, 0, 0], \"state\": {\"email\": {\"subject\": \"Your statement\", \"body\": \"Activity attached\"}}}",
+   "original_line_number": 11
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "source_dataset_label",
+   "tiers": [
+    [
+     "account_statement: Periodic statement"
+    ],
+    [
+     "invoice: An issued bill",
+     "payment_confirmation: Confirmation of money paid",
+     "receipt: Proof of purchase",
+     "quote: Price quote",
+     "other: Other mail"
+    ]
+   ],
+   "probs": null
+  }
+ },
+ {
+  "config": "mailroom-control-v1",
+  "raw_split": "train",
+  "raw": {
+   "id": "mailroom-control-v1:12:noul",
+   "group_id": "mailroom-control-v1:g12",
+   "split": "train",
+   "source": "mailroom-control-v1",
+   "kind": "noul",
+   "question": "Is this a bill?",
+   "options": [
+    "no",
+    "yes"
+   ],
+   "target": [
+    0.0,
+    1.0
+   ],
+   "state_json": "{\"email\": {\"subject\": \"Invoice\", \"body\": \"Pay by Friday\"}}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"mailroom-control-v1:12:noul\", \"group_id\": \"mailroom-control-v1:g12\", \"split\": \"train\", \"source\": \"mailroom-control-v1\", \"kind\": \"noul\", \"question\": \"Is this a bill?\", \"options\": [\"no\", \"yes\"], \"target\": [0.0, 1.0], \"state\": {\"email\": {\"subject\": \"Invoice\", \"body\": \"Pay by Friday\"}}}",
+   "original_line_number": 12
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "independent_labels_binary_tiers",
+   "tiers": [
+    [
+     "yes"
+    ],
+    [
+     "no"
+    ]
+   ],
+   "probs": {
+    "no": 0.0,
+    "yes": 1.0
+   }
+  }
+ },
+ {
+  "config": "entity-alignment-control-v1",
+  "raw_split": "train",
+  "raw": {
+   "id": "entity-alignment-control-v1:13:score",
+   "group_id": "entity-alignment-control-v1:g13",
+   "split": "train",
+   "source": "entity-alignment-control-v1",
+   "kind": "score",
+   "question": "Apply the catalog policy to select different, review or same.",
+   "options": [
+    "Different entities; leave unlinked",
+    "Ambiguous evidence; curator review",
+    "Same entity; merge candidate"
+   ],
+   "target": [
+    0.0,
+    0.0,
+    1.0
+   ],
+   "state_json": "{\"left\": {\"name\": \"A\"}, \"right\": {\"name\": \"A\"}}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"entity-alignment-control-v1:13:score\", \"group_id\": \"entity-alignment-control-v1:g13\", \"split\": \"train\", \"source\": \"entity-alignment-control-v1\", \"kind\": \"score\", \"question\": \"Apply the catalog policy to select different, review or same.\", \"options\": [\"Different entities; leave unlinked\", \"Ambiguous evidence; curator review\", \"Same entity; merge candidate\"], \"target\": [0.0, 0.0, 1.0], \"state\": {\"left\": {\"name\": \"A\"}, \"right\": {\"name\": \"A\"}}}",
+   "original_line_number": 13
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "ordinal_score_distance_tiers",
+   "tiers": [
+    [
+     "Same entity; merge candidate"
+    ],
+    [
+     "Ambiguous evidence; curator review"
+    ],
+    [
+     "Different entities; leave unlinked"
+    ]
+   ],
+   "probs": {
+    "Different entities; leave unlinked": 0.0,
+    "Ambiguous evidence; curator review": 0.0,
+    "Same entity; merge candidate": 1.0
+   }
+  }
+ },
+ {
+  "config": "browser-drone-expansion-v1-redistributable",
+  "raw_split": "train",
+  "raw": {
+   "id": "browser-drone-expansion-v1-redistributable:14:score",
+   "group_id": "browser-drone-expansion-v1-redistributable:g14",
+   "split": "train",
+   "source": "painting-geometry-v1",
+   "kind": "score",
+   "question": "What is the HSL lightness of pixel x=0, y=0?",
+   "options": [
+    "Black, 0",
+    "Dark, 0.25",
+    "Middle lightness, 0.5",
+    "Light, 0.75",
+    "White, 1"
+   ],
+   "target": [
+    0.0,
+    0.0,
+    1.0,
+    0.0,
+    0.0
+   ],
+   "state_json": "{\"image_description\": \"Background is cyan.\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"browser-drone-expansion-v1-redistributable:14:score\", \"group_id\": \"browser-drone-expansion-v1-redistributable:g14\", \"split\": \"train\", \"source\": \"painting-geometry-v1\", \"kind\": \"score\", \"question\": \"What is the HSL lightness of pixel x=0, y=0?\", \"options\": [\"Black, 0\", \"Dark, 0.25\", \"Middle lightness, 0.5\", \"Light, 0.75\", \"White, 1\"], \"target\": [0.0, 0.0, 1.0, 0.0, 0.0], \"state\": {\"image_description\": \"Background is cyan.\"}}",
+   "original_line_number": 14
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "ordinal_score_distance_tiers",
+   "tiers": [
+    [
+     "Middle lightness, 0.5"
+    ],
+    [
+     "Dark, 0.25",
+     "Light, 0.75"
+    ],
+    [
+     "Black, 0",
+     "White, 1"
+    ]
+   ],
+   "probs": {
+    "Black, 0": 0.0,
+    "Dark, 0.25": 0.0,
+    "Middle lightness, 0.5": 1.0,
+    "Light, 0.75": 0.0,
+    "White, 1": 0.0
+   }
+  }
+ },
+ {
+  "config": "browser-drone-expansion-v1-redistributable",
+  "raw_split": "train",
+  "raw": {
+   "id": "browser-drone-expansion-v1-redistributable:15:choice",
+   "group_id": "browser-drone-expansion-v1-redistributable:g15",
+   "split": "train",
+   "source": "painting-geometry-v1",
+   "kind": "choice",
+   "question": "Which hue describes pixel x=0, y=0?",
+   "options": [
+    "neutral",
+    "red",
+    "orange",
+    "yellow",
+    "green",
+    "cyan",
+    "blue",
+    "purple",
+    "magenta"
+   ],
+   "target": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    1.0,
+    0,
+    0,
+    0
+   ],
+   "state_json": "{\"image_description\": \"Background is cyan.\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"browser-drone-expansion-v1-redistributable:15:choice\", \"group_id\": \"browser-drone-expansion-v1-redistributable:g15\", \"split\": \"train\", \"source\": \"painting-geometry-v1\", \"kind\": \"choice\", \"question\": \"Which hue describes pixel x=0, y=0?\", \"options\": [\"neutral\", \"red\", \"orange\", \"yellow\", \"green\", \"cyan\", \"blue\", \"purple\", \"magenta\"], \"target\": [0, 0, 0, 0, 0, 1.0, 0, 0, 0], \"state\": {\"image_description\": \"Background is cyan.\"}}",
+   "original_line_number": 15
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "source_dataset_label",
+   "tiers": [
+    [
+     "cyan"
+    ],
+    [
+     "neutral",
+     "red",
+     "orange",
+     "yellow",
+     "green",
+     "blue",
+     "purple",
+     "magenta"
+    ]
+   ],
+   "probs": null
+  }
+ },
+ {
+  "config": "browser-drone-expansion-v1-redistributable",
+  "raw_split": "train",
+  "raw": {
+   "id": "browser-drone-expansion-v1-redistributable:16:choice",
+   "group_id": "browser-drone-expansion-v1-redistributable:g16",
+   "split": "train",
+   "source": "tic_tac_toe-v1",
+   "kind": "choice",
+   "question": "Choose a legal square to maximize the current player's result.",
+   "options": [
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8"
+   ],
+   "target": [
+    0.5,
+    0.0,
+    0.5,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0
+   ],
+   "state_json": "{\"board\": [\"X..\", \"...\", \"...\"], \"current_player\": \"O\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"browser-drone-expansion-v1-redistributable:16:choice\", \"group_id\": \"browser-drone-expansion-v1-redistributable:g16\", \"split\": \"train\", \"source\": \"tic_tac_toe-v1\", \"kind\": \"choice\", \"question\": \"Choose a legal square to maximize the current player's result.\", \"options\": [\"0\", \"1\", \"2\", \"3\", \"4\", \"5\", \"6\", \"7\", \"8\"], \"target\": [0.5, 0.0, 0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], \"state\": {\"board\": [\"X..\", \"...\", \"...\"], \"current_player\": \"O\"}}",
+   "original_line_number": 16
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "soft_choice_distribution",
+   "tiers": [
+    [
+     "0",
+     "2"
+    ],
+    [
+     "1",
+     "3",
+     "4",
+     "5",
+     "6",
+     "7",
+     "8"
+    ]
+   ],
+   "probs": {
+    "0": 0.5,
+    "1": 0.0,
+    "2": 0.5,
+    "3": 0.0,
+    "4": 0.0,
+    "5": 0.0,
+    "6": 0.0,
+    "7": 0.0,
+    "8": 0.0
+   }
+  }
+ },
+ {
+  "config": "browser-drone-expansion-v1-redistributable",
+  "raw_split": "train",
+  "raw": {
+   "id": "browser-drone-expansion-v1-redistributable:17:noul",
+   "group_id": "browser-drone-expansion-v1-redistributable:g17",
+   "split": "train",
+   "source": "snake-v1",
+   "kind": "noul",
+   "question": "Is moving up safe?",
+   "options": [
+    "no",
+    "yes"
+   ],
+   "target": [
+    0.4,
+    0.6
+   ],
+   "state_json": "{\"direction\": \"right\", \"food\": [5, 4]}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"browser-drone-expansion-v1-redistributable:17:noul\", \"group_id\": \"browser-drone-expansion-v1-redistributable:g17\", \"split\": \"train\", \"source\": \"snake-v1\", \"kind\": \"noul\", \"question\": \"Is moving up safe?\", \"options\": [\"no\", \"yes\"], \"target\": [0.4, 0.6], \"state\": {\"direction\": \"right\", \"food\": [5, 4]}}",
+   "original_line_number": 17
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "independent_labels_binary_tiers",
+   "tiers": [
+    [
+     "yes"
+    ],
+    [
+     "no"
+    ]
+   ],
+   "probs": {
+    "no": 0.4,
+    "yes": 0.6
+   }
+  }
+ },
+ {
+  "config": "browser-drone-expansion-v1-redistributable",
+  "raw_split": "train",
+  "raw": {
+   "id": "browser-drone-expansion-v1-redistributable:18:choice",
+   "group_id": "browser-drone-expansion-v1-redistributable:g18",
+   "split": "train",
+   "source": "browser-control-v1",
+   "kind": "choice",
+   "question": "Choose the next browser action.",
+   "options": [
+    "click_login",
+    "type_username",
+    "scroll_down"
+   ],
+   "target": [
+    0,
+    1,
+    0
+   ],
+   "state_json": "{\"url\": \"https://example.test/login\", \"elements\": [\"login\", \"user\"]}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"browser-drone-expansion-v1-redistributable:18:choice\", \"group_id\": \"browser-drone-expansion-v1-redistributable:g18\", \"split\": \"train\", \"source\": \"browser-control-v1\", \"kind\": \"choice\", \"question\": \"Choose the next browser action.\", \"options\": [\"click_login\", \"type_username\", \"scroll_down\"], \"target\": [0, 1, 0], \"state\": {\"url\": \"https://example.test/login\", \"elements\": [\"login\", \"user\"]}}",
+   "original_line_number": 18
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "source_dataset_label",
+   "tiers": [
+    [
+     "type_username"
+    ],
+    [
+     "click_login",
+     "scroll_down"
+    ]
+   ],
+   "probs": null
+  }
+ },
+ {
+  "config": "browser-drone-expansion-v1-redistributable",
+  "raw_split": "train",
+  "raw": {
+   "id": "browser-drone-expansion-v1-redistributable:19:score",
+   "group_id": "browser-drone-expansion-v1-redistributable:g19",
+   "split": "train",
+   "source": "drone-control-v1",
+   "kind": "score",
+   "question": "Rate the descent urgency.",
+   "options": [
+    "low",
+    "medium",
+    "high"
+   ],
+   "target": [
+    0.0,
+    0.4,
+    0.6
+   ],
+   "state_json": "{\"altitude_m\": 12.0, \"vertical_speed\": -3.2}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"browser-drone-expansion-v1-redistributable:19:score\", \"group_id\": \"browser-drone-expansion-v1-redistributable:g19\", \"split\": \"train\", \"source\": \"drone-control-v1\", \"kind\": \"score\", \"question\": \"Rate the descent urgency.\", \"options\": [\"low\", \"medium\", \"high\"], \"target\": [0.0, 0.4, 0.6], \"state\": {\"altitude_m\": 12.0, \"vertical_speed\": -3.2}}",
+   "original_line_number": 19
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "ordinal_score_distance_tiers",
+   "tiers": [
+    [
+     "high"
+    ],
+    [
+     "medium"
+    ],
+    [
+     "low"
+    ]
+   ],
+   "probs": {
+    "low": 0.0,
+    "medium": 0.4,
+    "high": 0.6
+   }
+  }
+ },
+ {
+  "config": "release-v2-redistributable",
+  "raw_split": "train",
+  "raw": {
+   "id": "release-v2-redistributable:20:choice",
+   "group_id": "release-v2-redistributable:g20",
+   "split": "train",
+   "source": "reasoning-control-v1",
+   "kind": "choice",
+   "question": "Evaluate the Boolean expression using exactly the supplied assignment.",
+   "options": [
+    "true: The expression evaluates to true",
+    "false: The expression evaluates to false"
+   ],
+   "target": [
+    0.0,
+    1.0
+   ],
+   "state_json": "{\"assignments\": {\"p_0\": true, \"p_1\": false}, \"expression\": \"p_0 AND p_1\"}",
+   "metadata_json": "{\"teacher\": \"privileged\"}",
+   "record_json": "{\"id\": \"release-v2-redistributable:20:choice\", \"group_id\": \"release-v2-redistributable:g20\", \"split\": \"train\", \"source\": \"reasoning-control-v1\", \"kind\": \"choice\", \"question\": \"Evaluate the Boolean expression using exactly the supplied assignment.\", \"options\": [\"true: The expression evaluates to true\", \"false: The expression evaluates to false\"], \"target\": [0.0, 1.0], \"state\": {\"assignments\": {\"p_0\": true, \"p_1\": false}, \"expression\": \"p_0 AND p_1\"}}",
+   "original_line_number": 20
+  },
+  "expect": {
+   "split": "train",
+   "label_kind": "source_dataset_label",
+   "tiers": [
+    [
+     "false: The expression evaluates to false"
+    ],
+    [
+     "true: The expression evaluates to true"
+    ]
+   ],
+   "probs": null
+  }
+ }
+]

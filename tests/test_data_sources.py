@@ -1,6 +1,7 @@
 import json
 
 import pytest
+from data_contract_helpers import assert_contract_row
 
 from scrm_data import canonical as C
 from scrm_data.schema import SCHEMA, rows_to_table, schemas_equivalent
@@ -11,6 +12,7 @@ from scrm_data.validate import validate_rows
 def _check(res, split):
     assert res.row is not None, res.reason
     assert res.split == split
+    assert_contract_row(res.row, split)
     errs, ok = validate_rows([res.row], split, canonical_every=1)
     assert errs == [], errs
     t = rows_to_table([res.row])

@@ -1,0 +1,278 @@
+{
+ "eligible": {
+  "id": "770e0b2f",
+  "source": "nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1",
+  "decision_type": "tool_choice",
+  "status": "trainable",
+  "unsupported_reason": null,
+  "content_hash": "4bfca454",
+  "state": {
+   "system": "You are a customer service agent.",
+   "user_goal": "I need info on new service.",
+   "history": [
+    {
+     "role": "user",
+     "payload_json": "{\"content\":\"Hello\"}"
+    }
+   ],
+   "environment_json": null
+  },
+  "candidates": [
+   {
+    "id": "tool::authenticate_user",
+    "name": "authenticate_user",
+    "description": "Verify user identity.",
+    "parameters_json": "{\"properties\":{\"email\":{\"type\":\"string\"}},\"type\":\"object\"}",
+    "metadata_json": "{}"
+   },
+   {
+    "id": "tool::get_new_service_information",
+    "name": "get_new_service_information",
+    "description": "Return new service details.",
+    "parameters_json": "{}",
+    "metadata_json": "{}"
+   },
+   {
+    "id": "tool::transfer_to_human_agent",
+    "name": "transfer_to_human_agent",
+    "description": null,
+    "parameters_json": "",
+    "metadata_json": "{}"
+   }
+  ],
+  "target": {
+   "candidate_id": "tool::get_new_service_information",
+   "action_name": "get_new_service_information",
+   "arguments_json": "{}",
+   "label_json": null
+  },
+  "ordered_targets": [],
+  "labels": {
+   "complete": null,
+   "trajectory_success": null,
+   "value_target": null,
+   "reward": null,
+   "score": null,
+   "source_pass_rate": 0.28125,
+   "outcome_evidence": null
+  },
+  "provenance": {
+   "dataset_id": "nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1",
+   "dataset_revision": "9643c810",
+   "source_config": "default",
+   "raw_split": "train",
+   "source_row_index": 15,
+   "source_identity": "149",
+   "trajectory_id": "149",
+   "step_index": 0,
+   "decision_ordinal": 0,
+   "adapter_version": "2.0.0",
+   "license_metadata_json": "{\"license\":\"cc-by-4.0\"}",
+   "source_metadata_json": "{}"
+  },
+  "training": {
+   "choice_eligible": true,
+   "completion_eligible": false,
+   "value_eligible": false,
+   "score_eligible": false,
+   "boolean_eligible": false,
+   "arguments_eligible": true,
+   "use_for_bc": true,
+   "use_for_value": false,
+   "supervision_evidence": "explicit_expected_action",
+   "choice_ineligible_reason": null,
+   "quality_weight": 1.0
+  },
+  "training_split": "val"
+ },
+ "ineligible": {
+  "id": "open-swe-1",
+  "source": "nvidia/Open-SWE-Traces",
+  "decision_type": "completion",
+  "status": "trainable",
+  "unsupported_reason": null,
+  "content_hash": "4bfca454",
+  "state": {
+   "system": "You are a customer service agent.",
+   "user_goal": "I need info on new service.",
+   "history": [
+    {
+     "role": "user",
+     "payload_json": "{\"content\":\"Hello\"}"
+    }
+   ],
+   "environment_json": null
+  },
+  "candidates": [
+   {
+    "id": "tool::authenticate_user",
+    "name": "authenticate_user",
+    "description": "Verify user identity.",
+    "parameters_json": "{\"properties\":{\"email\":{\"type\":\"string\"}},\"type\":\"object\"}",
+    "metadata_json": "{}"
+   },
+   {
+    "id": "tool::get_new_service_information",
+    "name": "get_new_service_information",
+    "description": "Return new service details.",
+    "parameters_json": "{}",
+    "metadata_json": "{}"
+   },
+   {
+    "id": "tool::transfer_to_human_agent",
+    "name": "transfer_to_human_agent",
+    "description": null,
+    "parameters_json": "",
+    "metadata_json": "{}"
+   }
+  ],
+  "target": {
+   "candidate_id": "tool::get_new_service_information",
+   "action_name": "get_new_service_information",
+   "arguments_json": "{}",
+   "label_json": null
+  },
+  "ordered_targets": [],
+  "labels": {
+   "complete": null,
+   "trajectory_success": null,
+   "value_target": null,
+   "reward": null,
+   "score": null,
+   "source_pass_rate": 0.28125,
+   "outcome_evidence": null
+  },
+  "provenance": {
+   "dataset_id": "nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1",
+   "dataset_revision": "9643c810",
+   "source_config": "default",
+   "raw_split": "train",
+   "source_row_index": 15,
+   "source_identity": "149",
+   "trajectory_id": "149",
+   "step_index": 0,
+   "decision_ordinal": 0,
+   "adapter_version": "2.0.0",
+   "license_metadata_json": "{\"license\":\"cc-by-4.0\"}",
+   "source_metadata_json": "{}"
+  },
+  "training": {
+   "choice_eligible": false,
+   "completion_eligible": false,
+   "value_eligible": true,
+   "score_eligible": false,
+   "boolean_eligible": false,
+   "arguments_eligible": true,
+   "use_for_bc": true,
+   "use_for_value": false,
+   "supervision_evidence": "trajectory_outcome",
+   "choice_ineligible_reason": "no_choice_supervision",
+   "quality_weight": 1.0
+  },
+  "training_split": "val"
+ },
+ "single_candidate": {
+  "id": "single-1",
+  "source": "nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1",
+  "decision_type": "tool_choice",
+  "status": "trainable",
+  "unsupported_reason": null,
+  "content_hash": "4bfca454",
+  "state": {
+   "system": "You are a customer service agent.",
+   "user_goal": "I need info on new service.",
+   "history": [
+    {
+     "role": "user",
+     "payload_json": "{\"content\":\"Hello\"}"
+    }
+   ],
+   "environment_json": null
+  },
+  "candidates": [
+   {
+    "id": "tool::get_new_service_information",
+    "name": "get_new_service_information",
+    "description": "Return new service details.",
+    "parameters_json": "{}",
+    "metadata_json": "{}"
+   }
+  ],
+  "target": {
+   "candidate_id": "tool::get_new_service_information",
+   "action_name": "get_new_service_information",
+   "arguments_json": "{}",
+   "label_json": null
+  },
+  "ordered_targets": [],
+  "labels": {
+   "complete": null,
+   "trajectory_success": null,
+   "value_target": null,
+   "reward": null,
+   "score": null,
+   "source_pass_rate": 0.28125,
+   "outcome_evidence": null
+  },
+  "provenance": {
+   "dataset_id": "nvidia/Nemotron-RL-Agentic-Conversational-Tool-Use-Pivot-v1",
+   "dataset_revision": "9643c810",
+   "source_config": "default",
+   "raw_split": "train",
+   "source_row_index": 15,
+   "source_identity": "149",
+   "trajectory_id": "149",
+   "step_index": 0,
+   "decision_ordinal": 0,
+   "adapter_version": "2.0.0",
+   "license_metadata_json": "{\"license\":\"cc-by-4.0\"}",
+   "source_metadata_json": "{}"
+  },
+  "training": {
+   "choice_eligible": true,
+   "completion_eligible": false,
+   "value_eligible": false,
+   "score_eligible": false,
+   "boolean_eligible": false,
+   "arguments_eligible": true,
+   "use_for_bc": true,
+   "use_for_value": false,
+   "supervision_evidence": "explicit_expected_action",
+   "choice_ineligible_reason": null,
+   "quality_weight": 1.0
+  },
+  "training_split": "val"
+ },
+ "clean50k": {
+  "id": "f4e274b3",
+  "source": "nvidia/Nemotron-SFT-Agentic-v2",
+  "state": {
+   "system": null,
+   "user_goal": "Plan a quiet art retreat.",
+   "environment": null,
+   "history": [
+    {
+     "role": "user",
+     "content": "{\"content\":\"Hi\"}"
+    }
+   ]
+  },
+  "question": "Given the current state and available options,\nwhich option should be selected?",
+  "question_type": "choice",
+  "answer_options": [
+   {
+    "type": "action",
+    "label": "get_news_headlines",
+    "description": "Live headlines.",
+    "schema_json": "{\"type\":\"object\"}"
+   },
+   {
+    "type": "action",
+    "label": "get_special_tickers",
+    "description": "Top gainers.",
+    "schema_json": "{}"
+   }
+  ],
+  "target_index": 1
+ }
+}

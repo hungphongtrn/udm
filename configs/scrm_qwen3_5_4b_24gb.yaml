@@ -18,10 +18,15 @@ data:
   repo: hungphongtrn/udm-massive-typed
   local_dir: null                # e.g. data_cache/udm  (scripts/train/prefetch_data.sh)
   streaming: false
-  # Mixing: first matching group wins. MASSIVE has 60 candidates per row and ~870k rows -> cap it.
+  # Mixing: first matching group wins; weight = sampling share, max_rows = cap (sampled once per run).
+  # Groups with no rows (e.g. a source not pushed yet) are skipped. Exhausted groups restart with a new shuffle.
   groups:
-    - {name: massive, match: {source_id: [AmazonScience/massive]}, max_rows: 150000, weight: 0.15}
-  other_weight: 0.85
+    - {name: massive,    match: {source_id: [AmazonScience/massive]},                     max_rows: 150000,  weight: 0.15}  # 60 cands/row
+    - {name: typed,      match: {source_id: [LocalLLaMA/typed-decisions]},                                    weight: 0.10}
+    - {name: tasksource, match: {source_id: [tasksource/tasksource-jev-typed-decisions]},                     weight: 0.25}
+    - {name: openjev,    match: {source_id: [ZefanCai/Open-Jev]},                                             weight: 0.20}
+    - {name: samatv,     match: {source_id: [samatv256/jev-decisions-v1]},                max_rows: 1000000, weight: 0.30}  # ~6M rows
+  other_weight: 0.05
   eval_max_rows: 2000
   eval_max_rows_per_source: 200
   render: {max_len: 2048, cand_max_tokens: 128, state_max_tokens: 1536, instr_max_tokens: 256, max_candidates: 64}
