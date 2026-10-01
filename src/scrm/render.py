@@ -125,12 +125,13 @@ DEFAULT_RENDER = {"max_len": 2048, "cand_max_tokens": 128, "state_max_tokens": 1
                   # wrap the sequence as one user turn of the tokenizer's chat template and end right after
                   # the assistant header ("<|im_start|>assistant\n"; any <think> the template appends is cut)
                   "chat_template": True, "system_prompt": None,
-                  # Plain-text layout, no new tokens. ONE SEQUENCE PER GRADED OPTION (InstructGPT-style prompt +
-                  # response): the user turn lists ALL shown options, the assistant turn is the single option being
-                  # graded, and its reward is read at the end-of-turn token (<|im_end|>):
-                  #   <|im_start|>user\n{state}\n\n{instruction}\n\nOptions:\nOption 1: {c1}\n...<|im_end|>\n
-                  #   <|im_start|>assistant\nOption k: {ck}<|im_end|>
+                  # Plain-text layout, no new tokens. ONE SEQUENCE PER GRADED OPTION: the user turn shows the state,
+                  # the instruction, ALL shown options and then asks to grade one of them; the sequence stops at the
+                  # assistant header and option k's reward is read at its last token:
+                  #   <|im_start|>user\n{state}\n\n{instruction}\n\nOptions:\nOption 1: {c1}\n...\n
+                  #   Grade this choice: Option k: {ck}<|im_end|>\n<|im_start|>assistant\n
                   "options_header": "Options:\n", "option_label": "Option {k}: ",
+                  "grade_prompt": "\nGrade this choice: ",
                   # max options graded per set (one sequence each; the prompt still shows all kept options).
                   # None = grade every shown option. Subsampling keeps tier-0 + one per other tier.
                   "max_graded": None, "eval_max_graded": None}
@@ -153,15 +154,6 @@ def chat_wrap_text(tokenizer, system_prompt: str | None = None) -> tuple[str, st
     return pre, post
 
 
-def assistant_end_text(tokenizer) -> str:
-    """End-of-turn marker the chat template puts after an assistant message (Qwen: "<|im_end|>")."""
-    text = tokenizer.apply_chat_template([{"role": "user", "content": "u"}, {"role": "assistant", "content": _SENTINEL}],
-                                         tokenize=False)
-    after = text.split(_SENTINEL, 1)[1]
-    end = after.split("\n", 1)[0].strip()
-    return end or (tokenizer.eos_token or "")
-
-
 @dataclass
 class TokExample:
     ex: Example
@@ -173,7 +165,7 @@ class TokExample:
 
 @dataclass
 class Item:
-    """One decision set = one sequence per graded option (same prompt, different assistant response)."""
+    """One decision set = one sequence per graded option (same prompt listing all options, different graded option)."""
     seqs: list                 # list[np.ndarray] token ids, one per graded slot
     tiers: np.ndarray          # tier per graded slot
     order: np.ndarray          # tokex candidate index for each graded slot (display order)
@@ -187,7 +179,7 @@ class Item:
     graded: list = field(default_factory=list)   # graded candidates (tokex indices, sorted)
 
     @property
-    def read_pos(self) -> np.ndarray:
+    def read_pos(self) -> np.ndarray:   # last token = end of the assistant header
         return np.asarray([len(x) - 1 for x in self.seqs], dtype=np.int64)
 
     @property
@@ -251,7 +243,7 @@ class Renderer:
         self.header = tokenizer(self.cfg["options_header"], add_special_tokens=False)["input_ids"]
         self._labels: dict[int, list[int]] = {}
         self.lab_max = max(len(self.label(k)) for k in (1, 9, 10, 99, 100, max(self.cfg["max_candidates"], 1)))
-        self.chat_prefix, self.chat_suffix, self.resp_end = [], [], []
+        self.chat_prefix, self.chat_suffix = [], []
         if self.cfg.get("chat_template"):
             if not getattr(tokenizer, "chat_template", None):
                 raise ValueError("render.chat_template=true but the tokenizer has no chat template "
@@ -259,10 +251,7 @@ class Renderer:
             pre, post = chat_wrap_text(tokenizer, self.cfg.get("system_prompt"))
             self.chat_prefix = tokenizer(pre, add_special_tokens=False)["input_ids"]
             self.chat_suffix = tokenizer(post, add_special_tokens=False)["input_ids"]
-            self.resp_end = tokenizer(assistant_end_text(tokenizer), add_special_tokens=False)["input_ids"]
-        else:
-            self.chat_suffix = tokenizer("\nAnswer: ", add_special_tokens=False)["input_ids"]
-            self.resp_end = [tokenizer.eos_token_id if tokenizer.eos_token_id is not None else self.option_end_id]
+        self.grade = tokenizer(self.cfg["grade_prompt"], add_special_tokens=False)["input_ids"]
 
     def label(self, k: int) -> list[int]:
         if k not in self._labels:
@@ -317,11 +306,11 @@ class Renderer:
             idxs = list(kept)
         cand = t.cand_ids if cap is None else [x[:cap] for x in t.cand_ids]
         overhead = (len(self.chat_prefix) + len(self.chat_suffix) + len(t.instr_ids) + len(self.nl2)
-                    + len(self.header) + self.lab_max + len(self.resp_end))
+                    + len(self.header) + len(self.grade) + self.lab_max)
         min_state = min(len(t.state_ids), c["min_state_tokens"])
 
         def cost(ix):
-            # every option line in the prompt + the longest option repeated as the assistant response
+            # every option line in the prompt + the longest option repeated after "Grade this choice:"
             return sum(len(cand[i]) + self.lab_max + 1 for i in ix) + max((len(cand[i]) for i in ix), default=0)
 
         if kept is None:
@@ -375,11 +364,11 @@ class Renderer:
         order, seqs = [], []
         for k, i in enumerate(display, 1):
             prompt += self.label(k) + cand[i] + [self.option_end_id]
-        prompt += self.chat_suffix
+        prompt += self.grade
         for k, i in enumerate(display, 1):
             if i in gset:
                 order.append(i)
-                seqs.append(np.asarray(prompt + self.label(k) + cand[i] + self.resp_end, dtype=np.int64))
+                seqs.append(np.asarray(prompt + self.label(k) + cand[i] + self.chat_suffix, dtype=np.int64))
         order_a = np.asarray(order)
         it = Item(seqs, tiers[order_a].astype(np.int64), order_a, [t.ex.choice_ids[i] for i in order], t.ex.family,
                   t.ex.source_id, t.ex.decision_set_id, tok=t, cap=cap)

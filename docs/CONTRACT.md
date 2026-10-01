@@ -60,9 +60,9 @@ are dropped and counted in the build report.
   (streaming or local cache) and only needs: `state_json`, `instruction_json`,
   `options_json`, `tier_json`, `candidate_rows`, `family`, `source_id`,
   `label_kind`, `decision_set_id`.
-* Prompt rendering (no new tokens), one sequence per graded option: a user turn of the tokenizer's chat template
-  `{state}\n\n{instruction}\n\nOptions:\nOption 1: {c1}\nOption 2: {c2}\n...` listing ALL options (state string as-is,
-  object as JSON; instruction + criteria if present), then the assistant turn `Option k: {ck}<|im_end|>`. Option k's
-  reward input is the hidden state at that final `<|im_end|>`. Candidate order is randomly shuffled every time in
-  training, and kept canonical in eval.
+* Prompt rendering (no new tokens), one sequence per graded option: one user turn of the tokenizer's chat template
+  `{state}\n\n{instruction}\n\nOptions:\nOption 1: {c1}\nOption 2: {c2}\n...\n\nGrade this choice: Option k: {ck}`
+  listing ALL options (state string as-is, object as JSON; instruction + criteria if present), ending right after the
+  assistant header. Option k's reward input is the hidden state of that last token. Candidate order is randomly
+  shuffled every time in training, and kept canonical in eval.
 * Pair mask: `M[i,j] = tier[i] < tier[j]`.

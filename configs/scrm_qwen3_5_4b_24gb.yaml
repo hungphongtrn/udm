@@ -29,7 +29,7 @@ data:
   other_weight: 0.05
   eval_max_rows: 2000
   eval_max_rows_per_source: 200
-  # One row per GRADED option (prompt lists all shown options + that option as the assistant turn), so a set costs
+  # One row per GRADED option (user turn lists all shown options, then "Grade this choice: Option k: ..."), so a set costs
   # max_graded x row length tokens. max_len is per row. Eval / rank() grade every shown option.
   render: {max_len: 2048, cand_max_tokens: 128, state_max_tokens: 1536, instr_max_tokens: 256, max_candidates: 64,
            max_graded: 8}

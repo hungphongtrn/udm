@@ -65,7 +65,7 @@ def test_collator_one_row_per_graded_option_read_at_end_of_turn(tok):
     S = sum(len(i.seqs) for i in items)
     assert b["input_ids"].shape[0] == S == 17 and b["read_pos"].shape == (S,)
     for row in range(S):
-        assert b["input_ids"][row, b["read_pos"][row]] == r.resp_end[-1]                # <|im_end|>
+        assert b["input_ids"][row, b["read_pos"][row]] == r.chat_suffix[-1]             # "\n" after "assistant"
         assert b["attention_mask"][row, : b["read_pos"][row] + 1].all()
         assert not b["attention_mask"][row, b["read_pos"][row] + 1:].any()
     assert sorted(zip(b["seq_b"].tolist(), b["seq_slot"].tolist())) == \
@@ -78,17 +78,17 @@ def test_collator_one_row_per_graded_option_read_at_end_of_turn(tok):
 
 
 def test_truncation_budget_and_tier0(tok):
-    r = Renderer(tok, {"max_len": 128, "cand_max_tokens": 8, "state_max_tokens": 64, "max_candidates": 20,
+    r = Renderer(tok, {"max_len": 160, "cand_max_tokens": 8, "state_max_tokens": 64, "max_candidates": 20,
                        "min_state_tokens": 16})
     big_state = "word " * 5000
     ex = mk_example(60, ntop=2, state=big_state, texts=["a long candidate text " * 10] * 60)
     it = r.assemble(r.tokenize(ex), np.random.default_rng(0), True)
-    assert it is not None and max(len(x) for x in it.seqs) <= 128
+    assert it is not None and max(len(x) for x in it.seqs) <= 160
     assert (it.tiers == 0).sum() == 2 and len(it.order) <= 20 and (it.tiers > 0).any()
-    # every row: chat prefix ... chat suffix + "Option k: <cand>" + <|im_end|>
+    # every row: chat prefix ... "Grade this choice: Option k: <cand>" + chat suffix (ends at the assistant header)
     for x in it.seqs:
         ids = x.tolist()
-        assert ids[:len(r.chat_prefix)] == r.chat_prefix and ids[-len(r.resp_end):] == r.resp_end
+        assert ids[:len(r.chat_prefix)] == r.chat_prefix and ids[-len(r.chat_suffix):] == r.chat_suffix
 
 
 def test_example_dropped_when_no_pair_possible(tok):
@@ -158,10 +158,10 @@ def test_prompt_lists_all_options_and_each_row_grades_one(tok):
     ex = Example.from_raw("Pick one.", "the state", ["alpha", "beta", "gamma"])
     it = r.assemble(r.tokenize(ex), None, False, relax=True)
     prompt = ("<|im_start|>user\nthe state\n\nPick one.\n\nOptions:\n"
-              "Option 1: alpha\nOption 2: beta\nOption 3: gamma\n<|im_end|>\n<|im_start|>assistant\n")
+              "Option 1: alpha\nOption 2: beta\nOption 3: gamma\n\nGrade this choice: ")
     assert len(it.seqs) == 3
     for k, (x, c) in enumerate(zip(it.seqs, ["alpha", "beta", "gamma"])):
-        assert tok.decode(x.tolist()) == prompt + f"Option {k + 1}: {c}<|im_end|>"
+        assert tok.decode(x.tolist()) == prompt + f"Option {k + 1}: {c}<|im_end|>\n<|im_start|>assistant\n"
     off = Renderer(tok, {"max_len": 256, "chat_template": False}).assemble(r.tokenize(ex), None, False, relax=True)
     assert tok.decode(off.seqs[0].tolist()).startswith("the state\n\nPick one.\n\nOptions:\nOption 1: alpha\n")
 
@@ -174,7 +174,7 @@ def test_shuffle_relabels_options_in_display_order(tok):
     listing = "".join(f"Option {k + 1}: {c}\n" for k, c in enumerate(shown))
     for k, (x, c) in enumerate(zip(it.seqs, shown)):
         text = tok.decode(x.tolist())
-        assert listing in text and text.endswith(f"assistant\nOption {k + 1}: {c}<|im_end|>")
+        assert listing in text and text.endswith(f"Grade this choice: Option {k + 1}: {c}<|im_end|>\n<|im_start|>assistant\n")
 
 
 def test_max_graded_subsamples_rows_but_prompt_shows_all(tok):
