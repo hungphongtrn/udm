@@ -38,11 +38,16 @@ def test_full_model_forward_no_new_tokens():
     from scrm.tiny import make_tiny_tokenizer
     model, tok = build_scrm(TINY, "cpu")
     assert len(tok) == len(make_tiny_tokenizer())                        # no tokens added
-    B, L = 2, 12
-    x = torch.randint(0, 300, (B, L))
-    pos = torch.tensor([[3, 7], [3, 7]])
+    S, L = 3, 12                                                         # 3 rows: set 0 grades 2 options, set 1 grades 1
+    x = torch.randint(0, 300, (S, L))
+    am = torch.ones(S, L, dtype=torch.long); am[2, 9:] = 0
+    read = torch.tensor([11, 11, 8]); sb = torch.tensor([0, 0, 1]); sl = torch.tensor([0, 1, 0])
     cm = torch.tensor([[1, 1], [1, 0]], dtype=torch.bool)
-    r = model(x, torch.ones(B, L, dtype=torch.long), pos, cm)
+    model.eval()
+    with torch.no_grad():                                                # chunked backbone calls == one call
+        assert torch.allclose(model(x, am, read, sb, sl, cm), model(x, am, read, sb, sl, cm, max_tokens=12), atol=1e-5)
+    model.train()
+    r = model(x, am, read, sb, sl, cm)
     assert r.shape == (2, 2) and r[1, 1] == 0 and r.dtype == torch.float32
     # trainable: lora + head, but not base weights
     names = [n for n, p in model.named_parameters() if p.requires_grad]
@@ -57,6 +62,8 @@ def test_frozen_backbone_has_no_backbone_grads():
     model, tok = build_scrm(cfg, "cpu")
     assert not any(p.requires_grad for p in model.backbone.parameters())
     x = torch.randint(0, 300, (1, 6))
-    r = model(x, torch.ones(1, 6, dtype=torch.long), torch.tensor([[2, 5]]), torch.ones(1, 2, dtype=torch.bool))
+    x = torch.randint(0, 300, (2, 6))
+    r = model(x, torch.ones(2, 6, dtype=torch.long), torch.tensor([5, 5]), torch.tensor([0, 0]), torch.tensor([0, 1]),
+              torch.ones(1, 2, dtype=torch.bool))
     r.sum().backward()
     assert model.set_encoder.proj.weight.grad is not None

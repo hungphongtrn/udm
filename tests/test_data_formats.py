@@ -243,7 +243,7 @@ def test_trainer_round_trip_through_real_build_path(tmp_path):
                              "data.render.max_len=4096", "data.render.cand_max_tokens=48",
                              "data.render.max_candidates=64"])
     renderer = Renderer(tok, cfg["data"]["render"])
-    end_id = renderer.option_end_id
+    end_id = renderer.resp_end[-1]
     total = 0
     families = set()
     for sp in ("train", "validation", "test"):
@@ -255,8 +255,8 @@ def test_trainer_round_trip_through_real_build_path(tmp_path):
                            sorted(es.items, key=lambda i: i.decision_set_id)):
             assert row["decision_set_id"] == it.decision_set_id
             n_opts = len(json.loads(row["options_json"]))
-            assert all(it.input_ids[p] == end_id for p in it.cand_pos)                 # read-out = option-line end
-            assert len(it.cand_pos) == n_opts
+            assert len(it.seqs) == n_opts                                              # one row per option
+            assert all(x[-1] == end_id for x in it.seqs)                               # read-out = <|im_end|>
             families.add(it.family)
         for b in es.batches():
             assert b["pair_mask"].flatten(1).any(1).all()                              # trainable pairs exist

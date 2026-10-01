@@ -309,6 +309,8 @@ class EvalSet:
     """Tokenised, canonical-order eval items (cached) split into token-budget batches."""
 
     def __init__(self, rows: list[dict], renderer: Renderer, dcfg: dict):
+        # eval grades every shown option (render.eval_max_graded, default None = all), whatever train uses
+        renderer = Renderer(renderer.tok, {**renderer.cfg, "max_graded": renderer.cfg.get("eval_max_graded")})
         self.r = renderer
         self.items = []
         self.n_rows, self.n_dropped = len(rows), 0

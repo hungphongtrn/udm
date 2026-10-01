@@ -39,7 +39,7 @@ def test_overfit_fixed_batch(synth):
     model.train()
     losses = []
     for _ in range(25):
-        rew = model(b["input_ids"], b["attention_mask"], b["candidate_positions"], b["candidate_mask"])
+        rew = model.score(b)
         lo = compute_loss(rew, b["tiers"], {}, b["pair_mask"])
         loss = reduce_loss(lo)
         opt.zero_grad(); loss.backward(); opt.step()

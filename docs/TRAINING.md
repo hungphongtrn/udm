@@ -1,8 +1,8 @@
 # SCRM training guide
 
-Set-Conditioned Reward Model: a Qwen3.5-4B text backbone (+LoRA, Liger kernels) reads one sequence per decision
-set, InstructGPT-style: plain text in the pretrained chat format, **no new tokens**. The whole set is one user turn of the
-tokenizer's chat template, ending right after the assistant header (Qwen3.5's `<think>` line is cut):
+Set-Conditioned Reward Model: a Qwen3.5-4B text backbone (+LoRA, Liger kernels) scores a decision set
+InstructGPT-style (prompt + response, reward at the end of the response), but every prompt shows the **whole option set**.
+Plain text in the pretrained chat format, **no new tokens**. For each graded option k there is one sequence:
 
 ```
 <|im_start|>user
@@ -16,14 +16,17 @@ Option 2: {candidate 2}
 ...
 <|im_end|>
 <|im_start|>assistant
+Option k: {candidate k}<|im_end|>
 ```
 
-Empty state / instruction blocks are omitted. Options are numbered in display order (shuffled every time in training,
-canonical order in eval). Each candidate's reward is read from the hidden state of the `\n` that ends its option line: a
-fixed, single-token position (pieces are tokenised separately and concatenated, so the newline never merges with the
-candidate text) that has seen the state, the instruction, the earlier options and the whole option itself.
-Knobs: `data.render.chat_template`, `system_prompt`, `options_header`, `option_label`.
-Those per-option hidden states are projected (d -> 768), passed through a 2-layer bidirectional
+So the LLM sees all available options but grades exactly one: option k's embedding is the hidden state of the final
+`<|im_end|>` of its row (the assistant end-of-turn token, as in InstructGPT's reward read-out). Empty state / instruction
+blocks are omitted; options are numbered in display order (shuffled every time in training, canonical in eval) and the
+response repeats option k's label + text. Rows of the same set share the prompt and differ only in the response.
+Knobs: `data.render.chat_template`, `system_prompt`, `options_header`, `option_label`, `max_graded` (options graded per
+set in training; tier-0 and one per other tier always kept; the prompt still lists every shown option),
+`eval_max_graded` (default all; `rank()` always grades all).
+The per-option embeddings of a set are projected (d -> 768), passed through a 2-layer bidirectional
 pre-LN transformer encoder **without positional embeddings** (so scores do not depend on candidate order), and an MLP head
 returns one unbounded scalar reward per candidate. Training uses Bradley-Terry over tier pairs
 (`tier_i < tier_j`, never same-tier). Data contract: `docs/CONTRACT.md`.
@@ -82,6 +85,12 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
   full bidirectional interaction. Candidate order is reshuffled every time in training.
 
 ## Memory: 24 GB vs 40 GB
+
+Cost note: a set with n graded options costs n rows of (prompt + response) tokens, i.e. about n x the single-sequence cost.
+`data.render.max_graded` (8 on 24 GB, 12 on 40 GB) bounds this in training; `data.batch.max_tokens_per_batch` is the padded
+token budget per backbone call (a set bigger than that is run in row chunks, so it never OOMs on one huge set). Eval grades
+every option and is chunked the same way. A future speed-up is to encode the shared prompt once and reuse its cache
+(KV + Gated DeltaNet state) for every response.
 
 The Qwen3.5-4B text decoder has 4.21B params (8.4 GB in bf16). LoRA r=64 all-linear = ~130M params: fp32 weights + grads + Adam
 = ~2 GB. Gradient checkpointing keeps ~0.16 MB/token of layer inputs (32 layers x 2560 x bf16) plus one layer of

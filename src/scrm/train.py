@@ -114,7 +114,7 @@ def estimate_steps(cfg, renderer, seed):
     nb = ne = 0
     for b in ts:
         nb += 1
-        ne += b["input_ids"].size(0)
+        ne += b["candidate_mask"].size(0)
     avg = ne / max(nb, 1)
     return int(math.ceil(cfg["train"]["epochs"] * total / (avg * cfg["train"]["grad_accum"]))), total
 
@@ -181,7 +181,7 @@ def train(cfg: dict, resume: str | None = None):
             evalset = EvalSet.from_config(cfg, renderer)
             print(f"[eval] set: {len(evalset.items)} items ({evalset.n_dropped} dropped)", flush=True)
         t0 = time.time()
-        m = run_eval(model, evalset.batches(), lcfg, device, amp)
+        m = run_eval(model, evalset.batches(), lcfg, device, amp, max_tokens=d["batch"]["max_tokens_per_batch"])
         pm = run_perm_eval(model, evalset, renderer, d["perm_eval_rows"], d["batch"], device, amp)
         flat = flatten(m)
         flat.update({f"eval/perm/{k}": v for k, v in pm.items()})
@@ -213,7 +213,7 @@ def train(cfg: dict, resume: str | None = None):
         for b in batches:
             bd = to_device(b, device)
             with _amp(device, amp):
-                r = model(bd["input_ids"], bd["attention_mask"], bd["candidate_positions"], bd["candidate_mask"])
+                r = model.score(bd, max_tokens=d["batch"]["max_tokens_per_batch"])
             r = r.float()
             r2 = None
             if use_perm:
@@ -221,7 +221,7 @@ def train(cfg: dict, resume: str | None = None):
                 b2 = to_device(collate(its2, renderer.pad_id), device)
                 with torch.set_grad_enabled(not lcfg.get("perm_detach", True)):
                     with _amp(device, amp):
-                        rr2 = model(b2["input_ids"], b2["attention_mask"], b2["candidate_positions"], b2["candidate_mask"]).float()
+                        rr2 = model.score(b2, max_tokens=d["batch"]["max_tokens_per_batch"]).float()
                 r2 = torch.zeros_like(r)
                 for k, (i1, i2) in enumerate(zip(b["items"], its2)):
                     n = len(i1.order)

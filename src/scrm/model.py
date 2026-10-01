@@ -61,11 +61,27 @@ class SCRM(nn.Module):
         with ctx:
             return self.backbone(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
 
-    def forward(self, input_ids, attention_mask, candidate_positions, candidate_mask):
-        h = self.encode(input_ids, attention_mask)
-        idx = candidate_positions.unsqueeze(-1).expand(-1, -1, h.size(-1))
-        E = h.gather(1, idx)
+    def forward(self, input_ids, attention_mask, read_pos, seq_b, seq_slot, candidate_mask, max_tokens=None):
+        """input_ids [S, L]: one row per graded option (shared prompt listing all options + that option as the
+        assistant response). The end-of-turn hidden state of each row is that option's embedding; the set encoder
+        then scores the options of each set jointly. Returns rewards [B, N] (0 at padded slots).
+        max_tokens: optional cap on padded tokens per backbone call (rows are processed in chunks)."""
+        S, L = input_ids.shape
+        step = S if not max_tokens else max(1, int(max_tokens) // max(L, 1))
+        outs = []
+        for a in range(0, S, step):
+            h = self.encode(input_ids[a:a + step], attention_mask[a:a + step])
+            outs.append(h[torch.arange(h.size(0), device=h.device), read_pos[a:a + step]])
+        e = torch.cat(outs, 0)
+        B, N = candidate_mask.shape
+        E = e.new_zeros(B, N, e.size(-1))
+        E = E.index_put((seq_b, seq_slot), e)
         return self.set_encoder(E, candidate_mask)
+
+    def score(self, b: dict, max_tokens=None):
+        """Forward on a collated batch dict."""
+        return self(b["input_ids"], b["attention_mask"], b["read_pos"], b["seq_b"], b["seq_slot"],
+                    b["candidate_mask"], max_tokens=max_tokens)
 
     # ----- parameter groups / persistence -----
     def head_state_dict(self) -> dict:
@@ -90,22 +106,22 @@ class SCRM(nn.Module):
 
     # ----- inference helpers -----
     @torch.no_grad()
-    def rank(self, instruction, state, candidates: list[str], device=None) -> list[dict]:
+    def rank(self, instruction, state, candidates: list[str], device=None, max_tokens: int | None = 16384) -> list[dict]:
         """Score candidates (given order; no shuffling). Returns [{index, reward}] sorted by reward desc;
         `index` is the position in the input list."""
         from .render import Renderer, Example
         was_training = self.training
         self.eval()
         dev = device or next(self.set_encoder.parameters()).device
-        rr = Renderer(self.tokenizer, self.render_cfg)
+        rr = Renderer(self.tokenizer, {**(self.render_cfg or {}), "max_graded": None})   # grade every candidate
         ex = Example.from_raw(instruction, state, candidates)
         item = rr.assemble(rr.tokenize(ex), rng=None, shuffle=False, relax=True)
         from .collator import collate
-        b = collate([item], pad_id=rr.pad_id)
+        from .collator import to_device
+        b = to_device(collate([item], pad_id=rr.pad_id), dev)
         amp = dev.type == "cuda"
         with torch.autocast(dev.type, dtype=torch.bfloat16, enabled=amp):
-            r = self(b["input_ids"].to(dev), b["attention_mask"].to(dev), b["candidate_positions"].to(dev),
-                     b["candidate_mask"].to(dev))[0]
+            r = self.score(b, max_tokens=max_tokens)[0]
         out = [{"index": int(item.order[k]), "reward": float(r[k])} for k in range(len(item.order))]
         out.sort(key=lambda d: -d["reward"])
         self.train(was_training)

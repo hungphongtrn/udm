@@ -58,43 +58,23 @@ def test_parse_row_drops_untrainable():
     assert parse_row(row) is None
 
 
-def test_collator_positions_point_at_candidate_end(tok):
-    r = Renderer(tok, {"max_len": 256})
+def test_collator_one_row_per_graded_option_read_at_end_of_turn(tok):
+    r = Renderer(tok, {"max_len": 512})
     items = [r.assemble(r.tokenize(mk_example(n)), np.random.default_rng(i), True) for i, n in enumerate([5, 9, 3])]
     b = collate(items, r.pad_id)
-    end_id = r.option_end_id
+    S = sum(len(i.seqs) for i in items)
+    assert b["input_ids"].shape[0] == S == 17 and b["read_pos"].shape == (S,)
+    for row in range(S):
+        assert b["input_ids"][row, b["read_pos"][row]] == r.resp_end[-1]                # <|im_end|>
+        assert b["attention_mask"][row, : b["read_pos"][row] + 1].all()
+        assert not b["attention_mask"][row, b["read_pos"][row] + 1:].any()
+    assert sorted(zip(b["seq_b"].tolist(), b["seq_slot"].tolist())) == \
+        [(bi, k) for bi, it in enumerate(items) for k in range(len(it.seqs))]
     B, N = b["candidate_mask"].shape
-    for i in range(B):
-        for j in range(N):
-            if b["candidate_mask"][i, j]:
-                assert b["input_ids"][i, b["candidate_positions"][i, j]] == end_id
-                assert b["tiers"][i, j] >= 0
-            else:
-                assert b["tiers"][i, j] == -1
-        n = int(b["candidate_mask"][i].sum())
-        assert len(set(b["candidate_positions"][i, :n].tolist())) == n
+    assert (B, N) == (3, 9) and b["candidate_mask"].sum() == S
+    assert (b["tiers"][~b["candidate_mask"]] == -1).all() and (b["tiers"][b["candidate_mask"]] >= 0).all()
     assert b["pair_mask"].shape == (3, N, N)
     assert (b["pair_mask"][~b["candidate_mask"]]).sum() == 0
-
-
-def test_shuffle_vs_canonical(tok):
-    r = Renderer(tok, {"max_len": 512})
-    t = r.tokenize(mk_example(12))
-    a = r.assemble(t, None, False)
-    b = r.assemble(t, None, False)
-    assert np.array_equal(a.input_ids, b.input_ids) and a.order.tolist() == list(range(12))
-    s = r.assemble(t, np.random.default_rng(3), True)
-    assert sorted(s.order.tolist()) == list(range(12)) and s.order.tolist() != list(range(12))
-    assert sorted(s.tiers.tolist()) == sorted(a.tiers.tolist())
-
-
-def test_subsample_keeps_tier0():
-    rng = np.random.default_rng(0)
-    for ntop in (1, 3, 20):
-        tiers = np.array([0] * ntop + [1] * 50 + [2] * 30)
-        k = subsample_indices(tiers, 16, rng)
-        assert len(k) <= 16 and (tiers[k] == 0).sum() == min(ntop, 14)
-        assert set(tiers[k].tolist()) >= {0, 1, 2}
 
 
 def test_truncation_budget_and_tier0(tok):
@@ -103,20 +83,19 @@ def test_truncation_budget_and_tier0(tok):
     big_state = "word " * 5000
     ex = mk_example(60, ntop=2, state=big_state, texts=["a long candidate text " * 10] * 60)
     it = r.assemble(r.tokenize(ex), np.random.default_rng(0), True)
-    assert it is not None and len(it.input_ids) <= 128
+    assert it is not None and max(len(x) for x in it.seqs) <= 128
     assert (it.tiers == 0).sum() == 2 and len(it.order) <= 20 and (it.tiers > 0).any()
-    # the budget loop must have dropped candidates for the minimal state to fit
-    ids = it.input_ids.tolist()
-    body = ids[len(r.chat_prefix): len(ids) - len(r.chat_suffix)]        # chat-template wrapper around the body
-    assert ids[:len(r.chat_prefix)] == r.chat_prefix and ids[len(ids) - len(r.chat_suffix):] == r.chat_suffix
-    assert body[-1] == r.option_end_id and it.cand_pos[-1] == len(ids) - len(r.chat_suffix) - 1
+    # every row: chat prefix ... chat suffix + "Option k: <cand>" + <|im_end|>
+    for x in it.seqs:
+        ids = x.tolist()
+        assert ids[:len(r.chat_prefix)] == r.chat_prefix and ids[-len(r.resp_end):] == r.resp_end
 
 
 def test_example_dropped_when_no_pair_possible(tok):
     r = Renderer(tok, {"max_len": 16, "min_state_tokens": 4, "cand_max_tokens": 64})
     ex = mk_example(4, state="x " * 50, texts=["very long " * 50] * 4)
     it = r.assemble(r.tokenize(ex), None, False)
-    assert it is None or len(it.input_ids) <= 16
+    assert it is None or max(len(x) for x in it.seqs) <= 16
 
 
 def test_state_middle_truncation_keeps_head_and_tail(tok):
@@ -124,7 +103,7 @@ def test_state_middle_truncation_keeps_head_and_tail(tok):
     state = "HEAD " + "mid " * 300 + " TAIL"
     t = r.tokenize(mk_example(4, state=state))
     it = r.assemble(t, None, False)
-    txt = tok.decode(it.input_ids)
+    txt = tok.decode(it.seqs[0])
     assert "HEAD" in txt and "TAIL" in txt and txt.count("mid") < 300
 
 
@@ -149,8 +128,8 @@ def test_train_loader_batches_respect_budget(synth, tok):
     loader, stream = make_train_loader(cfg, r, 0)
     n = 0
     for b in loader:
-        assert b["input_ids"].numel() <= 600 or b["input_ids"].size(0) == 1
-        assert b["input_ids"].size(0) <= 6 and b["pair_mask"].flatten(1).any(1).all()
+        assert b["input_ids"].numel() <= 600 or b["candidate_mask"].size(0) == 1
+        assert b["candidate_mask"].size(0) <= 6 and b["pair_mask"].flatten(1).any(1).all()
         n += 1
         if n >= 8:
             break
@@ -172,28 +151,38 @@ def test_eval_set_deterministic_and_excludes_ood(synth, tok):
     assert max(Counter(x["source_id"] for x in rows).values()) <= 10
 
 
-def test_plain_text_layout_in_chat_template_no_new_tokens(tok):
+def test_prompt_lists_all_options_and_each_row_grades_one(tok):
     n_vocab = len(tok)
     r = Renderer(tok, {"max_len": 256})
     assert len(tok) == n_vocab                                           # renderer adds no tokens
     ex = Example.from_raw("Pick one.", "the state", ["alpha", "beta", "gamma"])
     it = r.assemble(r.tokenize(ex), None, False, relax=True)
-    text = tok.decode(it.input_ids.tolist())
-    assert text == ("<|im_start|>user\nthe state\n\nPick one.\n\nOptions:\n"
-                    "Option 1: alpha\nOption 2: beta\nOption 3: gamma\n<|im_end|>\n<|im_start|>assistant\n")
-    ids = it.input_ids.tolist()
-    for k, p in enumerate(it.cand_pos):                                  # read-out = newline ending option line k
-        assert ids[p] == r.option_end_id
-        assert tok.decode(ids[:p + 1]).endswith(f"Option {k + 1}: {['alpha', 'beta', 'gamma'][k]}\n")
+    prompt = ("<|im_start|>user\nthe state\n\nPick one.\n\nOptions:\n"
+              "Option 1: alpha\nOption 2: beta\nOption 3: gamma\n<|im_end|>\n<|im_start|>assistant\n")
+    assert len(it.seqs) == 3
+    for k, (x, c) in enumerate(zip(it.seqs, ["alpha", "beta", "gamma"])):
+        assert tok.decode(x.tolist()) == prompt + f"Option {k + 1}: {c}<|im_end|>"
     off = Renderer(tok, {"max_len": 256, "chat_template": False}).assemble(r.tokenize(ex), None, False, relax=True)
-    assert tok.decode(off.input_ids.tolist()).startswith("the state\n\nPick one.")
-    assert len(it.input_ids) - len(off.input_ids) == len(r.chat_prefix) + len(r.chat_suffix)
+    assert tok.decode(off.seqs[0].tolist()).startswith("the state\n\nPick one.\n\nOptions:\nOption 1: alpha\n")
 
 
 def test_shuffle_relabels_options_in_display_order(tok):
     r = Renderer(tok, {"max_len": 256})
     ex = Example.from_raw("Pick one.", "s", ["alpha", "beta", "gamma", "delta"])
     it = r.assemble(r.tokenize(ex), np.random.default_rng(1), True, relax=True)
-    text = tok.decode(it.input_ids.tolist())
     shown = [["alpha", "beta", "gamma", "delta"][i] for i in it.order]
-    assert "".join(f"Option {k + 1}: {c}\n" for k, c in enumerate(shown)) in text
+    listing = "".join(f"Option {k + 1}: {c}\n" for k, c in enumerate(shown))
+    for k, (x, c) in enumerate(zip(it.seqs, shown)):
+        text = tok.decode(x.tolist())
+        assert listing in text and text.endswith(f"assistant\nOption {k + 1}: {c}<|im_end|>")
+
+
+def test_max_graded_subsamples_rows_but_prompt_shows_all(tok):
+    r = Renderer(tok, {"max_len": 1024, "max_graded": 4})
+    ex = mk_example(10, ntop=1)
+    it = r.assemble(r.tokenize(ex), np.random.default_rng(0), True)
+    assert len(it.seqs) == 4 and len(it.kept) == 10 and (it.tiers == 0).sum() == 1 and (it.tiers > 0).any()
+    text = tok.decode(it.seqs[0].tolist())
+    assert all(f"Option {k}: " in text for k in range(1, 11))          # all 10 options listed in the prompt
+    it2 = r.reshuffle(it, np.random.default_rng(5))                     # reshuffle keeps the same graded set
+    assert sorted(it2.order.tolist()) == sorted(it.order.tolist())

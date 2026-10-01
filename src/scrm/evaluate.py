@@ -20,14 +20,14 @@ def _amp(device, enabled=True):
 
 
 @torch.no_grad()
-def run_eval(model, batches, lcfg, device, amp=True) -> dict:
+def run_eval(model, batches, lcfg, device, amp=True, max_tokens=None) -> dict:
     was = model.training
     model.eval()
     acc = MetricAccumulator()
     for b in batches:
         bd = to_device(b, device)
         with _amp(device, amp):
-            r = model(bd["input_ids"], bd["attention_mask"], bd["candidate_positions"], bd["candidate_mask"])
+            r = model.score(bd, max_tokens=max_tokens)
         lo = compute_loss(r.float(), bd["tiers"], lcfg, bd["pair_mask"])
         loss = lo.parts["bt"]
         acc.add(r.float().cpu(), b["tiers"], b["family"], b["source_id"], loss.cpu())
@@ -50,7 +50,7 @@ def _rewards_for(model, items, renderer, bcfg, device, amp):
     for g in groups:
         b = to_device(collate([items[i] for i in g], renderer.pad_id), device)
         with _amp(device, amp):
-            r = model(b["input_ids"], b["attention_mask"], b["candidate_positions"], b["candidate_mask"]).float().cpu()
+            r = model.score(b, max_tokens=bcfg["max_tokens_per_batch"]).float().cpu()
         for k, i in enumerate(g):
             out[i] = r[k, : len(items[i].order)].numpy()
     return out
@@ -99,7 +99,7 @@ def main(argv=None):
     parse = lambda L: {k: v.split(",") for k, v in (x.split("=", 1) for x in L)}
     filters = {"include": parse(a.filter), "exclude": parse(a.exclude)}
     es = EvalSet.from_config(cfg, renderer, a.split, filters, a.max_rows, a.per_source)
-    metrics = run_eval(model, es.batches(), cfg["loss"], device)
+    metrics = run_eval(model, es.batches(), cfg["loss"], device, max_tokens=cfg["data"]["batch"]["max_tokens_per_batch"])
     perm = run_perm_eval(model, es, renderer, cfg["data"]["perm_eval_rows"], cfg["data"]["batch"], device)
     res = {"ckpt": a.ckpt, "split": a.split, "filters": filters, "n_rows": es.n_rows, "n_dropped": es.n_dropped,
            "metrics": metrics, "permutation": perm}

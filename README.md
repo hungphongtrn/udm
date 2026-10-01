@@ -3,10 +3,11 @@
 A reward model that scores every candidate **in the context of the whole candidate set**:
 `r_i = f(x, C, c_i)`.
 
-- One forward pass of a Qwen3.5-4B text decoder (LoRA, Liger kernels) over a plain chat-format prompt, InstructGPT-style
-  with no new tokens: `<|im_start|>user` state, instruction, then `Options:` / `Option 1: …` / `Option 2: …`, ending at the
-  assistant header.
-- The hidden state at the newline ending each option line is projected 2560 → 768.
+- A Qwen3.5-4B text decoder (LoRA, Liger kernels) reads plain chat-format text, InstructGPT-style, with no new tokens.
+  For each graded option there is one sequence: the user turn shows the state, the instruction and **all** options
+  (`Option 1: …`, `Option 2: …`), and the assistant turn is the single option being graded (`Option k: …<|im_end|>`).
+  The LLM sees every option but grades one.
+- The hidden state at that final `<|im_end|>` is the option's embedding; it is projected 2560 → 768.
 - A 2-layer bidirectional Set Transformer (no positional embeddings) runs over those vectors.
 - An MLP head gives one scalar reward per candidate.
 - Training uses Bradley–Terry loss over tier pairs (`tier_i < tier_j`; same-tier pairs are never trained).
