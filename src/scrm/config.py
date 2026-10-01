@@ -27,7 +27,6 @@ DEFAULTS: dict[str, Any] = {
         # text decoder: full-attention q/k/v/o, Gated DeltaNet in_proj_qkv/z/a/b + out_proj, MLP gate/up/down.
         "lora": {"enabled": True, "r": 64, "alpha": 16, "dropout": 0.05, "use_rslora": True,
                  "target_modules": "all-linear"},
-        "train_special_tokens": "auto",    # auto -> True unless freeze_backbone
         "input_norm": True,                # LayerNorm(d) before the d->d_set projection
         "d_set": 768,
         "set_layers": 2,                   # 0 = no-interaction ablation
@@ -67,7 +66,7 @@ DEFAULTS: dict[str, Any] = {
     },
     "train": {
         "max_steps": 10000, "epochs": None, "grad_accum": 8,
-        "lr_lora": 1e-4, "lr_head": 5e-4, "lr_special": 5e-4,
+        "lr_lora": 1e-4, "lr_head": 5e-4,
         "weight_decay": 0.01, "warmup_steps": 200, "warmup_ratio": None, "min_lr_ratio": 0.0,
         "grad_clip": 1.0, "amp": True, "device": "auto",
         "log_every": 10, "eval_every": 500, "hist_every": 500, "save_every": 500, "keep_last": 3,

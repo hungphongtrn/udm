@@ -10,12 +10,12 @@ from scrm.data import EvalSet, Pred, Router, make_batches, make_train_loader, bu
 from scrm.render import Example, Renderer, parse_row, render_instruction, render_state, subsample_indices
 from scrm.synth import write_synth
 from scrm.tiny import make_tiny_tokenizer
-from scrm.tokens import CAND_END, SPECIAL_TOKENS, prepare_tokenizer
+from scrm.tokens import prepare_tokenizer
 
 
 @pytest.fixture(scope="module")
 def tok():
-    t, _, _ = prepare_tokenizer(make_tiny_tokenizer())
+    t = prepare_tokenizer(make_tiny_tokenizer())
     return t
 
 
@@ -62,7 +62,7 @@ def test_collator_positions_point_at_candidate_end(tok):
     r = Renderer(tok, {"max_len": 256})
     items = [r.assemble(r.tokenize(mk_example(n)), np.random.default_rng(i), True) for i, n in enumerate([5, 9, 3])]
     b = collate(items, r.pad_id)
-    end_id = tok.convert_tokens_to_ids(CAND_END)
+    end_id = r.option_end_id
     B, N = b["candidate_mask"].shape
     for i in range(B):
         for j in range(N):
@@ -71,13 +71,14 @@ def test_collator_positions_point_at_candidate_end(tok):
                 assert b["tiers"][i, j] >= 0
             else:
                 assert b["tiers"][i, j] == -1
-        assert (b["input_ids"][i] == end_id).sum() == b["candidate_mask"][i].sum()
+        n = int(b["candidate_mask"][i].sum())
+        assert len(set(b["candidate_positions"][i, :n].tolist())) == n
     assert b["pair_mask"].shape == (3, N, N)
     assert (b["pair_mask"][~b["candidate_mask"]]).sum() == 0
 
 
 def test_shuffle_vs_canonical(tok):
-    r = Renderer(tok, {"max_len": 256})
+    r = Renderer(tok, {"max_len": 512})
     t = r.tokenize(mk_example(12))
     a = r.assemble(t, None, False)
     b = r.assemble(t, None, False)
@@ -108,8 +109,7 @@ def test_truncation_budget_and_tier0(tok):
     ids = it.input_ids.tolist()
     body = ids[len(r.chat_prefix): len(ids) - len(r.chat_suffix)]        # chat-template wrapper around the body
     assert ids[:len(r.chat_prefix)] == r.chat_prefix and ids[len(ids) - len(r.chat_suffix):] == r.chat_suffix
-    assert body[0] == tok.convert_tokens_to_ids(SPECIAL_TOKENS[0])
-    assert body[-1] == tok.convert_tokens_to_ids(SPECIAL_TOKENS[-1])
+    assert body[-1] == r.option_end_id and it.cand_pos[-1] == len(ids) - len(r.chat_suffix) - 1
 
 
 def test_example_dropped_when_no_pair_possible(tok):
@@ -172,15 +172,28 @@ def test_eval_set_deterministic_and_excludes_ood(synth, tok):
     assert max(Counter(x["source_id"] for x in rows).values()) <= 10
 
 
-def test_chat_template_wraps_and_stops_at_assistant_header(tok):
+def test_plain_text_layout_in_chat_template_no_new_tokens(tok):
+    n_vocab = len(tok)
     r = Renderer(tok, {"max_len": 256})
-    it = r.assemble(r.tokenize(mk_example(4)), None, False)
+    assert len(tok) == n_vocab                                           # renderer adds no tokens
+    ex = Example.from_raw("Pick one.", "the state", ["alpha", "beta", "gamma"])
+    it = r.assemble(r.tokenize(ex), None, False, relax=True)
     text = tok.decode(it.input_ids.tolist())
-    assert text.startswith("<|im_start|>user\n<|state_start|>")
-    assert text.endswith("<|candidate_set_end|><|im_end|>\n<|im_start|>assistant\n")   # no <think>, nothing after
-    end_id = tok.convert_tokens_to_ids(CAND_END)
-    assert all(it.input_ids[p] == end_id for p in it.cand_pos)
-    assert len(it.input_ids) <= 256
-    off = Renderer(tok, {"max_len": 256, "chat_template": False}).assemble(r.tokenize(mk_example(4)), None, False)
+    assert text == ("<|im_start|>user\nthe state\n\nPick one.\n\nOptions:\n"
+                    "Option 1: alpha\nOption 2: beta\nOption 3: gamma\n<|im_end|>\n<|im_start|>assistant\n")
+    ids = it.input_ids.tolist()
+    for k, p in enumerate(it.cand_pos):                                  # read-out = newline ending option line k
+        assert ids[p] == r.option_end_id
+        assert tok.decode(ids[:p + 1]).endswith(f"Option {k + 1}: {['alpha', 'beta', 'gamma'][k]}\n")
+    off = Renderer(tok, {"max_len": 256, "chat_template": False}).assemble(r.tokenize(ex), None, False, relax=True)
+    assert tok.decode(off.input_ids.tolist()).startswith("the state\n\nPick one.")
     assert len(it.input_ids) - len(off.input_ids) == len(r.chat_prefix) + len(r.chat_suffix)
-    assert tok.decode(off.input_ids.tolist()).startswith("<|state_start|>")
+
+
+def test_shuffle_relabels_options_in_display_order(tok):
+    r = Renderer(tok, {"max_len": 256})
+    ex = Example.from_raw("Pick one.", "s", ["alpha", "beta", "gamma", "delta"])
+    it = r.assemble(r.tokenize(ex), np.random.default_rng(1), True, relax=True)
+    text = tok.decode(it.input_ids.tolist())
+    shown = [["alpha", "beta", "gamma", "delta"][i] for i in it.order]
+    assert "".join(f"Option {k + 1}: {c}\n" for k, c in enumerate(shown)) in text

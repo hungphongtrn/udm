@@ -208,7 +208,7 @@ def test_trainer_round_trip_through_real_build_path(tmp_path):
     from scrm.data import EvalSet, select_eval_rows
     from scrm.render import Renderer
     from scrm.tiny import make_tiny_tokenizer
-    from scrm.tokens import CAND_END, prepare_tokenizer
+    from scrm.tokens import prepare_tokenizer
 
     root, out = tmp_path / "src", tmp_path / "out"
     # tasksource: all fixture rows written into the file of their split (+ an empty-state row etc.)
@@ -238,12 +238,12 @@ def test_trainer_round_trip_through_real_build_path(tmp_path):
     for sp in ("train", "validation", "test"):                    # make sure every split has at least one file
         assert list((out / "data").glob(f"{sp}-*.parquet")), sp
 
-    tok, _, _ = prepare_tokenizer(make_tiny_tokenizer())
+    tok = prepare_tokenizer(make_tiny_tokenizer())
     cfg = load_config(None, [f"data.local_dir={out}", "data.streaming=false", "data.num_workers=0",
                              "data.render.max_len=4096", "data.render.cand_max_tokens=48",
                              "data.render.max_candidates=64"])
     renderer = Renderer(tok, cfg["data"]["render"])
-    end_id = tok.convert_tokens_to_ids(CAND_END)
+    end_id = renderer.option_end_id
     total = 0
     families = set()
     for sp in ("train", "validation", "test"):
@@ -255,7 +255,7 @@ def test_trainer_round_trip_through_real_build_path(tmp_path):
                            sorted(es.items, key=lambda i: i.decision_set_id)):
             assert row["decision_set_id"] == it.decision_set_id
             n_opts = len(json.loads(row["options_json"]))
-            assert int((it.input_ids == end_id).sum()) == n_opts                      # every candidate rendered
+            assert all(it.input_ids[p] == end_id for p in it.cand_pos)                 # read-out = option-line end
             assert len(it.cand_pos) == n_opts
             families.add(it.family)
         for b in es.batches():

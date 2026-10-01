@@ -1,11 +1,29 @@
 # SCRM training guide
 
-Set-Conditioned Reward Model: a Qwen3.5-4B text backbone (+LoRA, Liger kernels) reads one packed sequence, wrapped in the
-tokenizer's chat template as a single user turn and ending right after the assistant header (generation prompt; Qwen3.5's
-`<think>` line is cut):
-`<|im_start|>user\n<|state_start|> instruction + state <|state_end|><|candidate_set_start|> <|candidate_start|> text <|candidate_end|> ... <|candidate_set_end|><|im_end|>\n<|im_start|>assistant\n`.
-Controlled by `data.render.chat_template` (default true) and `data.render.system_prompt` (default none).
-The hidden state at every `<|candidate_end|>` is projected (d -> 768), passed through a 2-layer bidirectional
+Set-Conditioned Reward Model: a Qwen3.5-4B text backbone (+LoRA, Liger kernels) reads one sequence per decision
+set, InstructGPT-style: plain text in the pretrained chat format, **no new tokens**. The whole set is one user turn of the
+tokenizer's chat template, ending right after the assistant header (Qwen3.5's `<think>` line is cut):
+
+```
+<|im_start|>user
+{state}
+
+{instruction}
+
+Options:
+Option 1: {candidate 1}
+Option 2: {candidate 2}
+...
+<|im_end|>
+<|im_start|>assistant
+```
+
+Empty state / instruction blocks are omitted. Options are numbered in display order (shuffled every time in training,
+canonical order in eval). Each candidate's reward is read from the hidden state of the `\n` that ends its option line: a
+fixed, single-token position (pieces are tokenised separately and concatenated, so the newline never merges with the
+candidate text) that has seen the state, the instruction, the earlier options and the whole option itself.
+Knobs: `data.render.chat_template`, `system_prompt`, `options_header`, `option_label`.
+Those per-option hidden states are projected (d -> 768), passed through a 2-layer bidirectional
 pre-LN transformer encoder **without positional embeddings** (so scores do not depend on candidate order), and an MLP head
 returns one unbounded scalar reward per candidate. Training uses Bradley-Terry over tier pairs
 (`tier_i < tier_j`, never same-tier). Data contract: `docs/CONTRACT.md`.
@@ -54,12 +72,8 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
   model is built: fused RMSNorm (incl. q/k norms) and SwiGLU MLP. Liger RoPE is not available for Qwen3.5 and
   fused-linear-cross-entropy is irrelevant (no LM head). CUDA only; silently skipped on CPU. The SCRM wrapper
   (`SCRM`, a plain `torch.nn.Module`) holds the patched HF backbone.
-* **Special tokens.** Six markers are added with `tokenizer.add_special_tokens`. Qwen3.5's embedding matrix has 248320 rows but
-  the tokenizer only 248077 tokens, so the new ids (248077-248082) land in existing unused rows: **no embedding resize**.
-  Instead of `modules_to_save` (which would copy and train the full 248320x2560 matrix: ~1.3 GB + fp32 grads/Adam),
-  the six rows are replaced by a small trainable `[6, d]` fp32 parameter via a forward hook on `embed_tokens`
-  (init = mean embedding + small seeded noise). It works with LoRA, frozen backbone and 4-bit loading, costs ~15k params,
-  and is saved in `scrm_head.pt`. If a tokenizer has fewer rows than ids, the embeddings are resized automatically.
+* **No new tokens.** The tokenizer and embedding matrix are used exactly as pretrained (nothing added or resized,
+  no extra trainable embeddings); only LoRA + the set block/head train.
 * **No LM head.** Only the text decoder is used, so the 248k-vocab logits never exist (saves several GB).
 * **Precision.** Backbone bf16, LoRA weights fp32 (peft default), set block + head fp32 (autocast disabled there).
 * **Input LayerNorm.** A `LayerNorm(d)` precedes the d->768 projection (`model.input_norm=false` to drop it) to
@@ -137,11 +151,11 @@ without grad).
 
 ## Optimisation
 
-AdamW, groups: LoRA `lr_lora` (1e-4), set block/head `lr_head` (5e-4), marker embeddings `lr_special` (5e-4); linear warmup
+AdamW, groups: LoRA `lr_lora` (1e-4), set block/head `lr_head` (5e-4); linear warmup
 + cosine to `min_lr_ratio`; clip 1.0; bf16 autocast; `grad_accum`. Length via `train.max_steps` or `train.epochs`
 (epochs = passes over the capped group sizes; needs non-streaming; steps are estimated from the average batch size).
 Checkpoints every `save_every` steps (`step_XXXXXXX/`, last `keep_last` kept) and `best/` (by validation `pair_acc`):
-`adapter/` (LoRA), `scrm_head.pt` (set block, head, marker embeddings), `tokenizer/`, `scrm_config.json`,
+`adapter/` (LoRA), `scrm_head.pt` (set block, head), `tokenizer/`, `scrm_config.json`,
 `trainer_state.pt` (optimizer, scheduler, step). `--resume auto|DIR` restores weights, optimizer, scheduler and step; the data
 stream restarts with a different seed (it is not replayed exactly).
 
@@ -162,7 +176,7 @@ sample (`eval_max_rows`, `eval_max_rows_per_source`), canonical candidate order:
 
 ## Ablations
 
-* `configs/ablation_frozen.yaml`: frozen Qwen3.5 (no LoRA, no marker-embedding training); only set block + head learn.
+* `configs/ablation_frozen.yaml`: frozen Qwen3.5 (no LoRA); only set block + head learn.
 * `configs/ablation_no_set.yaml`: `model.set_layers=0` -> per-candidate scoring, no interaction.
 * Loss variants: `loss.w_listwise=1 loss.w_bt=0`, `loss.margin_alpha=0.5`, `loss.w_plackett_luce=...`.
 * Other: `model.d_set`, `model.lora.r`, `data.render.max_candidates`, MASSIVE cap/weights.

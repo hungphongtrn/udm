@@ -28,19 +28,15 @@ from .wandb_utils import init_wandb
 
 # ----------------------------------------------------------------------------- optimiser
 def make_optimizer(model, tcfg: dict):
-    lora, special, dec, nodec = [], [], [], []
+    lora, dec, nodec = [], [], []
     for n, p in model.backbone.named_parameters():
         if p.requires_grad:
             lora.append(p)
-    if model.special_emb.requires_grad:
-        special.append(model.special_emb)
     for n, p in model.set_encoder.named_parameters():
         (nodec if (p.ndim < 2) else dec).append(p)
     groups = []
     if lora:
         groups.append({"params": lora, "lr": tcfg["lr_lora"], "weight_decay": 0.0, "name": "lora"})
-    if special:
-        groups.append({"params": special, "lr": tcfg["lr_special"], "weight_decay": 0.0, "name": "special"})
     groups.append({"params": dec, "lr": tcfg["lr_head"], "weight_decay": tcfg["weight_decay"], "name": "head"})
     groups.append({"params": nodec, "lr": tcfg["lr_head"], "weight_decay": 0.0, "name": "head_nodecay"})
     fused = torch.cuda.is_available() and next(model.set_encoder.parameters()).is_cuda

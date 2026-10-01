@@ -89,7 +89,8 @@ def test_resume_restores_weights(synth, tmp_path):
     res = train(cfg)
     m = load_scrm(res["ckpt"])
     sd = torch.load(f"{res['ckpt']}/scrm_head.pt")
-    assert torch.equal(m.special_emb.detach(), sd["special_emb"])
+    msd = m.head_state_dict()
+    assert sd.keys() == msd.keys() and all(torch.equal(msd[k], sd[k]) for k in sd)
 
 
 def test_permutation_consistency_loss_runs(synth, tmp_path):

@@ -1,7 +1,6 @@
 import torch
 
 from scrm.model import SetEncoder, build_scrm
-from scrm.tokens import SPECIAL_TOKENS
 
 TINY = {"name_or_path": "tiny", "dtype": "float32", "d_set": 32, "set_heads": 4,
         "lora": {"enabled": True, "r": 4, "alpha": 8, "dropout": 0.0}}
@@ -35,29 +34,27 @@ def test_no_set_layers_ablation_is_per_candidate():
     assert torch.allclose(enc(E, m)[:, :2], enc(E[:, :2], m[:, :2]), atol=1e-6)
 
 
-def test_full_model_forward_and_special_tokens():
+def test_full_model_forward_no_new_tokens():
+    from scrm.tiny import make_tiny_tokenizer
     model, tok = build_scrm(TINY, "cpu")
-    ids = [tok.convert_tokens_to_ids(t) for t in SPECIAL_TOKENS]
-    assert len(set(ids)) == 6 and all(i >= 0 for i in ids)
+    assert len(tok) == len(make_tiny_tokenizer())                        # no tokens added
     B, L = 2, 12
     x = torch.randint(0, 300, (B, L))
-    x[:, 3] = ids[4]; x[:, 7] = ids[4]
     pos = torch.tensor([[3, 7], [3, 7]])
     cm = torch.tensor([[1, 1], [1, 0]], dtype=torch.bool)
     r = model(x, torch.ones(B, L, dtype=torch.long), pos, cm)
     assert r.shape == (2, 2) and r[1, 1] == 0 and r.dtype == torch.float32
-    # trainable: lora + special_emb + head, but not base weights
+    # trainable: lora + head, but not base weights
     names = [n for n, p in model.named_parameters() if p.requires_grad]
-    assert any("lora_" in n for n in names) and "special_emb" in names
+    assert any("lora_" in n for n in names) and any(n.startswith("set_encoder.") for n in names)
     assert not any("embed_tokens" in n for n in names)
     r.sum().backward()
-    assert model.special_emb.grad is not None and model.special_emb.grad.abs().sum() > 0
+    assert any(p.grad is not None and p.grad.abs().sum() > 0 for n, p in model.named_parameters() if "lora_" in n)
 
 
 def test_frozen_backbone_has_no_backbone_grads():
     cfg = dict(TINY, freeze_backbone=True)
     model, tok = build_scrm(cfg, "cpu")
-    assert not model.special_emb.requires_grad
     assert not any(p.requires_grad for p in model.backbone.parameters())
     x = torch.randint(0, 300, (1, 6))
     r = model(x, torch.ones(1, 6, dtype=torch.long), torch.tensor([[2, 5]]), torch.ones(1, 2, dtype=torch.bool))

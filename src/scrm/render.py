@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 
-from .tokens import SPECIAL_TOKENS
 
 # ----------------------------------------------------------------------------- text rendering
 
@@ -123,9 +122,12 @@ def parse_row(row: dict, use_candidate_rows: bool = True) -> Example | None:
 
 DEFAULT_RENDER = {"max_len": 2048, "cand_max_tokens": 128, "state_max_tokens": 1024, "instr_max_tokens": 256,
                   "max_candidates": 64, "min_state_tokens": 64, "state_truncate": "middle",
-                  # wrap the packed sequence as one user turn of the tokenizer's chat template and end right after
+                  # wrap the sequence as one user turn of the tokenizer's chat template and end right after
                   # the assistant header ("<|im_start|>assistant\n"; any <think> the template appends is cut)
-                  "chat_template": True, "system_prompt": None}
+                  "chat_template": True, "system_prompt": None,
+                  # plain-text layout, no new tokens:  {state}\n\n{instruction}\n\nOptions:\nOption 1: {c1}\n...
+                  # each candidate's reward is read at the "\n" that ends its option line
+                  "options_header": "Options:\n", "option_label": "Option {k}: "}
 
 _SENTINEL = "@@SCRM_BODY@@"
 
@@ -220,10 +222,14 @@ class Renderer:
     def __init__(self, tokenizer, rcfg: dict | None = None):
         self.tok = tokenizer
         self.cfg = {**DEFAULT_RENDER, **(rcfg or {})}
-        self.sp = {t: tokenizer.convert_tokens_to_ids(t) for t in SPECIAL_TOKENS}
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
         self.marker = tokenizer("\n...\n", add_special_tokens=False)["input_ids"]
         self.nl2 = tokenizer("\n\n", add_special_tokens=False)["input_ids"]
+        nl = tokenizer("\n", add_special_tokens=False)["input_ids"]
+        self.option_end_id = nl[-1]          # reward read-out position: newline ending each option line
+        self.header = tokenizer(self.cfg["options_header"], add_special_tokens=False)["input_ids"]
+        self._labels: dict[int, list[int]] = {}
+        self.lab_max = max(len(self.label(k)) for k in (1, 9, 10, 99, 100, max(self.cfg["max_candidates"], 1)))
         self.chat_prefix, self.chat_suffix = [], []
         if self.cfg.get("chat_template"):
             if not getattr(tokenizer, "chat_template", None):
@@ -232,6 +238,11 @@ class Renderer:
             pre, post = chat_wrap_text(tokenizer, self.cfg.get("system_prompt"))
             self.chat_prefix = tokenizer(pre, add_special_tokens=False)["input_ids"]
             self.chat_suffix = tokenizer(post, add_special_tokens=False)["input_ids"]
+
+    def label(self, k: int) -> list[int]:
+        if k not in self._labels:
+            self._labels[k] = self.tok(self.cfg["option_label"].format(k=k), add_special_tokens=False)["input_ids"]
+        return self._labels[k]
 
     # --- tokenisation
     def tokenize(self, ex: Example) -> TokExample:
@@ -280,11 +291,12 @@ class Renderer:
         else:
             idxs = list(kept)
         cand = t.cand_ids if cap is None else [x[:cap] for x in t.cand_ids]
-        overhead = 1 + len(t.instr_ids) + 3 + len(self.chat_prefix) + len(self.chat_suffix)
+        overhead = (len(self.chat_prefix) + len(self.chat_suffix) + len(t.instr_ids) + len(self.nl2)
+                    + len(self.header))
         min_state = min(len(t.state_ids), c["min_state_tokens"])
 
         def cost(ix):
-            return sum(len(cand[i]) + 2 for i in ix)
+            return sum(len(cand[i]) + self.lab_max + 1 for i in ix)
 
         if kept is None:
             # budget loop 1: drop unprotected candidates (random) until minimal state fits
@@ -319,15 +331,16 @@ class Renderer:
         avail_state = c["max_len"] - overhead - cost(order)
         sb = min(avail_state, c["state_max_tokens"] or avail_state)
         state = self._truncate_state(t.state_ids, sb)
-        sp = self.sp
-        ids = list(self.chat_prefix) + [sp["<|state_start|>"]] + t.instr_ids + state + [sp["<|state_end|>"], sp["<|candidate_set_start|>"]]
+        ids = list(self.chat_prefix)
+        if state:
+            ids += state + self.nl2
+        ids += t.instr_ids + self.header
         pos = []
-        for i in order:
-            ids.append(sp["<|candidate_start|>"])
-            ids.extend(cand[i])
-            ids.append(sp["<|candidate_end|>"])
+        for k, i in enumerate(order, 1):
+            ids += self.label(k)
+            ids += cand[i]
+            ids.append(self.option_end_id)
             pos.append(len(ids) - 1)
-        ids.append(sp["<|candidate_set_end|>"])
         ids.extend(self.chat_suffix)
         order_a = np.asarray(order)
         it = Item(np.asarray(ids, dtype=np.int64), np.asarray(pos, dtype=np.int64), tiers[order_a].astype(np.int64),

@@ -60,9 +60,8 @@ are dropped and counted in the build report.
   (streaming or local cache) and only needs: `state_json`, `instruction_json`,
   `options_json`, `tier_json`, `candidate_rows`, `family`, `source_id`,
   `label_kind`, `decision_set_id`.
-* Prompt rendering: the whole sequence is one user turn of the tokenizer's chat template, ending right after the
-  assistant header (`<|im_start|>assistant\n`). Inside it: instruction text (+ criteria if present), state rendered as
-  text (string as-is; object → pretty JSON), then each candidate wrapped in the
-  boundary tokens. Candidate order is randomly shuffled every time in training,
-  and kept canonical in eval.
+* Prompt rendering (no new tokens): one user turn of the tokenizer's chat template, ending right after the assistant
+  header: `{state}\n\n{instruction}\n\nOptions:\nOption 1: {c1}\nOption 2: {c2}\n...` (state string as-is, object as
+  JSON; instruction + criteria if present). Each candidate's reward is read at the newline ending its option line.
+  Candidate order is randomly shuffled every time in training, and kept canonical in eval.
 * Pair mask: `M[i,j] = tier[i] < tier[j]`.

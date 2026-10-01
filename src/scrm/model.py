@@ -1,4 +1,4 @@
-"""SCRM model: Qwen3.5 text backbone (+LoRA) -> candidate_end hidden states -> set transformer -> scalar reward."""
+"""SCRM model: Qwen3.5 text backbone (+LoRA) -> hidden state at the end of each option line -> set transformer -> scalar reward."""
 from __future__ import annotations
 
 import contextlib
@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 from .config import DEFAULTS, deep_update
-from .tokens import SPECIAL_TOKENS, CAND_END, prepare_tokenizer
+from .tokens import prepare_tokenizer
 
 
 class SetEncoder(nn.Module):
@@ -46,33 +46,18 @@ class SetEncoder(nn.Module):
 
 
 class SCRM(nn.Module):
-    def __init__(self, backbone: nn.Module, hidden: int, special_ids: list[int], special_init: torch.Tensor,
-                 cfg: dict, train_special: bool = True, backbone_trainable: bool = True):
+    def __init__(self, backbone: nn.Module, hidden: int, cfg: dict, backbone_trainable: bool = True):
         super().__init__()
         self.backbone = backbone
         self.cfg = cfg
         self.backbone_trainable = backbone_trainable
         self.set_encoder = SetEncoder(hidden, cfg["d_set"], cfg["set_layers"], cfg["set_heads"], cfg["set_ffn_mult"],
                                       cfg["set_dropout"], cfg.get("head_hidden"), cfg.get("input_norm", True))
-        self.register_buffer("special_ids", torch.tensor(special_ids, dtype=torch.long), persistent=False)
-        self.special_emb = nn.Parameter(special_init.clone().float(), requires_grad=train_special)
-        self.train_special = train_special
         self.tokenizer = None
         self.render_cfg: dict | None = None
-        self._hook = backbone.get_input_embeddings().register_forward_hook(self._embed_hook)
-
-    # Overrides the (unused / reserved) embedding rows of the 6 marker tokens with a small trainable
-    # [6, d] parameter. Equivalent to modules_to_save on those rows only, with ~15k trainable params
-    # instead of a full vocab x hidden copy, and independent of peft / 4-bit quantisation.
-    def _embed_hook(self, module, inputs, out):
-        ids = inputs[0]
-        match = ids.unsqueeze(-1) == self.special_ids          # [B,L,K]
-        sp = match.to(out.dtype) @ self.special_emb.to(out.dtype)
-        return torch.where(match.any(-1, keepdim=True), sp, out)
 
     def encode(self, input_ids, attention_mask):
-        needs_grad = self.backbone_trainable or (self.train_special and torch.is_grad_enabled())
-        ctx = contextlib.nullcontext() if needs_grad else torch.no_grad()
+        ctx = contextlib.nullcontext() if self.backbone_trainable else torch.no_grad()
         with ctx:
             return self.backbone(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state
 
@@ -84,15 +69,11 @@ class SCRM(nn.Module):
 
     # ----- parameter groups / persistence -----
     def head_state_dict(self) -> dict:
-        sd = {f"set_encoder.{k}": v.detach().cpu() for k, v in self.set_encoder.state_dict().items()}
-        sd["special_emb"] = self.special_emb.detach().cpu()
-        return sd
+        return {f"set_encoder.{k}": v.detach().cpu() for k, v in self.set_encoder.state_dict().items()}
 
     def load_head_state_dict(self, sd: dict):
         own = {k[len("set_encoder."):]: v for k, v in sd.items() if k.startswith("set_encoder.")}
         self.set_encoder.load_state_dict(own)
-        with torch.no_grad():
-            self.special_emb.copy_(sd["special_emb"].to(self.special_emb.device))
 
     def lora_parameters(self):
         return [p for n, p in self.backbone.named_parameters() if p.requires_grad]
@@ -218,22 +199,11 @@ def build_scrm(mcfg: dict, device: torch.device | str = "cpu", tokenizer=None, a
             tokenizer = make_tiny_tokenizer()
         else:
             tokenizer = AutoTokenizer.from_pretrained(mcfg["name_or_path"])
-    tokenizer, sp_map, n_base = prepare_tokenizer(tokenizer)
-    backbone = _load_backbone(mcfg, device, n_base)
-    emb = backbone.get_input_embeddings()
-    if len(tokenizer) > emb.num_embeddings:
-        backbone.resize_token_embeddings(len(tokenizer))
-        emb = backbone.get_input_embeddings()
+    tokenizer = prepare_tokenizer(tokenizer)
+    backbone = _load_backbone(mcfg, device, len(tokenizer))
     hidden = backbone.config.hidden_size
-    # init marker embeddings: mean of real vocab rows + small seeded noise (distinct per token)
-    with torch.no_grad():
-        w = emb.weight[:min(n_base, emb.num_embeddings)].float()
-        mean, std = w.mean(0), w.std(0).mean()
-        g = torch.Generator().manual_seed(seed + 17)
-        init = mean.cpu().unsqueeze(0) + 0.5 * std.cpu() * torch.randn(len(SPECIAL_TOKENS), hidden, generator=g)
     freeze = mcfg["freeze_backbone"]
     lora = mcfg["lora"]
-    train_special = (not freeze) if mcfg["train_special_tokens"] == "auto" else bool(mcfg["train_special_tokens"])
 
     for p in backbone.parameters():
         p.requires_grad_(False)
@@ -251,11 +221,8 @@ def build_scrm(mcfg: dict, device: torch.device | str = "cpu", tokenizer=None, a
                             use_rslora=lora.get("use_rslora", True))
             backbone = get_peft_model(backbone, lc)
         backbone_trainable = True
-    model = SCRM(backbone, hidden, [sp_map[t] for t in SPECIAL_TOKENS], init, mcfg,
-                 train_special=train_special, backbone_trainable=backbone_trainable)
+    model = SCRM(backbone, hidden, mcfg, backbone_trainable=backbone_trainable)
     model.set_encoder.to(device)
-    model.special_emb.data = model.special_emb.data.to(device)
-    model.special_ids = model.special_ids.to(device)
     model.tokenizer = tokenizer
     return model, tokenizer
 

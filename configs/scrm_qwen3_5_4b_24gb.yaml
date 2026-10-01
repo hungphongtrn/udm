@@ -37,7 +37,6 @@ train:
   grad_accum: 8
   lr_lora: 1.0e-4
   lr_head: 5.0e-4
-  lr_special: 5.0e-4
   warmup_steps: 300
   eval_every: 1000
   save_every: 1000

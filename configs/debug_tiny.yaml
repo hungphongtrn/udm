@@ -29,5 +29,4 @@ train:
   keep_last: 2
   lr_lora: 1.0e-3
   lr_head: 2.0e-3
-  lr_special: 2.0e-3
 wandb: {enabled: false}
