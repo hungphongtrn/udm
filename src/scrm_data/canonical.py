@@ -72,10 +72,18 @@ def instruction_text_of(instruction_json: str) -> str:
     return dumps(obj)
 
 
-def content_key_hex(state_json: str, instruction_text: str, option_texts: Iterable[str]) -> str:
-    """Content key used for leakage / duplicate control: sha256 over state, instruction text and the
-    SORTED candidate texts (candidate order and labels do not matter)."""
-    payload = "\x1f".join([state_json, instruction_text, "\x1e".join(sorted(option_texts))])
+def instruction_key_of(instruction_json: str) -> str:
+    """Instruction part of the content key: '<type>\x1d<instruction text>' (type is '' for plain strings), so the
+    same state/options asked as `choice` and as `score` stay distinct decisions."""
+    obj = json.loads(instruction_json)
+    typ = obj.get("type", "") if isinstance(obj, dict) else ""
+    return f"{typ}\x1d{instruction_text_of(instruction_json)}"
+
+
+def content_key_hex(state_json: str, instruction_key: str, option_texts: Iterable[str]) -> str:
+    """Content key used for leakage / duplicate control: sha256 over state_json, the instruction key
+    (type + text) and the SORTED candidate texts (candidate order and labels do not matter)."""
+    payload = "\x1f".join([state_json, instruction_key, "\x1e".join(sorted(option_texts))])
     return sha256_hex(payload)
 
 
@@ -85,7 +93,7 @@ def key64(hex_digest: str) -> int:
 
 def content_key_from_columns(state_json: str, instruction_json: str, options_json: str) -> str:
     """Recompute the content key from stored columns (used for the export of existing rows)."""
-    return content_key_hex(state_json, instruction_text_of(instruction_json), json.loads(options_json).values())
+    return content_key_hex(state_json, instruction_key_of(instruction_json), json.loads(options_json).values())
 
 
 def hash_fraction(lineage_key: str) -> float:

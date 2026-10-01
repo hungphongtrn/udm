@@ -91,5 +91,5 @@ def build_row(meta: RowMeta, state: Any, instruction: Any, norm_texts: Sequence[
         "quarantine_reason_or_null": None,
         "candidate_rows": cand_rows,
     }
-    key = C.key64(C.content_key_hex(state_json, C.instruction_text_of(instruction_json), norm_texts))
+    key = C.key64(C.content_key_hex(state_json, C.instruction_key_of(instruction_json), norm_texts))
     return row, key

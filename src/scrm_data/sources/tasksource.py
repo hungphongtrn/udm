@@ -37,9 +37,7 @@ def convert(raw: dict, split: str, revision: str = REVISION, config: str = "defa
     options = list(raw.get("options") or [])
     target = list(raw.get("target") or [])
     raw_sha = C.sha256_hex(C.dumps({k: raw.get(k) for k in RAW_COLUMNS}))
-    state = raw["state"]
-    if state is None or state == "":
-        raise DropRow("empty_state")
+    state = raw["state"] if raw["state"] is not None else ""   # empty state is legitimate (options carry the content)
     meta = RowMeta(
         source_id=REPO_ID, source_revision=revision, source_config=config, source_split=split,
         source_row_id=str(raw["id"]), source_parent_id=str(raw["group_id"]),

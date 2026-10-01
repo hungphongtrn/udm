@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 from .. import canonical as C
 from ..rows import RowMeta, build_row
+from ..schema import PARTITION_ROLE
 from ..tiers import DropRow, agent_labeling, collapse_duplicates
 from .base import ConvResult, Unit, safe
 
@@ -181,7 +182,7 @@ def convert_clean(raw: dict, unit_split: str, revision: str = REVISION, config: 
                 t_idx = kept_i
     new_t = keep.index(t_idx)
     lineage = str(raw["id"])
-    split = C.hash_split(lineage)
+    split = "train"   # provisional; the real split is a hash of the content key (see below)
     raw_sha = C.sha256_hex(C.dumps({"id": raw["id"], "config": config}))
     src = raw["source"]
     meta = RowMeta(
@@ -199,4 +200,8 @@ def convert_clean(raw: dict, unit_split: str, revision: str = REVISION, config: 
         sl_extra["collapsed_duplicate_indices"] = collapsed
     labeling = agent_labeling(new_t, len(keep), lambda ids, e=sl_extra: dict(e))
     row, key = build_row(meta, state, instruction, [texts[i] for i in keep], labeling)
+    # general-clean-50k has no trajectory id: split deterministically (96/2/2) by a hash of the CONTENT key so
+    # identical content can never straddle splits.
+    split = C.hash_split(f"content:{key:016x}")
+    row["partition_role"] = PARTITION_ROLE[split]
     return ConvResult(split, row, key, None)
