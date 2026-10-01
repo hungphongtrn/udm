@@ -1,6 +1,6 @@
 # SCRM training guide
 
-Set-Conditioned Reward Model: a Qwen3-4B backbone (+LoRA) reads one packed sequence
+Set-Conditioned Reward Model: a Qwen3.5-4B text backbone (+LoRA, Liger kernels) reads one packed sequence
 `<|state_start|> instruction + state <|state_end|><|candidate_set_start|> <|candidate_start|> text <|candidate_end|> ... <|candidate_set_end|>`.
 The hidden state at every `<|candidate_end|>` is projected (d -> 768), passed through a 2-layer bidirectional
 pre-LN transformer encoder **without positional embeddings** (so scores do not depend on candidate order), and an MLP head
@@ -15,9 +15,9 @@ Code: `src/scrm/` (`model.py`, `losses.py`, `render.py`, `collator.py`, `data.py
 ```bash
 scripts/train/setup.sh [--flash-attn]          # venv, deps, hf + wandb login
 scripts/train/prefetch_data.sh data_cache/udm  # snapshot parquet (hf_transfer) -> training starts immediately / offline
-scripts/train/train.sh configs/scrm_qwen3_4b_24gb.yaml data.local_dir=data_cache/udm
-scripts/train/train.sh configs/scrm_qwen3_4b_24gb.yaml --resume auto data.local_dir=data_cache/udm
-scripts/train/eval.sh outputs/scrm_qwen3_4b_24gb/best --split test --out test.json data.local_dir=data_cache/udm
+scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml data.local_dir=data_cache/udm
+scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml --resume auto data.local_dir=data_cache/udm
+scripts/train/eval.sh outputs/scrm_qwen3_5_4b_24gb/best --split test --out test.json data.local_dir=data_cache/udm
 scripts/train/eval.sh outputs/.../best --split test --filter source_split=ood --out ood.json   # filtered eval
 scripts/train/smoke_test.sh                    # tiny random model, CPU ok, no downloads
 ```
@@ -38,13 +38,25 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
 
 ## Design choices
 
-* **Special tokens.** Six markers are added with `tokenizer.add_special_tokens`. Qwen3's embedding matrix has 151936 rows but
-  the tokenizer only 151669 tokens, so the new ids (151669-151674) land in existing unused rows: **no embedding resize**.
-  Instead of `modules_to_save` (which would copy and train the full 151936x2560 matrix: ~0.8 GB + fp32 grads/Adam),
+* **Backbone = Qwen3.5-4B text decoder.** `Qwen/Qwen3.5-4B` is a vision-language checkpoint (`Qwen3_5Model` = `visual` +
+  `language_model`). It is loaded with `AutoModel.from_pretrained`, the vision tower (0.33B) is deleted and only the
+  `Qwen3_5TextModel` (4.21B, hidden 2560, 32 layers) is kept. Layers are hybrid: 3 of every 4 are Gated DeltaNet
+  (linear attention, projections `in_proj_qkv`, `in_proj_z`, `out_proj`), every 4th is gated full attention
+  (`q/k/v/o_proj`). LoRA targets both kinds plus the MLP (r=64: ~122M params). Install `flash-linear-attention`
+  (in `requirements-train.txt`) and optionally `causal-conv1d` (`setup.sh --flash-attn`); without them transformers
+  falls back to a slow, memory-hungry torch implementation of the delta rule. Text-only inputs use plain 1D positions.
+* **Liger kernels.** `model.liger_kernel=true` (default) applies Liger through its HF integration
+  (`liger_kernel.transformers`, the same `apply_liger_kernel_to_qwen3_5` HF Trainer's `use_liger_kernel` calls), before the
+  model is built: fused RMSNorm (incl. q/k norms) and SwiGLU MLP. Liger RoPE is not available for Qwen3.5 and
+  fused-linear-cross-entropy is irrelevant (no LM head). CUDA only; silently skipped on CPU. The SCRM wrapper
+  (`SCRM`, a plain `torch.nn.Module`) holds the patched HF backbone.
+* **Special tokens.** Six markers are added with `tokenizer.add_special_tokens`. Qwen3.5's embedding matrix has 248320 rows but
+  the tokenizer only 248077 tokens, so the new ids (248077-248082) land in existing unused rows: **no embedding resize**.
+  Instead of `modules_to_save` (which would copy and train the full 248320x2560 matrix: ~1.3 GB + fp32 grads/Adam),
   the six rows are replaced by a small trainable `[6, d]` fp32 parameter via a forward hook on `embed_tokens`
   (init = mean embedding + small seeded noise). It works with LoRA, frozen backbone and 4-bit loading, costs ~15k params,
   and is saved in `scrm_head.pt`. If a tokenizer has fewer rows than ids, the embeddings are resized automatically.
-* **No LM head.** `AutoModel` (Qwen3Model) is used, so the 151k-vocab logits never exist (saves several GB).
+* **No LM head.** Only the text decoder is used, so the 248k-vocab logits never exist (saves several GB).
 * **Precision.** Backbone bf16, LoRA weights fp32 (peft default), set block + head fp32 (autocast disabled there).
 * **Input LayerNorm.** A `LayerNorm(d)` precedes the d->768 projection (`model.input_norm=false` to drop it) to
   tame Qwen's large-magnitude hidden dims.
@@ -53,16 +65,16 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
 
 ## Memory: 24 GB vs 40 GB
 
-Qwen3-4B has 4.02B params (8.0 GB in bf16). LoRA r=64 on all 7 projections = 132M params: fp32 weights + grads + Adam
-= ~2.1 GB. Gradient checkpointing keeps ~0.2 MB/token of layer inputs (36 layers x 2560 x bf16 = 0.18 MB) plus one layer of
+The Qwen3.5-4B text decoder has 4.21B params (8.4 GB in bf16). LoRA r=64 = 122M params: fp32 weights + grads + Adam
+= ~2 GB. Gradient checkpointing keeps ~0.16 MB/token of layer inputs (32 layers x 2560 x bf16) plus one layer of
 recompute activations. Hence at `max_tokens_per_batch=4096` (padded tokens per micro-batch) the estimated peak is
 roughly 14-17 GB (not measured on a GPU in this repo's CI; sdpa/flash-attn does not materialise attention matrices).
 
 | config | max_len | tokens / micro-batch | est. peak | notes |
 |---|---|---|---|---|
-| `scrm_qwen3_4b_24gb.yaml` | 2048 | 4096 | ~14-17 GB | bf16 base + LoRA |
+| `scrm_qwen3_5_4b_24gb.yaml` | 2048 | 4096 | ~14-17 GB | bf16 base + LoRA |
 | same + `model.quantize_4bit=true` | 2048 | 4096 | ~9-11 GB | QLoRA (nf4), a bit slower, needs bitsandbytes |
-| `scrm_qwen3_4b_40gb.yaml` | 4096 | 8192 | ~26-32 GB | |
+| `scrm_qwen3_5_4b_40gb.yaml` | 4096 | 8192 | ~26-32 GB | |
 | `ablation_frozen.yaml` | 2048 | 16384 | <14 GB | no grads through backbone |
 
 Knobs if you hit OOM: lower `data.batch.max_tokens_per_batch` (micro-batch) and raise `train.grad_accum`; lower
@@ -146,7 +158,7 @@ sample (`eval_max_rows`, `eval_max_rows_per_source`), canonical candidate order:
 
 ## Ablations
 
-* `configs/ablation_frozen.yaml`: frozen Qwen3 (no LoRA, no marker-embedding training); only set block + head learn.
+* `configs/ablation_frozen.yaml`: frozen Qwen3.5 (no LoRA, no marker-embedding training); only set block + head learn.
 * `configs/ablation_no_set.yaml`: `model.set_layers=0` -> per-candidate scoring, no interaction.
 * Loss variants: `loss.w_listwise=1 loss.w_bt=0`, `loss.margin_alpha=0.5`, `loss.w_plackett_luce=...`.
 * Other: `model.d_set`, `model.lora.r`, `data.render.max_candidates`, MASSIVE cap/weights.

@@ -1,6 +1,6 @@
 """Plain PyTorch single-GPU training loop for SCRM.
 
-python -m scrm.train --config configs/scrm_qwen3_4b_24gb.yaml [--resume auto|DIR] [key.sub=value ...]
+python -m scrm.train --config configs/scrm_qwen3_5_4b_24gb.yaml [--resume auto|DIR] [key.sub=value ...]
 """
 from __future__ import annotations
 

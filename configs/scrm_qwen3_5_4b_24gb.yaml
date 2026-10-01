@@ -1,13 +1,14 @@
-# SCRM, Qwen3-4B + LoRA r=64, single 24 GB GPU (bf16 base, grad checkpointing, no LM head).
+# SCRM, Qwen3.5-4B (text decoder only) + LoRA r=64, single 24 GB GPU (bf16 base, grad checkpointing, no LM head).
 # Expected peak ~14-17 GB at 4096 padded tokens / micro-batch. If you still OOM: model.quantize_4bit=true
 # (QLoRA, ~9-11 GB) or data.batch.max_tokens_per_batch=2048.
 seed: 1234
-output_dir: outputs/scrm_qwen3_4b_24gb
+output_dir: outputs/scrm_qwen3_5_4b_24gb
 model:
-  name_or_path: Qwen/Qwen3-4B
+  name_or_path: Qwen/Qwen3.5-4B
   dtype: bfloat16
   attn_implementation: auto      # flash_attention_2 if installed, else sdpa
   gradient_checkpointing: true
+  liger_kernel: true             # Liger RMSNorm + SwiGLU (HF integration, CUDA only)
   quantize_4bit: false           # set true for QLoRA (24 GB safety margin)
   lora: {enabled: true, r: 64, alpha: 128, dropout: 0.05}
   d_set: 768
@@ -36,4 +37,4 @@ train:
   eval_every: 1000
   save_every: 1000
   keep_last: 3
-wandb: {enabled: true, project: scrm, tags: [qwen3-4b, 24gb]}
+wandb: {enabled: true, project: scrm, tags: [qwen3.5-4b, 24gb]}

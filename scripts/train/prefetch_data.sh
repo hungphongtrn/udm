@@ -14,4 +14,4 @@ p = snapshot_download(repo_id=repo, repo_type="dataset", local_dir=dest, allow_p
                       max_workers=8)
 print("snapshot at", p)
 PY
-echo "Use: scripts/train/train.sh configs/scrm_qwen3_4b_24gb.yaml data.local_dir=$DEST"
+echo "Use: scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml data.local_dir=$DEST"

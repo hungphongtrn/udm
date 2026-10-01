@@ -1,4 +1,4 @@
-"""Offline tiny tokenizer + randomly-initialised Qwen3 backbone for tests / smoke runs."""
+"""Offline tiny tokenizer + randomly-initialised Qwen3.5 text backbone (hybrid linear/full attention) for tests / smoke runs."""
 from __future__ import annotations
 
 import torch
@@ -26,11 +26,14 @@ def make_tiny_tokenizer(vocab_size: int = 400):
 
 
 def make_tiny_backbone(tiny_cfg: dict, vocab_size: int, dtype=torch.float32):
-    from transformers import Qwen3Config, AutoModel
+    from transformers import AutoModel
+    from transformers.models.qwen3_5 import Qwen3_5TextConfig
 
     c = dict(tiny_cfg)
     seed = c.pop("seed", 0)
-    conf = Qwen3Config(vocab_size=vocab_size, max_position_embeddings=4096, tie_word_embeddings=False, **c)
+    n = c.get("num_hidden_layers", 4)
+    c.setdefault("layer_types", ["full_attention" if (i + 1) % 2 == 0 else "linear_attention" for i in range(n)])
+    conf = Qwen3_5TextConfig(vocab_size=vocab_size, max_position_embeddings=4096, tie_word_embeddings=False, **c)
     g = torch.random.fork_rng()
     with g:
         torch.manual_seed(seed)

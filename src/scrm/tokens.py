@@ -13,8 +13,8 @@ SPECIAL_TOKENS = [STATE_START, STATE_END, SET_START, CAND_START, CAND_END, SET_E
 def prepare_tokenizer(tok):
     """Add the SCRM special tokens (idempotent). Returns (tokenizer, ids dict, n_base_vocab).
 
-    For Qwen3 the embedding matrix has more rows (151936) than the tokenizer has tokens
-    (151669), so the six new ids fit in existing (unused) rows and no resize is needed.
+    Qwen embedding matrices are padded beyond the tokenizer size (Qwen3.5: 248320 rows), so the six
+    new ids normally fit in existing (unused) rows; otherwise build_scrm resizes the embeddings.
     """
     n_base = len(tok)
     missing = [t for t in SPECIAL_TOKENS if tok.convert_tokens_to_ids(t) in (None, tok.unk_token_id) or t not in tok.get_vocab()]

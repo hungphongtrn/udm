@@ -1,5 +1,5 @@
 # Frozen-backbone ablation: no LoRA, no gradients through Qwen; only set block + head train.
-base: scrm_qwen3_4b_24gb.yaml
+base: scrm_qwen3_5_4b_24gb.yaml
 output_dir: outputs/ablation_frozen
 model:
   freeze_backbone: true

@@ -12,16 +12,21 @@ DEFAULTS: dict[str, Any] = {
     "model": {
         # HF id / local path of the backbone, or "tiny" for a randomly initialised
         # offline model (tests / smoke runs).
-        "name_or_path": "Qwen/Qwen3-4B",
-        "tiny": {"hidden_size": 64, "intermediate_size": 128, "num_hidden_layers": 2,
-                 "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 16, "seed": 0},
+        "name_or_path": "Qwen/Qwen3.5-4B",
+        "tiny": {"hidden_size": 64, "intermediate_size": 128, "num_hidden_layers": 4,
+                 "num_attention_heads": 4, "num_key_value_heads": 2, "head_dim": 16,
+                 "linear_num_key_heads": 2, "linear_num_value_heads": 4, "linear_key_head_dim": 16,
+                 "linear_value_head_dim": 16, "seed": 0},
         "dtype": "bfloat16",               # backbone dtype (bfloat16 | float32)
         "attn_implementation": "auto",     # auto -> flash_attention_2 if installed else sdpa
         "gradient_checkpointing": True,
+        "liger_kernel": True,              # Liger RMSNorm + SwiGLU via liger_kernel.transformers (CUDA only)
         "freeze_backbone": False,          # frozen-backbone ablation (no LoRA, no grads through backbone)
         "quantize_4bit": False,            # QLoRA (bitsandbytes nf4)
         "lora": {"enabled": True, "r": 64, "alpha": 128, "dropout": 0.05,
+                 # full-attention layers + Gated DeltaNet (linear-attention) layers + MLP
                  "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj",
+                                    "in_proj_qkv", "in_proj_z", "out_proj",
                                     "gate_proj", "up_proj", "down_proj"]},
         "train_special_tokens": "auto",    # auto -> True unless freeze_backbone
         "input_norm": True,                # LayerNorm(d) before the d->d_set projection

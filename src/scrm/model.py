@@ -1,4 +1,4 @@
-"""SCRM model: Qwen3 backbone (+LoRA) -> candidate_end hidden states -> set transformer -> scalar reward."""
+"""SCRM model: Qwen3.5 text backbone (+LoRA) -> candidate_end hidden states -> set transformer -> scalar reward."""
 from __future__ import annotations
 
 import contextlib
@@ -63,7 +63,7 @@ class SCRM(nn.Module):
 
     # Overrides the (unused / reserved) embedding rows of the 6 marker tokens with a small trainable
     # [6, d] parameter. Equivalent to modules_to_save on those rows only, with ~15k trainable params
-    # instead of a 151936x2560 copy, and independent of peft / 4-bit quantisation.
+    # instead of a full vocab x hidden copy, and independent of peft / 4-bit quantisation.
     def _embed_hook(self, module, inputs, out):
         ids = inputs[0]
         match = ids.unsqueeze(-1) == self.special_ids          # [B,L,K]
@@ -152,6 +152,36 @@ def _resolve_attn(impl: str, device: torch.device) -> str:
     return "sdpa"
 
 
+def _apply_liger(mcfg: dict, device: torch.device) -> bool:
+    """Liger kernels through the HF integration (`liger_kernel.transformers`, the same entry point HF Trainer's
+    `use_liger_kernel` uses). Patches the HF modeling classes BEFORE the model is built (RMSNorm incl. q/k norms,
+    SwiGLU MLP). No LM head is used, so fused-linear-cross-entropy is off. Triton kernels are CUDA-only."""
+    if not mcfg.get("liger_kernel") or device.type != "cuda":
+        return False
+    from transformers import AutoConfig
+    from liger_kernel.transformers import monkey_patch as lk
+    model_type = AutoConfig.from_pretrained(mcfg["name_or_path"]).model_type
+    fn = lk.MODEL_TYPE_TO_APPLY_LIGER_FN.get(model_type)
+    if fn is None:
+        print(f"[scrm] liger: no kernels for model_type={model_type}; skipped")
+        return False
+    import inspect
+    kw = dict(rope=False, cross_entropy=False, fused_linear_cross_entropy=False, rms_norm=True, swiglu=True)
+    fn(**{k: v for k, v in kw.items() if k in inspect.signature(fn).parameters})
+    print(f"[scrm] liger kernels applied ({fn.__name__}: rms_norm, swiglu)")
+    return True
+
+
+def _text_only(m: nn.Module) -> nn.Module:
+    """Qwen3.5 checkpoints are vision-language (Qwen3_5Model = visual + language_model). Keep the text decoder only."""
+    lm = getattr(m, "language_model", None)
+    if lm is None:
+        return m
+    if hasattr(m, "visual"):
+        del m.visual
+    return lm
+
+
 def _load_backbone(mcfg: dict, device: torch.device, tokenizer_len: int):
     import transformers
     from transformers import AutoModel
@@ -161,6 +191,7 @@ def _load_backbone(mcfg: dict, device: torch.device, tokenizer_len: int):
     if mcfg["name_or_path"] == "tiny":
         from .tiny import make_tiny_backbone
         return make_tiny_backbone(mcfg["tiny"], 512, dtype=torch.float32).to(device)
+    _apply_liger(mcfg, device)
     kw: dict[str, Any] = {"attn_implementation": _resolve_attn(mcfg["attn_implementation"], device)}
     kw["dtype" if int(transformers.__version__.split(".")[0]) >= 5 else "torch_dtype"] = dtype
     if mcfg.get("quantize_4bit"):
@@ -169,8 +200,8 @@ def _load_backbone(mcfg: dict, device: torch.device, tokenizer_len: int):
             load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_use_double_quant=True,
             bnb_4bit_compute_dtype=torch.bfloat16)
         kw["device_map"] = {"": device.index or 0}
-        return AutoModel.from_pretrained(mcfg["name_or_path"], **kw)
-    m = AutoModel.from_pretrained(mcfg["name_or_path"], **kw)
+        return _text_only(AutoModel.from_pretrained(mcfg["name_or_path"], **kw))
+    m = _text_only(AutoModel.from_pretrained(mcfg["name_or_path"], **kw))
     return m.to(device)
 
 

@@ -1,4 +1,4 @@
-# Smoke-test config: tiny random Qwen3 + offline tiny tokenizer, CPU friendly. Needs a local parquet dir
+# Smoke-test config: tiny random Qwen3.5 text model + offline tiny tokenizer, CPU friendly. Needs a local parquet dir
 # (see scripts/train/smoke_test.sh, which generates synthetic contract-format data).
 seed: 0
 output_dir: outputs/debug_tiny

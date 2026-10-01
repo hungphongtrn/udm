@@ -1,5 +1,5 @@
 torch>=2.3
-transformers>=4.51        # Qwen3 support (5.x works)
+transformers>=5.18        # Qwen3.5 (qwen3_5) support; tested on 5.18
 peft>=0.14
 datasets>=3.0
 huggingface_hub>=0.25
@@ -12,3 +12,5 @@ safetensors
 accelerate>=0.30
 bitsandbytes>=0.43; platform_system == "Linux"   # only needed for model.quantize_4bit=true
 pytest
+liger-kernel>=0.8.4; platform_system == "Linux"    # Liger RMSNorm/SwiGLU for qwen3_5 (model.liger_kernel)
+flash-linear-attention; platform_system == "Linux" # fast Gated DeltaNet kernels (else slow torch fallback)
