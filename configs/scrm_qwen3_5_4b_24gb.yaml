@@ -27,8 +27,9 @@ data:
     - {name: openjev,    files: [data/train-openjev-*.parquet], match: {source_id: [ZefanCai/Open-Jev]},                                             weight: 0.20}
     - {name: samatv,     files: [data/train-samatv*.parquet], match: {source_id: [samatv256/jev-decisions-v1]},                max_rows: 1000000, weight: 0.30}  # ~6M rows
   other_weight: 0                # every source_id is covered by a group above
-  eval_max_rows: 5000
-  eval_max_rows_per_source: 500
+  # val + test caps; eval grades every shown option (~29/set) + perm check, ~1 h per eval round on a 4090 at 1000 rows
+  eval_max_rows: 1000
+  eval_max_rows_per_source: 100
   # One sequence per GRADED option: "{state}\n\n{instruction}\n\nOptions:\n...\n\nGrade this choice: Option k: ..."
   # ending at the assistant header; a set costs ~ max_graded x (prompt + option) tokens.
   # max_len is the per-sequence context (prompt + graded option). Eval / rank() grade every shown option.
