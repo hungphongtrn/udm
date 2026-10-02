@@ -10,6 +10,7 @@ import torch
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from .collator import collate
+from .packing import pack_bfd
 from .render import Renderer, parse_row
 
 META_COLS = ["decision_set_id", "source_id", "family", "label_kind", "source_split"]
@@ -204,16 +205,8 @@ class Mixer:
 
 # ----------------------------------------------------------------------------- batching
 def make_batches(items, max_tokens: int, max_bs: int):
-    items = sorted(items, key=lambda i: i.n_tokens)
-    batches, cur = [], []
-    for it in items:
-        if cur and ((len(cur) + 1) * it.n_tokens > max_tokens or len(cur) >= max_bs):
-            batches.append(cur)
-            cur = []
-        cur.append(it)
-    if cur:
-        batches.append(cur)
-    return batches
+    """Whole sets best-fit-decreasing packed into micro-batches of <= max_tokens tokens and <= max_bs sets."""
+    return [[items[i] for i in b] for b in pack_bfd([it.n_tokens for it in items], max_tokens, max_bs)]
 
 
 class TrainStream(IterableDataset):

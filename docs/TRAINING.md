@@ -87,38 +87,37 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
 
 ## Memory: 24 GB vs 40 GB
 
-Context: `data.render.max_len` is the per-sequence context (prompt + graded option): **8192** on 24 GB, **16384** on
-40 GB (state up to 6k / 12k tokens).
+Context: `data.render.max_len` is the per-sequence context (prompt + graded option): **4096** on 24 GB, **16384** on
+40 GB. Nothing is ever truncated: a set whose longest sequence (state + instruction + all options + one graded option)
+exceeds `max_len` is dropped whole.
 
-Shared-prompt KV cache (`model.prefix_cache: true`, default; `src/scrm/prefix_cache.py`): all graded options of a set
-share the prompt up to "Grade this choice: ". It is encoded once; its per-layer states (K/V after RoPE for the
-full-attention layers, last conv inputs + final recurrent state for the Gated DeltaNet layers) are then reused by every
-graded option, whose short suffixes run as one batch. A set costs ~ prompt + n_graded x suffix tokens instead of
-n_graded x prompt. It is exact (tested against re-encoding every full sequence, forward and LoRA gradients, with
-gradient checkpointing) and trains end to end: gradients from every option flow back into the shared prompt. HF's own
-cache classes update buffers in place and are dropped under gradient checkpointing, so two small side-effect-free cache
-objects are used instead. The suffix pass needs explicit 4D masks, so full attention uses SDPA (`attn_implementation:
-auto` picks it). `data.render.max_graded` (8 on 24 GB, 12 on 40 GB) bounds options graded per set in training;
-`data.batch.max_tokens_per_batch` is the token budget per micro-batch (suffix rows are chunked to fit it).
+Every graded option is its own full sequence (`[prompt][Grade this choice: Option k: ...]<assistant header>`), so a set
+costs ~ n_graded x (prompt + option) tokens; `data.render.max_graded` (8 on 24 GB, 12 on 40 GB) bounds options graded
+per set in training (eval / `rank()` / Decision Index grade every option).
+
+Packing (padding-free, `src/scrm/packing.py`): whole sets are best-fit-decreasing packed into micro-batches of at most
+`data.batch.max_tokens_per_batch` tokens and `max_batch_size` sets (a set never spans two micro-batches; a set larger
+than the budget is a micro-batch of its own). All sequences of a micro-batch are concatenated into one row with
+per-sequence `position_ids`; on CUDA with `flash-linear-attention` + `causal-conv1d` the backbone gets
+`cu_seq_lens` / `seq_idx`, so full attention is block-diagonal and the Gated DeltaNet conv/recurrent state restarts at
+each sequence boundary (no leakage; tested against the padded batch). `model.embed` runs the row in chunks of at most
+`max_tokens_per_batch` tokens, cutting only between sequences (a sequence is never split); the set encoder then sees
+all options of a set together. Without those kernels (CPU) the same sequences run as a right-padded batch.
 
 The Qwen3.5-4B text decoder has 4.21B params (8.4 GB in bf16). LoRA r=64 all-linear = ~130M params: fp32 weights + grads + Adam
 = ~2 GB. Gradient checkpointing keeps ~0.16 MB/token of layer inputs (32 layers x 2560 x bf16) plus one layer of
-recompute activations (8k tokens: ~1.3 GB saved inputs + a few hundred MB per recomputed layer). With an 8k-token
-prompt per micro-batch the estimated peak is roughly 16-20 GB (NOT measured on a GPU; SDPA does not materialise
-attention matrices).
+recompute activations.
 
-| config | max_len | tokens / micro-batch | est. peak | notes |
-|---|---|---|---|---|
-| `scrm_qwen3_5_4b_24gb.yaml` | 8192 | 8192 | ~16-20 GB | bf16 base + LoRA, prefix cache |
-| same + `model.quantize_4bit=true` | 8192 | 8192 | ~11-14 GB | QLoRA (nf4), a bit slower, needs bitsandbytes |
-| `scrm_qwen3_5_4b_40gb.yaml` | 16384 | 16384 | ~26-34 GB | |
-| `ablation_frozen.yaml` | 8192 | see config | <16 GB | no grads through backbone |
+| config | max_len | tokens / micro-batch | notes |
+|---|---|---|---|
+| `scrm_qwen3_5_4b_24gb.yaml` | 4096 | 4096 | bf16 base + LoRA (8192 OOMs on a 4090) |
+| same + `model.quantize_4bit=true` | 4096 | 4096 | QLoRA (nf4), a bit slower, needs bitsandbytes |
+| `scrm_qwen3_5_4b_40gb.yaml` | 16384 | 16384 | |
+| `ablation_frozen.yaml` | see config | see config | no grads through backbone |
 
 Knobs if you hit OOM: lower `data.batch.max_tokens_per_batch` (micro-batch) and raise `train.grad_accum`; lower
-`data.render.max_len` / `cand_max_tokens`; `model.quantize_4bit=true`. Batches are token-budgeted (examples sorted by length within a
-`bucket_size` pool), so micro-batch example counts vary; the loss is normalised by the number of examples with a trainable pair
-over the whole accumulation window, so this does not bias the gradient. Install flash-attn (`setup.sh --flash-attn`) for
-extra speed only with `model.prefix_cache=false` (the prefix-cache suffix pass needs SDPA's explicit masks).
+`data.render.max_len` (more sets dropped); `model.quantize_4bit=true`. Micro-batch set counts vary; the loss is normalised
+by the number of examples with a trainable pair over the whole accumulation window, so this does not bias the gradient.
 
 ## Data: filters, mixing, truncation
 
@@ -152,12 +151,11 @@ data:
   other_weight: 0.4
 ```
 
-Rendering/truncation (`data.render`): `max_len` tokens per sequence = prompt + graded option (8192 for 24 GB, 16384 for 40 GB); `instr_max_tokens`,
-`cand_max_tokens` (head-truncated per candidate), `state_max_tokens`, `state_truncate: middle|left|right` (middle keeps head+tail
-and inserts `...`), `min_state_tokens`. If the candidates do not fit, unprotected candidates are dropped first (all tier-0 items
-and one item per other tier are protected), then per-candidate tokens shrink; examples with no trainable pair left are dropped.
-More than `max_candidates` (64): subsample keeping all tier-0 items and at least one per other tier. `instruction_json`:
-string as-is, or object -> `instructions` + `Criteria:` lines. `state_json`: string as-is, object -> compact JSON.
+Rendering (`data.render`): `max_len` tokens per sequence = prompt + graded option. No truncation of state, instruction or
+options: an over-long set is dropped. More than `max_candidates` (64) options: subsample keeping all tier-0 items and at
+least one per other tier (training/validation sets only; inference grades every option). Training sets need >= 2 tiers among
+the graded options. `instruction_json`: string as-is, or object -> `instructions` + `Criteria:` lines. `state_json`: string
+as-is, object -> compact JSON.
 
 ## Loss
 
@@ -180,7 +178,7 @@ stream restarts with a different seed (it is not replayed exactly).
 
 ## Metrics (train log, `metrics.jsonl`, W&B)
 
-Train: `train/loss` (+ parts), `lr/*`, `grad_norm`, `tokens_per_s` (real / padded), `pairs_per_step`, `examples_per_step`, running
+Train: `train/loss` (+ parts), `lr/*`, `grad_norm`, `tokens_per_s` (packed, no padding), `pairs_per_step`, `examples_per_step`, running
 `pair_acc_lastmb`, `reward_mean/std`, `sys/gpu_mem_alloc_gb`, `train/reward_hist` (W&B).
 Eval (`eval/{all,family/<f>,source/<s>}/*`, plus a `eval/by_group` W&B table), computed on a deterministic capped validation
 sample (`eval_max_rows`, `eval_max_rows_per_source`), canonical candidate order:
@@ -192,6 +190,23 @@ sample (`eval_max_rows`, `eval_max_rows_per_source`), canonical candidate order:
   >= 3 tiers (ordinal score rows).
 * `loss`: BT loss. `eval/perm/*` (small subset, two shuffles): `score_std` / `abs_diff` (score change under reordering),
   `rank_agree` (pairwise order agreement), `top1_agree`. Should approach 0 / 1 as training progresses.
+
+At save steps (and at the end) two more evaluations are logged; checkpoint selection (`best/`) stays on validation
+loss:
+
+* `test/*`: the same metrics on `benchmarks.test_split` (default `test`, same filters and row caps as validation).
+* `dindex/*`: [Decision Index](https://github.com/apolinario/decision-index) 0.2.1 on a fixed stratified sample of its
+  suite (`benchmarks.decision_index`; enabled in the Qwen configs, off in the defaults): `index` (chance-corrected, the
+  board's headline), `raw_index`, `answered_frac`, `area/*` and `bench/*` skill (x100), scored with the kit's own
+  scorers restricted to the sampled requests. Each question is one SCRM set (instruction + state + every option; `noul`
+  -> `no`/`yes`), probabilities = softmax of the rewards; requests longer than `max_len` (16384) are `unsupported`
+  (= wrong; none in the 1000-row sample). Runs only at save steps divisible by `every` (2000) and at the end: the
+  1000-row sample is ~40M tokens (every option is a full sequence containing all options; POP909 alone is 39%).
+  Results per step in `<output_dir>/decision_index/step-N/`. Setup once: `scripts/train/dindex_setup.sh` (rebuilds the
+  suite into `../decision-index`, ~7 GB of downloads, needs the cais/hle terms accepted; writes
+  `sample-1000.jsonl.gz`, the paths the configs expect). The sample index is an estimate; for a number comparable with
+  the board run the full suite: `scripts/train/dindex_eval.sh <ckpt>` (official runner, `scrm.dindex:SCRMEngine`,
+  prints the rank among the board entrants).
 
 ## Ablations
 

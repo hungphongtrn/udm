@@ -240,7 +240,7 @@ def test_trainer_round_trip_through_real_build_path(tmp_path):
 
     tok = prepare_tokenizer(make_tiny_tokenizer())
     cfg = load_config(None, [f"data.local_dir={out}", "data.streaming=false", "data.num_workers=0",
-                             "data.render.max_len=4096", "data.render.cand_max_tokens=48",
+                             "data.render.max_len=4096",
                              "data.render.max_candidates=64"])
     renderer = Renderer(tok, cfg["data"]["render"])
     end_id = renderer.chat_suffix[-1]

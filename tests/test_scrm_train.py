@@ -15,7 +15,7 @@ from scrm.train import list_ckpts, train
 
 TINY = {"name_or_path": "tiny", "dtype": "float32", "d_set": 32, "set_heads": 4,
         "lora": {"enabled": True, "r": 4, "alpha": 8, "dropout": 0.0}}
-RENDER = {"max_len": 256, "cand_max_tokens": 16, "state_max_tokens": 96, "max_candidates": 16}
+RENDER = {"max_len": 256, "max_candidates": 16}
 
 
 @pytest.fixture(scope="module")

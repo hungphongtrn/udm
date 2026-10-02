@@ -1,4 +1,4 @@
-"""Row parsing, text rendering, tokenisation, truncation / candidate subsampling, sequence assembly."""
+"""Row parsing, text rendering, tokenisation, candidate subsampling, sequence assembly (over-long sets are dropped)."""
 from __future__ import annotations
 
 import json
@@ -120,8 +120,9 @@ def parse_row(row: dict, use_candidate_rows: bool = True) -> Example | None:
 
 # ----------------------------------------------------------------------------- tokenisation / assembly
 
-DEFAULT_RENDER = {"max_len": 8192, "cand_max_tokens": 256, "state_max_tokens": 6144, "instr_max_tokens": 512,
-                  "max_candidates": 64, "min_state_tokens": 64, "state_truncate": "middle",
+# max_len: tokens per sequence (prompt + graded option). The state is never truncated: a set whose longest sequence
+# exceeds max_len is dropped (assemble -> None).
+DEFAULT_RENDER = {"max_len": 8192, "max_candidates": 64,
                   # wrap the sequence as one user turn of the tokenizer's chat template and end right after
                   # the assistant header ("<|im_start|>assistant\n"; any <think> the template appends is cut)
                   "chat_template": True, "system_prompt": None,
@@ -177,7 +178,6 @@ class Item:
     source_id: str
     decision_set_id: str
     tok: TokExample = field(repr=False, default=None)
-    cap: int | None = None
     kept: list = field(default_factory=list)     # shown candidates (tokex indices, sorted)
     graded: list = field(default_factory=list)   # graded candidates (tokex indices, sorted)
 
@@ -188,8 +188,8 @@ class Item:
 
     @property
     def n_tokens(self) -> int:
-        """Token cost with the shared prefix encoded once: prefix + n_graded x longest suffix."""
-        return len(self.prefix) + len(self.suffixes) * max(len(x) for x in self.suffixes)
+        """Packed token cost: every graded option is a full sequence prefix + suffix."""
+        return len(self.suffixes) * len(self.prefix) + sum(len(x) for x in self.suffixes)
 
 
 def subsample_indices(tiers: np.ndarray, max_n: int, rng: np.random.Generator) -> np.ndarray:
@@ -222,31 +222,16 @@ def subsample_indices(tiers: np.ndarray, max_n: int, rng: np.random.Generator) -
     return np.array(sorted(keep))
 
 
-def _protected(tiers_kept: np.ndarray, idxs: list[int]) -> set[int]:
-    """Candidates that must not be dropped by the budget loop: all tier-0 + one rep of each other tier."""
-    tmin = tiers_kept[idxs].min()
-    prot = {i for i in idxs if tiers_kept[i] == tmin}
-    seen = set()
-    for i in idxs:
-        t = tiers_kept[i]
-        if t != tmin and t not in seen:
-            seen.add(t)
-            prot.add(i)
-    return prot
-
-
 class Renderer:
     def __init__(self, tokenizer, rcfg: dict | None = None):
         self.tok = tokenizer
         self.cfg = {**DEFAULT_RENDER, **(rcfg or {})}
         self.pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-        self.marker = tokenizer("\n...\n", add_special_tokens=False)["input_ids"]
         self.nl2 = tokenizer("\n\n", add_special_tokens=False)["input_ids"]
         nl = tokenizer("\n", add_special_tokens=False)["input_ids"]
         self.option_end_id = nl[-1]          # reward read-out position: newline ending each option line
         self.header = tokenizer(self.cfg["options_header"], add_special_tokens=False)["input_ids"]
         self._labels: dict[int, list[int]] = {}
-        self.lab_max = max(len(self.label(k)) for k in (1, 9, 10, 99, 100, max(self.cfg["max_candidates"], 1)))
         self.chat_prefix, self.chat_suffix = [], []
         if self.cfg.get("chat_template"):
             if not getattr(tokenizer, "chat_template", None):
@@ -267,82 +252,36 @@ class Renderer:
     # --- tokenisation
     def tokenize(self, ex: Example) -> TokExample:
         c = self.cfg
-        state = ex.state
-        max_chars = 8 * max(c["state_max_tokens"] or c["max_len"], 64) + 64
-        if len(state) > max_chars:   # cheap char-level pre-truncation (middle) before tokenising
-            h = int(max_chars * 0.6)
-            state = state[:h] + "\n...\n" + state[-(max_chars - h):]
-        texts = [ex.instruction, state] + list(ex.texts)
+        # Huge states only need to be known to overflow: tokenise a head first and the full text only if that head
+        # still fits. A head of > max_len tokens proves the set will be dropped (its ids are then incomplete).
+        head = 16 * c["max_len"]
+        texts = [ex.instruction, ex.state[:head]] + list(ex.texts)
         ids = self.tok(texts, add_special_tokens=False)["input_ids"]
-        instr = ids[0][: c["instr_max_tokens"]] + (self.nl2 if ex.instruction else [])
-        cands = [x[: c["cand_max_tokens"]] or [self.nl2[0] if self.nl2 else 0] for x in ids[2:]]
+        if len(ex.state) > head and len(ids[1]) <= c["max_len"]:
+            ids[1] = self.tok(ex.state, add_special_tokens=False)["input_ids"]
+        instr = ids[0] + (self.nl2 if ex.instruction else [])
+        cands = [x or [self.nl2[0] if self.nl2 else 0] for x in ids[2:]]
         return TokExample(ex, instr, ids[1], cands, np.asarray(ex.tiers))
 
-    def _truncate_state(self, ids: list[int], budget: int) -> list[int]:
-        if budget <= 0:
-            return []
-        if len(ids) <= budget:
-            return ids
-        mode = self.cfg["state_truncate"]
-        if mode == "right":
-            return ids[:budget]
-        if mode == "left":
-            return ids[-budget:]
-        m = self.marker
-        if budget <= len(m) + 4:
-            return ids[:budget]
-        head = int((budget - len(m)) * 0.6)
-        tail = budget - len(m) - head
-        return ids[:head] + m + (ids[-tail:] if tail > 0 else [])
-
     # --- assembly
-    def assemble(self, t: TokExample, rng: np.random.Generator | None, shuffle: bool, kept=None, cap=None,
+    def assemble(self, t: TokExample, rng: np.random.Generator | None, shuffle: bool, kept=None,
                  relax: bool = False, graded=None) -> Item | None:
         """Build an Item. `rng`=None & shuffle=False -> canonical order, deterministic subsampling.
-        relax=True (inference): never drop the example for lack of trainable pairs."""
+        relax=True (inference): never drop the example for lack of trainable pairs.
+        Returns None when the longest sequence (prompt + graded option) exceeds max_len: nothing is truncated."""
         c = self.cfg
         sub_rng = rng if rng is not None else np.random.default_rng(
             zlib.crc32(t.ex.decision_set_id.encode()) if t.ex.decision_set_id else 0)
         n = len(t.cand_ids)
         tiers = t.tiers
+        if len(t.state_ids) > c["max_len"]:
+            return None
         if kept is None:
             idxs = subsample_indices(tiers, c["max_candidates"], sub_rng).tolist() if n > c["max_candidates"] \
                 else list(range(n))
         else:
             idxs = list(kept)
-        cand = t.cand_ids if cap is None else [x[:cap] for x in t.cand_ids]
-        overhead = (len(self.chat_prefix) + len(self.chat_suffix) + len(t.instr_ids) + len(self.nl2)
-                    + len(self.header) + len(self.grade) + self.lab_max + len(self.state_label) + len(self.instr_label))
-        min_state = min(len(t.state_ids), c["min_state_tokens"])
-
-        def cost(ix):
-            # every option line in the prompt + the longest option repeated after "Grade this choice:"
-            return sum(len(cand[i]) + self.lab_max + 1 for i in ix) + max((len(cand[i]) for i in ix), default=0)
-
-        if kept is None:
-            # budget loop 1: drop unprotected candidates (random) until minimal state fits
-            while c["max_len"] - overhead - cost(idxs) < min_state:
-                prot = _protected(tiers, idxs)
-                drop = [i for i in idxs if i not in prot]
-                if not drop:
-                    break
-                idxs.remove(int(sub_rng.choice(drop)))
-            # loop 2: shrink per-candidate tokens
-            avail = c["max_len"] - overhead - min_state
-            if cost(idxs) > avail:
-                cap = max(4, (avail // max(len(idxs), 1)) - 2)
-                cand = [x[:cap] for x in t.cand_ids]
-                # loop 3: still too long -> keep minimal pair set
-                while cost(idxs) > avail and len(idxs) > 2:
-                    prot = sorted(_protected(tiers, idxs))
-                    drop = [i for i in idxs if i not in prot] or [i for i in prot if i != prot[0]]
-                    tmin = tiers[idxs].min()
-                    drop = [i for i in drop if not (tiers[i] == tmin and sum(tiers[j] == tmin for j in idxs) == 1)]
-                    if not drop:
-                        break
-                    idxs.remove(int(sub_rng.choice(drop)))
-                if cost(idxs) > avail:
-                    return None
+        cand = t.cand_ids
         if len(idxs) < 1 or (not relax and len(set(tiers[idxs].tolist())) < 2):
             return None
         kept_final = sorted(idxs)
@@ -359,9 +298,7 @@ class Renderer:
         display = list(kept_final)
         if shuffle:
             (rng or sub_rng).shuffle(display)
-        avail_state = c["max_len"] - overhead - cost(display)
-        sb = min(avail_state, c["state_max_tokens"] or avail_state)
-        state = self._truncate_state(t.state_ids, sb)
+        state = t.state_ids
         prompt = list(self.chat_prefix)
         if state:
             prompt += self.state_label + state + self.nl2
@@ -378,12 +315,16 @@ class Renderer:
             if i in gset:
                 order.append(i)
                 sufs.append(np.asarray(self.label(k) + cand[i] + self.chat_suffix, dtype=np.int64))
+        # order-independent bound (longest option label), so reshuffle() of a kept Item never overflows
+        lab = max(len(self.label(k)) for k in range(1, len(display) + 1))
+        if len(prompt) + lab + max(len(cand[i]) for i in graded) + len(self.chat_suffix) > c["max_len"]:
+            return None
         order_a = np.asarray(order)
         it = Item(np.asarray(prompt, dtype=np.int64), sufs, tiers[order_a].astype(np.int64), order_a, [t.ex.choice_ids[i] for i in order], t.ex.family,
-                  t.ex.source_id, t.ex.decision_set_id, tok=t, cap=cap)
+                  t.ex.source_id, t.ex.decision_set_id, tok=t)
         it.kept = kept_final
         it.graded = sorted(graded)
         return it
 
     def reshuffle(self, item: Item, rng: np.random.Generator) -> Item:
-        return self.assemble(item.tok, rng, True, kept=item.kept, cap=item.cap, graded=item.graded)
+        return self.assemble(item.tok, rng, True, kept=item.kept, graded=item.graded)

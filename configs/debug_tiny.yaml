@@ -16,7 +16,7 @@ data:
   eval_max_rows: 60
   eval_max_rows_per_source: 20
   perm_eval_rows: 8
-  render: {max_len: 256, cand_max_tokens: 16, state_max_tokens: 96, max_candidates: 16}
+  render: {max_len: 256, max_candidates: 16}
   batch: {max_tokens_per_batch: 1024, max_batch_size: 8, bucket_size: 32}
   num_workers: 0
 train:

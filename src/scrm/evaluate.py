@@ -9,7 +9,8 @@ import numpy as np
 import torch
 
 from .collator import collate, to_device, align_slots
-from .data import EvalSet, make_batches
+from .data import EvalSet
+from .packing import pack_bfd
 from .losses import compute_loss
 from .metrics import MetricAccumulator, permutation_metrics
 from .render import Renderer
@@ -38,15 +39,7 @@ def run_eval(model, batches, lcfg, device, amp=True, max_tokens=None) -> dict:
 @torch.no_grad()
 def _rewards_for(model, items, renderer, bcfg, device, amp):
     out = [None] * len(items)
-    idx = sorted(range(len(items)), key=lambda i: items[i].n_tokens)
-    cur = []
-    groups = []
-    for i in idx:
-        if cur and ((len(cur) + 1) * items[i].n_tokens > bcfg["max_tokens_per_batch"] or len(cur) >= bcfg["max_batch_size"]):
-            groups.append(cur); cur = []
-        cur.append(i)
-    if cur:
-        groups.append(cur)
+    groups = pack_bfd([it.n_tokens for it in items], bcfg["max_tokens_per_batch"], bcfg["max_batch_size"])
     for g in groups:
         b = to_device(collate([items[i] for i in g], renderer.pad_id), device)
         with _amp(device, amp):

@@ -14,3 +14,4 @@ bitsandbytes>=0.43; platform_system == "Linux"   # train.optim=adamw_8bit (defau
 pytest
 liger-kernel>=0.8.4; platform_system == "Linux"    # Liger RMSNorm/SwiGLU for qwen3_5 (model.liger_kernel)
 flash-linear-attention; platform_system == "Linux" # fast Gated DeltaNet kernels (else slow torch fallback)
+decision-index @ git+https://github.com/apolinario/decision-index@87d4650b42b377c0291a89c1f1a879f9b31082bf   # Decision Index 0.2.1 scorers (scrm.dindex)

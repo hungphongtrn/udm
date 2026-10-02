@@ -176,7 +176,8 @@ def train(cfg: dict, resume: str | None = None):
     use_perm = lcfg.get("w_perm", 0.0) > 0
     loader, stream = make_train_loader(cfg, renderer, cfg["seed"] + step, keep_items=use_perm)
     it = iter(loader)
-    evalset = None
+    evalset = testset = dindex = None
+    bcfg = cfg["benchmarks"]
     wb = init_wandb(cfg["wandb"], cfg, out_dir)
     mlog = open(os.path.join(out_dir, "metrics.jsonl"), "a")
 
@@ -210,10 +211,43 @@ def train(cfg: dict, resume: str | None = None):
             bad_evals += 1
         model.train()
 
+    done_bench = {}   # benchmark -> last step it ran at
+
+    def do_benchmarks(s, final=False):
+        """Test split + Decision Index sample, logged only (checkpoint selection stays on validation loss).
+        Decision Index runs at steps divisible by its `every` (null = every call) and always at the end."""
+        nonlocal testset, dindex
+        if bcfg.get("test_split") and done_bench.get("test") != s:
+            done_bench["test"] = s
+            if testset is None:
+                testset = EvalSet.from_config(cfg, renderer, bcfg["test_split"])
+                print(f"[test] set: {len(testset.items)} items ({testset.n_dropped} dropped)", flush=True)
+            t0 = time.time()
+            m = run_eval(model, testset.batches(), lcfg, device, amp, max_tokens=d["batch"]["max_tokens_per_batch"])
+            flat = flatten(m, "test")
+            flat["test/loss"] = m.get("all", {}).get("loss", float("nan"))
+            log(flat, s)
+            wb.log_group_table("test/by_group", m, s)
+            a = m.get("all", {})
+            print(f"[test] step {s}: pair_acc={a.get('pair_acc', 0):.4f} top1={a.get('top1', 0):.4f} "
+                  f"mrr={a.get('mrr', 0):.4f} loss={a.get('loss', 0):.4f} ({time.time()-t0:.0f}s)", flush=True)
+        di = bcfg.get("decision_index") or {}
+        if di.get("enabled") and done_bench.get("dindex") != s and (final or not di.get("every") or s % di["every"] == 0):
+            done_bench["dindex"] = s
+            from .dindex import DecisionIndexEval
+            if dindex is None:
+                dindex = DecisionIndexEval(di)
+                print(f"[dindex] sample: {len(dindex.rows)} requests from {di['rows']}", flush=True)
+            m = dindex.run(model, device, amp, os.path.join(out_dir, "decision_index", f"step-{s:07d}"))
+            log({f"dindex/{k}": v for k, v in m.items()}, s)
+            print(f"[dindex] step {s}: index={m['index']:.2f} raw={m['raw_index']:.2f} "
+                  f"answered={m['answered_frac']:.3f} ({m['seconds']:.0f}s)", flush=True)
+        model.train()
+
     if tcfg.get("eval_at_start") and step == 0:
         do_eval(0)
 
-    t_last, tok_acc, real_tok_acc = time.time(), 0, 0
+    t_last, tok_acc = time.time(), 0
     while step < max_steps:
         try:
             batches = [next(it) for _ in range(tcfg["grad_accum"])]
@@ -245,7 +279,7 @@ def train(cfg: dict, resume: str | None = None):
             for k, v in lo.parts.items():
                 parts_acc[k] = parts_acc.get(k, 0.0) + float((v.detach() * lo.valid).sum()) / n_valid
             pairs += int(lo.n_pairs.sum()); ex_n += r.size(0)
-            tok_acc += int(b["n_padded_tokens"]); real_tok_acc += int(b["n_tokens"])
+            tok_acc += int(b["n_tokens"])
             last_r, last_b = r.detach(), bd
         params = [p for g in opt.param_groups for p in g["params"] if p.grad is not None]
         gnorm = float(torch.nn.utils.clip_grad_norm_(params, tcfg["grad_clip"]))
@@ -262,7 +296,7 @@ def train(cfg: dict, resume: str | None = None):
             now = time.time(); dt = max(now - t_last, 1e-6)
             m = last_r[last_b["candidate_mask"]]
             rec = {"train/loss": tot, "train/grad_norm": gnorm, "train/pairs_per_step": pairs, "train/examples_per_step": ex_n,
-                   "train/tokens_per_s": real_tok_acc / dt, "train/padded_tokens_per_s": tok_acc / dt,
+                   "train/tokens_per_s": tok_acc / dt,
                    "train/pair_acc_lastmb": _train_pair_acc(last_r, last_b["tiers"], last_b["pair_mask"]),
                    "train/reward_mean": float(m.mean()), "train/reward_std": float(m.std()) if m.numel() > 1 else 0.0}
             rec.update({f"train/loss_{k}": v for k, v in parts_acc.items()})
@@ -272,8 +306,8 @@ def train(cfg: dict, resume: str | None = None):
                 rec["sys/gpu_mem_alloc_gb"] = torch.cuda.max_memory_allocated() / 2**30
             log(rec, step)
             print(f"[train] step {step}/{max_steps} loss={tot:.4f} gnorm={gnorm:.2f} ex/step={ex_n} pairs={pairs} "
-                  f"tok/s={real_tok_acc/dt:.0f}", flush=True)
-            t_last, tok_acc, real_tok_acc = now, 0, 0
+                  f"tok/s={tok_acc/dt:.0f}", flush=True)
+            t_last, tok_acc = now, 0
         if tcfg["hist_every"] and step % tcfg["hist_every"] == 0 and wb.enabled:
             wb.log_hist("train/reward_hist", last_r[last_b["candidate_mask"]].cpu().numpy(), step)
         if tcfg["eval_every"] and step % tcfg["eval_every"] == 0:
@@ -283,10 +317,12 @@ def train(cfg: dict, resume: str | None = None):
                 print(f"[scrm] early stop at step {step}: val loss did not improve for {bad_evals} evals (best {best:.4f})", flush=True)
                 break
         if tcfg["save_every"] and step % tcfg["save_every"] == 0:
+            do_benchmarks(step)
             save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"])
 
     if tcfg["eval_every"] and step % tcfg["eval_every"] != 0:
         do_eval(step)
+    do_benchmarks(step, final=True)
     path = save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"])
     print(f"[scrm] done. final checkpoint: {path}; best val loss={best:.4f}", flush=True)
     wb.finish(); mlog.close()

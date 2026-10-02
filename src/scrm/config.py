@@ -18,11 +18,8 @@ DEFAULTS: dict[str, Any] = {
                  "linear_num_key_heads": 2, "linear_num_value_heads": 4, "linear_key_head_dim": 16,
                  "linear_value_head_dim": 16, "seed": 0},
         "dtype": "bfloat16",               # backbone dtype (bfloat16 | float32)
-        "attn_implementation": "auto",     # auto -> sdpa with prefix_cache, else flash_attention_2 if installed
+        "attn_implementation": "auto",     # auto -> flash_attention_2 if installed, else sdpa
         "gradient_checkpointing": True,
-        # encode the prompt shared by all graded options of a set once and reuse its states (KV + Gated DeltaNet
-        # conv/recurrent state) for every option; false = re-encode the prompt per option (reference path)
-        "prefix_cache": True,
         "liger_kernel": True,              # Liger RMSNorm + SwiGLU via liger_kernel.transformers (CUDA only)
         "freeze_backbone": False,          # frozen-backbone ablation (no LoRA, no grads through backbone)
         "quantize_4bit": False,            # QLoRA (bitsandbytes nf4)
@@ -60,9 +57,8 @@ DEFAULTS: dict[str, Any] = {
         "eval_max_rows_per_source": 200,
         "eval_max_scan_rows": 200000,      # streaming eval: max rows scanned
         "perm_eval_rows": 64,
-        "render": {"max_len": 8192, "cand_max_tokens": 256, "state_max_tokens": 6144,
-                   "instr_max_tokens": 512, "max_candidates": 64, "min_state_tokens": 64,
-                   "state_truncate": "middle"},
+        # max_len: tokens per sequence (prompt + one graded option); longer sets are dropped, never truncated
+        "render": {"max_len": 8192, "max_candidates": 64},
         "batch": {"max_tokens_per_batch": 8192, "max_batch_size": 16, "bucket_size": 128},
         "num_workers": 2,
         "prefetch_factor": 4,
@@ -76,6 +72,15 @@ DEFAULTS: dict[str, Any] = {
         "grad_clip": 1.0, "amp": True, "device": "auto",
         "log_every": 10, "eval_every": 500, "hist_every": 500, "save_every": 500, "keep_last": 3,
         "eval_at_start": False,
+    },
+    # extra evaluations at every save step (and at the end); checkpoint selection stays on validation loss
+    "benchmarks": {
+        "test_split": "test",              # held-out split, same filters / row caps as validation (null = off)
+        # Decision Index 0.2.1 on a fixed stratified sample (scrm.dindex.DecisionIndexEval); needs the rebuilt suite
+        # and a sample made with `python -m decision_index suite sample` (scripts/train/dindex_setup.sh).
+        # `every`: run at save steps divisible by it (and at the end); null = every save. 1000 rows ~ 40M tokens.
+        "decision_index": {"enabled": False, "suite_dir": None, "rows": None, "edition": "0.2.1",
+                           "max_len": 16384, "max_tokens": 16384, "every": 2000},
     },
     "wandb": {"enabled": True, "project": None, "entity": None, "run_name": None,
               "tags": [], "mode": None},

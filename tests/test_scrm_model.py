@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from scrm.model import SetEncoder, build_scrm
@@ -35,28 +36,28 @@ def test_no_set_layers_ablation_is_per_candidate():
 
 
 def _sets(n_list, P=11, seed=0):
+    """Packed batch (collator layout): set b has n_list[b] option sequences of length P + 3..7."""
     g = torch.Generator().manual_seed(seed)
-    sets = []
-    for n in n_list:
-        lens = [3 + (k * 2) % 5 for k in range(n)]
-        S = max(lens)
-        suf = torch.zeros(n, S, dtype=torch.long); sm = torch.zeros(n, S, dtype=torch.long)
-        for k, l in enumerate(lens):
-            suf[k, :l] = torch.randint(0, 300, (l,), generator=g); sm[k, :l] = 1
-        sets.append({"prefix": torch.randint(0, 300, (P,), generator=g), "suffix": suf, "suffix_mask": sm,
-                     "read_pos": sm.sum(1) - 1})
+    lens, rs, sl = [], [], []
+    for b, n in enumerate(n_list):
+        for k in range(n):
+            lens.append(P + 3 + (k * 2) % 5); rs.append(b); sl.append(k)
+    L = torch.tensor(lens)
+    pack = {"input_ids": torch.randint(0, 300, (int(L.sum()),), generator=g),
+            "position_ids": torch.cat([torch.arange(n) for n in lens]), "seq_lens": lens,
+            "read_idx": L.cumsum(0) - 1, "row_set": torch.tensor(rs), "row_slot": torch.tensor(sl)}
     cm = torch.zeros(len(n_list), max(n_list), dtype=torch.bool)
     for b, n in enumerate(n_list):
         cm[b, :n] = True
-    return sets, cm
+    return pack, cm
 
 
 def test_full_model_forward_no_new_tokens():
     from scrm.tiny import make_tiny_tokenizer
     model, tok = build_scrm(TINY, "cpu")
     assert len(tok) == len(make_tiny_tokenizer())                        # no tokens added
-    sets, cm = _sets([2, 1])
-    r = model(sets, cm)
+    pack, cm = _sets([2, 1])
+    r = model(pack, cm)
     assert r.shape == (2, 2) and r[1, 1] == 0 and r.dtype == torch.float32
     # trainable: lora + head, but not base weights
     names = [n for n, p in model.named_parameters() if p.requires_grad]
@@ -66,34 +67,52 @@ def test_full_model_forward_no_new_tokens():
     assert any(p.grad is not None and p.grad.abs().sum() > 0 for n, p in model.named_parameters() if "lora_" in n)
 
 
-def test_prefix_cache_matches_full_sequences_forward_and_grad():
-    """Shared-prefix encoding (prompt encoded once, states reused per option) == encoding every full row,
-    with gradient checkpointing on, in train mode (no dropout)."""
-    cfg = dict(TINY, set_dropout=0.0)
-    model, _ = build_scrm(cfg, "cpu")
+def _fwd_bwd(model, pack, cm, max_tokens):
+    model.zero_grad()
+    r = model(pack, cm, max_tokens=max_tokens)
+    r.square().sum().backward()
+    return r.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+
+
+def _assert_same(a, b, rtol=2e-2):
+    (r1, g1), (r2, g2) = a, b
+    assert torch.allclose(r1, r2, atol=1e-4), (r1 - r2).abs().max()
+    assert g1.keys() == g2.keys() and any("lora_" in n for n in g1)
+    for n in g1:   # delta-rule gate params accumulate a little fp32 noise; everything else is ~exact
+        assert (g1[n] - g2[n]).abs().max() <= rtol * g1[n].abs().max() + 1e-6, n
+
+
+def test_chunked_encoding_matches_single_chunk_forward_and_grad():
+    """Splitting the packed sequences into token-budgeted chunks (gradient checkpointing on) changes nothing."""
+    model, _ = build_scrm(dict(TINY, set_dropout=0.0), "cpu")
     model.train()
-    sets, cm = _sets([4, 2], P=37)
+    pack, cm = _sets([4, 2], P=37)
+    _assert_same(_fwd_bwd(model, pack, cm, None), _fwd_bwd(model, pack, cm, 90))
 
-    def run(cache):
-        model.cfg["prefix_cache"] = cache
-        model.zero_grad()
-        r = model(sets, cm, max_tokens=24)                                # also exercises suffix-row chunking
-        (r.square().sum()).backward()
-        return r.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
 
-    r_ref, g_ref = run(False)
-    r_pc, g_pc = run(True)
-    assert torch.allclose(r_ref, r_pc, atol=1e-5)
-    assert g_ref.keys() == g_pc.keys() and any("lora_" in n for n in g_pc)
-    for n in g_ref:   # gate params of the delta rule accumulate a little fp32 noise; everything else is ~exact
-        assert (g_ref[n] - g_pc[n]).abs().max() <= 2e-2 * g_ref[n].abs().max() + 1e-6, n
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="varlen packing kernels are CUDA-only")
+def test_varlen_packing_matches_padded_forward_and_grad(monkeypatch):
+    """Padding-free packed row (cu_seqlens / seq_idx) == right-padded batch: no attention or Gated DeltaNet state
+    leaks across sequence boundaries."""
+    import scrm.model as M
+    if not M._varlen_kernels(torch.device("cuda")):
+        pytest.skip("fla / causal-conv1d not installed")
+    model, _ = build_scrm(dict(TINY, set_dropout=0.0), "cuda")
+    model.train()
+    pack, cm = _sets([5, 3, 1], P=70)
+    pack = {k: v.cuda() if torch.is_tensor(v) else v for k, v in pack.items()}
+    cm = cm.cuda()
+    ref = _fwd_bwd(model, pack, cm, None)
+    monkeypatch.setattr(M, "_varlen_kernels", lambda d: False)
+    pad = _fwd_bwd(model, pack, cm, None)
+    _assert_same(pad, ref)
 
 
 def test_frozen_backbone_has_no_backbone_grads():
     cfg = dict(TINY, freeze_backbone=True)
     model, tok = build_scrm(cfg, "cpu")
     assert not any(p.requires_grad for p in model.backbone.parameters())
-    sets, cm = _sets([2])
-    r = model(sets, cm)
+    pack, cm = _sets([2])
+    r = model(pack, cm)
     r.sum().backward()
     assert model.set_encoder.proj.weight.grad is not None
