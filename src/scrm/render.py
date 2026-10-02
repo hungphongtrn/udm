@@ -128,8 +128,9 @@ DEFAULT_RENDER = {"max_len": 8192, "cand_max_tokens": 256, "state_max_tokens": 6
                   # Plain-text layout, no new tokens. ONE SEQUENCE PER GRADED OPTION: the user turn shows the state,
                   # the instruction, ALL shown options and then asks to grade one of them; the sequence stops at the
                   # assistant header and option k's reward is read at its last token:
-                  #   <|im_start|>user\n{state}\n\n{instruction}\n\nOptions:\nOption 1: {c1}\n...\n
-                  #   Grade this choice: Option k: {ck}<|im_end|>\n<|im_start|>assistant\n
+                  #   <|im_start|>user\nState: {state}\n\nInstruction: {instruction}\n\nOptions:\nOption 1: {c1}\n...\n
+                  #   \nGrade this choice: Option k: {ck}<|im_end|>\n<|im_start|>assistant\n
+                  "state_label": "State: ", "instruction_label": "Instruction: ",
                   "options_header": "Options:\n", "option_label": "Option {k}: ",
                   "grade_prompt": "\nGrade this choice: ",
                   # max options graded per set (one sequence each; the prompt still shows all kept options).
@@ -255,6 +256,8 @@ class Renderer:
             self.chat_prefix = tokenizer(pre, add_special_tokens=False)["input_ids"]
             self.chat_suffix = tokenizer(post, add_special_tokens=False)["input_ids"]
         self.grade = tokenizer(self.cfg["grade_prompt"], add_special_tokens=False)["input_ids"]
+        self.state_label = tokenizer(self.cfg["state_label"], add_special_tokens=False)["input_ids"]
+        self.instr_label = tokenizer(self.cfg["instruction_label"], add_special_tokens=False)["input_ids"]
 
     def label(self, k: int) -> list[int]:
         if k not in self._labels:
@@ -309,7 +312,7 @@ class Renderer:
             idxs = list(kept)
         cand = t.cand_ids if cap is None else [x[:cap] for x in t.cand_ids]
         overhead = (len(self.chat_prefix) + len(self.chat_suffix) + len(t.instr_ids) + len(self.nl2)
-                    + len(self.header) + len(self.grade) + self.lab_max)
+                    + len(self.header) + len(self.grade) + self.lab_max + len(self.state_label) + len(self.instr_label))
         min_state = min(len(t.state_ids), c["min_state_tokens"])
 
         def cost(ix):
@@ -361,8 +364,10 @@ class Renderer:
         state = self._truncate_state(t.state_ids, sb)
         prompt = list(self.chat_prefix)
         if state:
-            prompt += state + self.nl2
-        prompt += t.instr_ids + self.header
+            prompt += self.state_label + state + self.nl2
+        if t.instr_ids:
+            prompt += self.instr_label + t.instr_ids
+        prompt += self.header
         gset = set(graded)
         order = []
         for k, i in enumerate(display, 1):

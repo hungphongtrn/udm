@@ -7,9 +7,9 @@ assistant header:
 
 ```
 <|im_start|>user
-{state}
+State: {state}
 
-{instruction}
+Instruction: {instruction}
 
 Options:
 Option 1: {candidate 1}
@@ -24,7 +24,7 @@ So the LLM sees all available options but grades exactly one: option k's embeddi
 token (the `\n` ending the assistant header, i.e. where the model would start answering). Empty state / instruction
 blocks are omitted; options are numbered in display order (shuffled every time in training, canonical in eval).
 Rows of the same set share everything up to "Grade this choice:" and differ only in the graded option.
-Knobs: `data.render.chat_template`, `system_prompt`, `options_header`, `option_label`, `grade_prompt`, `max_graded`
+Knobs: `data.render.chat_template`, `system_prompt`, `state_label`, `instruction_label`, `options_header`, `option_label`, `grade_prompt`, `max_graded`
 (options graded per set in training; tier-0 and one per other tier always kept; the prompt still lists every shown
 option), `eval_max_graded` (default all; `rank()` always grades all).
 The per-option embeddings of a set are projected (d -> 768), passed through a 2-layer bidirectional

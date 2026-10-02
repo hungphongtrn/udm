@@ -160,13 +160,13 @@ def test_prompt_lists_all_options_and_each_row_grades_one(tok):
     assert len(tok) == n_vocab                                           # renderer adds no tokens
     ex = Example.from_raw("Pick one.", "the state", ["alpha", "beta", "gamma"])
     it = r.assemble(r.tokenize(ex), None, False, relax=True)
-    prompt = ("<|im_start|>user\nthe state\n\nPick one.\n\nOptions:\n"
+    prompt = ("<|im_start|>user\nState: the state\n\nInstruction: Pick one.\n\nOptions:\n"
               "Option 1: alpha\nOption 2: beta\nOption 3: gamma\n\nGrade this choice: ")
     assert len(it.seqs) == 3
     for k, (x, c) in enumerate(zip(it.seqs, ["alpha", "beta", "gamma"])):
         assert tok.decode(x.tolist()) == prompt + f"Option {k + 1}: {c}<|im_end|>\n<|im_start|>assistant\n"
     off = Renderer(tok, {"max_len": 256, "chat_template": False}).assemble(r.tokenize(ex), None, False, relax=True)
-    assert tok.decode(off.seqs[0].tolist()).startswith("the state\n\nPick one.\n\nOptions:\nOption 1: alpha\n")
+    assert tok.decode(off.seqs[0].tolist()).startswith("State: the state\n\nInstruction: Pick one.\n\nOptions:\nOption 1: alpha\n")
 
 
 def test_shuffle_relabels_options_in_display_order(tok):
