@@ -38,7 +38,7 @@ Code: `src/scrm/` (`model.py`, `losses.py`, `render.py`, `collator.py`, `data.py
 ## Quick start
 
 ```bash
-scripts/train/setup.sh [--flash-attn]          # py3.12 venv, torch 2.10 cu128, deps, causal-conv1d wheel, hf + wandb login
+scripts/train/setup.sh [--flash-attn]          # py3.12 venv, torch 2.10 cu130, deps, causal-conv1d wheel, hf + wandb login
 scripts/train/prefetch_data.sh data_cache/udm  # snapshot parquet (hf_transfer) -> training starts immediately / offline
 scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml data.local_dir=data_cache/udm
 scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml --resume auto data.local_dir=data_cache/udm
@@ -69,7 +69,7 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
   (linear attention, projections `in_proj_qkv`, `in_proj_z`, `out_proj`), every 4th is gated full attention
   (`q/k/v/o_proj`). LoRA uses `target_modules: all-linear` (every `nn.Linear` of the decoder: both layer kinds incl.
   `in_proj_a/b`, plus the MLP) with **rsLoRA** (`use_rslora: true`, scaling = alpha/sqrt(r); r=64, alpha=16 -> 2.0). Install `flash-linear-attention`
-  (in `requirements-train.txt`) and `causal-conv1d` (prebuilt wheel pinned in `setup.sh`: Python 3.12, torch 2.10.0 + cu128); without them transformers
+  (in `requirements-train.txt`) and `causal-conv1d` (prebuilt wheel pinned in `setup.sh`: Python 3.12, torch 2.10.0 + cu130); without them transformers
   falls back to a slow, memory-hungry torch implementation of the delta rule. Text-only inputs use plain 1D positions.
 * **Liger kernels.** `model.liger_kernel=true` (default) applies Liger through its HF integration
   (`liger_kernel.transformers`, the same `apply_liger_kernel_to_qwen3_5` HF Trainer's `use_liger_kernel` calls), before the

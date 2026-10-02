@@ -84,17 +84,17 @@ How the build behaves:
 
 Requirements:
 - One NVIDIA GPU with 24 GB (e.g. 4090, L4, A10) or 40 GB+ (A100-40G, A6000, L40S).
-- NVIDIA driver ≥ 570 (CUDA 12.8 runtime) and Python 3.12.
-- The setup script pins **Python 3.12 + PyTorch 2.10.0 (cu128) + causal-conv1d 1.7.0**, all prebuilt wheels with nothing compiled.
+- NVIDIA driver ≥ 580 (CUDA 13.0 runtime) and Python 3.12.
+- The setup script pins **Python 3.12 + PyTorch 2.10.0 (cu130) + causal-conv1d 1.7.0**, all prebuilt wheels with nothing compiled.
 - About 40 GB of disk for the parquet snapshot plus the base model.
 
 ```bash
 git clone https://github.com/hungphongtrn/udm.git && cd udm
 git checkout claude/set-conditioned-reward-model-hvsb9s
 
-# creates .venv with python3.12, installs torch==2.10.0 from the cu128 index, requirements-train.txt
+# creates .venv with python3.12, installs torch==2.10.0 from the cu130 index, requirements-train.txt
 # (transformers>=5.18, peft, liger-kernel, flash-linear-attention, wandb, ...) and the prebuilt causal-conv1d wheel
-# (cu12 / torch2.10 / cp312), then runs HF + wandb login. Optional --flash-attn also tries to install flash-attn
+# (cu13 / torch2.10 / cp312), then runs HF + wandb login. Optional --flash-attn also tries to install flash-attn
 # (it is only used by the 1-in-4 full-attention layers; sdpa is fine without it).
 scripts/train/setup.sh
 

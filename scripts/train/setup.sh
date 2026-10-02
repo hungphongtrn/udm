@@ -3,9 +3,9 @@
 #   scripts/train/setup.sh [--flash-attn] [--no-login]
 #
 # Pinned stack (all prebuilt wheels, nothing compiled):
-#   Python 3.12 | PyTorch 2.10.0 + CUDA 12.8 (cu128 wheel index; needs NVIDIA driver >= 570)
-#   causal-conv1d 1.7.0 prebuilt wheel cu12 / torch2.10 / cxx11abi=TRUE / cp312 (Qwen3.5 Gated DeltaNet conv)
-# Override with PYTHON=python3.12 TORCH_INDEX=https://download.pytorch.org/whl/cu128 if needed.
+#   Python 3.12 | PyTorch 2.10.0 + CUDA 13.0 (cu130 wheel index; needs NVIDIA driver >= 580)
+#   causal-conv1d 1.7.0 prebuilt wheel cu13 / torch2.10 / cxx11abi=TRUE / cp312 (Qwen3.5 Gated DeltaNet conv)
+# Override with PYTHON=python3.12 TORCH_INDEX=https://download.pytorch.org/whl/cu130 if needed.
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$REPO_ROOT"
@@ -14,8 +14,8 @@ for a in "$@"; do case "$a" in --flash-attn) FLASH=1;; --no-login) LOGIN=0;; esa
 
 PYTHON="${PYTHON:-python3.12}"
 TORCH_VERSION="2.10.0"
-TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu128}"
-CAUSAL_CONV1D_WHEEL="https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
+TORCH_INDEX="${TORCH_INDEX:-https://download.pytorch.org/whl/cu130}"
+CAUSAL_CONV1D_WHEEL="https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl"
 
 command -v "$PYTHON" >/dev/null || { echo "need $PYTHON (e.g. apt install python3.12-venv, or uv python install 3.12)"; exit 1; }
 "$PYTHON" -c 'import sys; assert sys.version_info[:2] == (3, 12), sys.version' \
