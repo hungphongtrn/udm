@@ -10,7 +10,7 @@ pyyaml
 wandb
 safetensors
 accelerate>=0.30
-bitsandbytes>=0.43; platform_system == "Linux"   # only needed for model.quantize_4bit=true
+bitsandbytes>=0.43; platform_system == "Linux"   # train.optim=adamw_8bit (default) and model.quantize_4bit
 pytest
 liger-kernel>=0.8.4; platform_system == "Linux"    # Liger RMSNorm/SwiGLU for qwen3_5 (model.liger_kernel)
 flash-linear-attention; platform_system == "Linux" # fast Gated DeltaNet kernels (else slow torch fallback)

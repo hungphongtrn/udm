@@ -39,8 +39,14 @@ def make_optimizer(model, tcfg: dict):
         groups.append({"params": lora, "lr": tcfg["lr_lora"], "weight_decay": 0.0, "name": "lora"})
     groups.append({"params": dec, "lr": tcfg["lr_head"], "weight_decay": tcfg["weight_decay"], "name": "head"})
     groups.append({"params": nodec, "lr": tcfg["lr_head"], "weight_decay": 0.0, "name": "head_nodecay"})
-    fused = torch.cuda.is_available() and next(model.set_encoder.parameters()).is_cuda
-    return torch.optim.AdamW(groups, betas=(0.9, 0.999), eps=1e-8, fused=fused or None)
+    cuda = torch.cuda.is_available() and next(model.set_encoder.parameters()).is_cuda
+    if tcfg.get("optim", "adamw_8bit") == "adamw_8bit":
+        if not cuda:
+            print("[scrm] adamw_8bit needs CUDA; using torch AdamW on this device", flush=True)
+        else:
+            import bitsandbytes as bnb      # tensors < 4096 elements automatically keep 32-bit state
+            return bnb.optim.AdamW8bit(groups, betas=(0.9, 0.999), eps=1e-8)
+    return torch.optim.AdamW(groups, betas=(0.9, 0.999), eps=1e-8, fused=cuda or None)
 
 
 def make_scheduler(opt, warmup: int, total: int, min_ratio: float):
@@ -153,14 +159,18 @@ def train(cfg: dict, resume: str | None = None):
     opt = make_optimizer(model, tcfg)
     sched = make_scheduler(opt, warm, max_steps, tcfg["min_lr_ratio"])
 
-    step, best = 0, -1.0
+    step, best, bad_evals = 0, float("inf"), 0   # best = lowest validation loss; bad_evals = evals since it improved
+    meta = lambda: {"best": best, "best_metric": "val_loss", "optim": tcfg["optim"], "bad_evals": bad_evals}
     if resume:
         if resume == "auto":
             cks = list_ckpts(out_dir)
             resume = cks[-1] if cks else None
         if resume:
             st = load_ckpt(model, opt, sched, resume)
-            step, best = st["step"], st.get("best", -1.0)
+            if st.get("best_metric") != "val_loss" or st.get("optim") != tcfg["optim"]:
+                raise ValueError(f"cannot resume {resume}: checkpoint has best_metric={st.get('best_metric')!r}, "
+                                 f"optim={st.get('optim')!r}; this run uses best_metric='val_loss', optim={tcfg['optim']!r}")
+            step, best, bad_evals = st["step"], st["best"], st.get("bad_evals", 0)
             print(f"[scrm] resumed from {resume} at step {step}", flush=True)
 
     use_perm = lcfg.get("w_perm", 0.0) > 0
@@ -176,7 +186,7 @@ def train(cfg: dict, resume: str | None = None):
         wb.log({k: v for k, v in data.items() if v is not None}, s)
 
     def do_eval(s):
-        nonlocal evalset, best
+        nonlocal evalset, best, bad_evals
         if evalset is None:
             evalset = EvalSet.from_config(cfg, renderer)
             print(f"[eval] set: {len(evalset.items)} items ({evalset.n_dropped} dropped)", flush=True)
@@ -192,10 +202,12 @@ def train(cfg: dict, resume: str | None = None):
         print(f"[eval] step {s}: pair_acc={a.get('pair_acc', 0):.4f} top1={a.get('top1', 0):.4f} "
               f"mrr={a.get('mrr', 0):.4f} ndcg={a.get('ndcg', 0):.4f} loss={a.get('loss', 0):.4f} "
               f"perm_agree={pm.get('rank_agree', float('nan')):.3f} ({time.time()-t0:.0f}s)", flush=True)
-        acc = a.get("pair_acc", -1.0)
-        if acc > best:
-            best = acc
-            save_ckpt(model, opt, sched, s, cfg, out_dir, {"best": best}, name="best", with_opt=False)
+        vloss = a.get("loss", float("inf"))
+        if math.isfinite(vloss) and vloss < best - tcfg["early_stop_min_delta"]:
+            best, bad_evals = vloss, 0
+            save_ckpt(model, opt, sched, s, cfg, out_dir, meta(), name="best")   # with optimizer: `best` is resumable
+        else:
+            bad_evals += 1
         model.train()
 
     if tcfg.get("eval_at_start") and step == 0:
@@ -266,13 +278,17 @@ def train(cfg: dict, resume: str | None = None):
             wb.log_hist("train/reward_hist", last_r[last_b["candidate_mask"]].cpu().numpy(), step)
         if tcfg["eval_every"] and step % tcfg["eval_every"] == 0:
             do_eval(step)
+            pat = tcfg["early_stop_patience"]
+            if pat and bad_evals >= pat:
+                print(f"[scrm] early stop at step {step}: val loss did not improve for {bad_evals} evals (best {best:.4f})", flush=True)
+                break
         if tcfg["save_every"] and step % tcfg["save_every"] == 0:
-            save_ckpt(model, opt, sched, step, cfg, out_dir, {"best": best}, keep_last=tcfg["keep_last"])
+            save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"])
 
     if tcfg["eval_every"] and step % tcfg["eval_every"] != 0:
         do_eval(step)
-    path = save_ckpt(model, opt, sched, step, cfg, out_dir, {"best": best}, keep_last=tcfg["keep_last"])
-    print(f"[scrm] done. final checkpoint: {path}; best pair_acc={best:.4f}", flush=True)
+    path = save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"])
+    print(f"[scrm] done. final checkpoint: {path}; best val loss={best:.4f}", flush=True)
     wb.finish(); mlog.close()
     return {"step": step, "best": best, "ckpt": path}
 

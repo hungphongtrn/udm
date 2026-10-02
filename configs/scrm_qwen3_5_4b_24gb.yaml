@@ -28,8 +28,8 @@ data:
     - {name: openjev,    match: {source_id: [ZefanCai/Open-Jev]},                                             weight: 0.20}
     - {name: samatv,     match: {source_id: [samatv256/jev-decisions-v1]},                max_rows: 1000000, weight: 0.30}  # ~6M rows
   other_weight: 0.05
-  eval_max_rows: 2000
-  eval_max_rows_per_source: 200
+  eval_max_rows: 5000
+  eval_max_rows_per_source: 500
   # One sequence per GRADED option: "{state}\n\n{instruction}\n\nOptions:\n...\n\nGrade this choice: Option k: ..."
   # ending at the assistant header. The shared prompt is encoded ONCE per set (model.prefix_cache) and its states
   # are reused by every graded option, so a set costs ~ prompt + max_graded x (short option suffix) tokens.

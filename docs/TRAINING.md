@@ -173,7 +173,7 @@ without grad).
 AdamW, groups: LoRA `lr_lora` (1e-4), set block/head `lr_head` (5e-4); linear warmup
 + cosine to `min_lr_ratio`; clip 1.0; bf16 autocast; `grad_accum`. Length via `train.max_steps` or `train.epochs`
 (epochs = passes over the capped group sizes; needs non-streaming; steps are estimated from the average batch size).
-Checkpoints every `save_every` steps (`step_XXXXXXX/`, last `keep_last` kept) and `best/` (by validation `pair_acc`):
+Checkpoints every `save_every` steps (`step_XXXXXXX/`, last `keep_last` kept) and `best/` (lowest validation loss; resumable, saved with optimizer state):
 `adapter/` (LoRA), `scrm_head.pt` (set block, head), `tokenizer/`, `scrm_config.json`,
 `trainer_state.pt` (optimizer, scheduler, step). `--resume auto|DIR` restores weights, optimizer, scheduler and step; the data
 stream restarts with a different seed (it is not replayed exactly).

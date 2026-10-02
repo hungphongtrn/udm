@@ -71,6 +71,8 @@ DEFAULTS: dict[str, Any] = {
         "max_steps": 10000, "epochs": None, "grad_accum": 8,
         "lr_lora": 1e-4, "lr_head": 5e-4,
         "weight_decay": 0.01, "warmup_steps": 200, "warmup_ratio": None, "min_lr_ratio": 0.0,
+        "early_stop_patience": 8, "early_stop_min_delta": 0.0,   # stop after N evals without val-loss improvement (0/None = off)
+        "optim": "adamw_8bit",              # adamw_8bit (bitsandbytes, CUDA) | adamw (torch fused)
         "grad_clip": 1.0, "amp": True, "device": "auto",
         "log_every": 10, "eval_every": 500, "hist_every": 500, "save_every": 500, "keep_last": 3,
         "eval_at_start": False,
