@@ -38,7 +38,7 @@ Code: `src/scrm/` (`model.py`, `losses.py`, `render.py`, `collator.py`, `data.py
 ## Quick start
 
 ```bash
-scripts/train/setup.sh [--flash-attn]          # py3.12 venv, torch 2.10 cu130, deps, causal-conv1d wheel, hf + wandb login
+scripts/train/setup.sh [--no-login]           # uv sync (data+train+cu128 groups; CU=130 for cu130), stack check, hf + wandb login
 scripts/train/prefetch_data.sh data_cache/udm  # snapshot parquet (hf_transfer) -> training starts immediately / offline
 scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml data.local_dir=data_cache/udm
 scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml --resume auto data.local_dir=data_cache/udm
@@ -59,7 +59,7 @@ m = load_scrm("outputs/.../best", "cuda")
 m.rank(instruction, state, ["cand a", "cand b"])   # -> [{index, reward}, ...] sorted by reward desc, index = input position
 m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
 ```
-`python -m scrm.export --ckpt DIR --out OUT [--merge]` copies the checkpoint (or merges LoRA into a bf16 backbone) for serving.
+`uv run python -m scrm.export --ckpt DIR|hf://... --out OUT [--merge]` copies the checkpoint (or merges LoRA into a bf16 backbone) for serving.
 
 ## Design choices
 
@@ -69,7 +69,7 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
   (linear attention, projections `in_proj_qkv`, `in_proj_z`, `out_proj`), every 4th is gated full attention
   (`q/k/v/o_proj`). LoRA uses `target_modules: all-linear` (every `nn.Linear` of the decoder: both layer kinds incl.
   `in_proj_a/b`, plus the MLP) with **rsLoRA** (`use_rslora: true`, scaling = alpha/sqrt(r); r=64, alpha=16 -> 2.0). Install `flash-linear-attention`
-  (in `requirements-train.txt`) and `causal-conv1d` (prebuilt wheel pinned in `setup.sh`: Python 3.12, torch 2.10.0 + cu130); without them transformers
+  (`train` dependency group) and `causal-conv1d` (prebuilt wheel locked in `uv.lock`: Python 3.12, torch 2.10.0 + cu128, or cu130 with `CU=130`); without them transformers
   falls back to a slow, memory-hungry torch implementation of the delta rule. Text-only inputs use plain 1D positions.
 * **Liger kernels.** `model.liger_kernel=true` (default) applies Liger through its HF integration
   (`liger_kernel.transformers`, the same `apply_liger_kernel_to_qwen3_5` HF Trainer's `use_liger_kernel` calls), before the
@@ -173,8 +173,16 @@ AdamW, groups: LoRA `lr_lora` (1e-4), set block/head `lr_head` (5e-4); linear wa
 (epochs = passes over the capped group sizes; needs non-streaming; steps are estimated from the average batch size).
 Checkpoints every `save_every` steps (`step_XXXXXXX/`, last `keep_last` kept) and `best/` (lowest validation loss; resumable, saved with optimizer state):
 `adapter/` (LoRA), `scrm_head.pt` (set block, head), `tokenizer/`, `scrm_config.json`,
-`trainer_state.pt` (optimizer, scheduler, step). `--resume auto|DIR` restores weights, optimizer, scheduler and step; the data
-stream restarts with a different seed (it is not replayed exactly).
+`trainer_state.pt` (optimizer, scheduler, step). `--resume auto|DIR|hf://...` restores weights, optimizer, scheduler and step; the data
+stream restarts with a different seed (it is not replayed exactly). Validation also runs at step 0 (`train.eval_at_start`,
+default on) as the untrained baseline.
+
+HF backup (`hub.repo_id`, set in the 24 GB config to the private `hungphongtrn/scrm-qwen3_5-4b`): after every save the
+checkpoint is uploaded in a background thread to `<run>/best` or `<run>/last` (`<run>` = `hub.run` or the basename of
+`output_dir`), replacing that folder; each upload is one commit, so older ones stay reachable as
+`hf://repo@<commit>/<run>/best`. Only the LoRA adapter, set block/head, config and tokenizer are uploaded (the base model
+is re-downloaded from `model.name_or_path` on load); `hub.include_optimizer=true` adds `trainer_state.pt` for
+`--resume hf://...`. The next save waits for the previous upload; failures are printed, never raised.
 
 ## Metrics (train log, `metrics.jsonl`, W&B)
 

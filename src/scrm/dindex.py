@@ -92,7 +92,7 @@ def answer_requests(model, renderer: Renderer, requests: list[dict], bcfg: dict,
     return out
 
 
-try:   # the engine base class only exists when the kit is installed (requirements-train.txt)
+try:   # the engine base class only exists when the kit is installed (the `train` dependency group)
     from decision_index.engines import Engine as _Engine, Unsupported as _Unsupported
 except ImportError:   # pragma: no cover
     _Engine, _Unsupported = object, ValueError
@@ -111,7 +111,8 @@ class SCRMEngine(_Engine):
         self.model = load_scrm(ckpt, self.device).eval()
         self.renderer = make_renderer(self.model, max_len)
         self.bcfg = {"max_tokens_per_batch": int(max_tokens), "max_batch_size": 10**6}
-        self.provenance = {"kind": "scrm", "ckpt": os.path.abspath(ckpt), "max_len": int(max_len)}
+        self.provenance = {"kind": "scrm", "ckpt": ckpt if ckpt.startswith("hf://") else os.path.abspath(ckpt),
+                           "max_len": int(max_len)}
 
     def __call__(self, state, questions):
         res = answer_requests(self.model, self.renderer, [{"state": state, "questions": questions}], self.bcfg,

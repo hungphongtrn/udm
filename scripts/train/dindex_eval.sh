@@ -8,6 +8,6 @@ CKPT="${1:?usage: dindex_eval.sh <ckpt_dir> [out_dir] [args]}"; shift
 OUT="${1:-$CKPT/decision_index_full}"; [ $# -gt 0 ] && shift
 DI_DIR="${DI_DIR:-$REPO_ROOT/../decision-index}"
 cd "$REPO_ROOT"
-python -m decision_index pipeline --engine scrm.dindex:SCRMEngine --option "ckpt=$CKPT" \
+py -m decision_index pipeline --engine scrm.dindex:SCRMEngine --option "ckpt=$CKPT" \
     --suite-dir "$DI_DIR/suite-0.2" --edition 0.2.1 --out "$OUT" --compact "$@"
-python -m scrm.dindex --scores "$OUT/scores.json" --board "$DI_DIR/tests/fixtures/board-0.2.1.json"
+py -m scrm.dindex --scores "$OUT/scores.json" --board "$DI_DIR/tests/fixtures/board-0.2.1.json"

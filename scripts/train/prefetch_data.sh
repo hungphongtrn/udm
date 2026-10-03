@@ -6,7 +6,7 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 DEST="${1:-$REPO_ROOT/data_cache/udm}"
 REPO="${2:-hungphongtrn/udm-massive-typed}"
-python - "$REPO" "$DEST" <<'PY'
+py - "$REPO" "$DEST" <<'PY'
 import sys
 from huggingface_hub import snapshot_download
 repo, dest = sys.argv[1:3]

@@ -5,6 +5,6 @@
 # --existing-keys to also check train rows against existing udm-massive-typed val/test rows).
 set -euo pipefail
 source "$(dirname "$0")/_env.sh"
-python -m scrm_data.build --source all --out "$OUT" --cache-dir "$CACHE" --workers "$WORKERS" "$@"
-python -m scrm_data.report --out "$OUT" > /dev/null
+py -m scrm_data.build --source all --out "$OUT" --cache-dir "$CACHE" --workers "$WORKERS" "$@"
+py -m scrm_data.report --out "$OUT" > /dev/null
 echo "built into $OUT ; next: scripts/data/validate.sh && scripts/data/push.sh"

@@ -285,8 +285,11 @@ def build_scrm(mcfg: dict, device: torch.device | str = "cpu", tokenizer=None, a
 
 
 def load_scrm(ckpt_dir: str, device: str | torch.device = "cpu", merged_ok: bool = True) -> "SCRM":
-    """Load a checkpoint written by SCRM.save_pretrained (LoRA adapter + head + tokenizer + config)."""
+    """Load a checkpoint written by SCRM.save_pretrained (LoRA adapter + head + tokenizer + config).
+    `ckpt_dir` may be `hf://org/repo[@revision]/run/best` (a hub backup); the base model comes from model.name_or_path."""
     from transformers import AutoTokenizer
+    from .hub import resolve_ckpt
+    ckpt_dir = resolve_ckpt(ckpt_dir)
     with open(os.path.join(ckpt_dir, "scrm_config.json")) as f:
         saved = json.load(f)
     mcfg = saved["model"]

@@ -1,6 +1,6 @@
 """Export a checkpoint for inference: optionally merge LoRA into the backbone.
 
-python -m scrm.export --ckpt outputs/scrm/best --out exported/scrm [--merge]
+python -m scrm.export --ckpt outputs/scrm/best|hf://org/repo/run/best --out exported/scrm [--merge]
 """
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ import shutil
 
 import torch
 
+from .hub import resolve_ckpt
 from .model import load_scrm
 
 
@@ -22,7 +23,7 @@ def main(argv=None):
     ap.add_argument("--device", default="cpu")
     a = ap.parse_args(argv)
     if not a.merge:
-        shutil.copytree(a.ckpt, a.out, dirs_exist_ok=True)
+        shutil.copytree(resolve_ckpt(a.ckpt), a.out, dirs_exist_ok=True)
         for f in ("trainer_state.pt",):
             p = os.path.join(a.out, f)
             if os.path.exists(p):

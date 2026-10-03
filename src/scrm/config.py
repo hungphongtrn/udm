@@ -70,7 +70,7 @@ DEFAULTS: dict[str, Any] = {
         "optim": "adamw_8bit",              # adamw_8bit (bitsandbytes, CUDA) | adamw (torch fused)
         "grad_clip": 1.0, "amp": True, "device": "auto",
         "log_every": 10, "eval_every": 500, "hist_every": 500, "save_every": 500, "keep_last": 3,
-        "eval_at_start": False,
+        "eval_at_start": True,
     },
     # extra evaluations at every save step (and at the end); checkpoint selection stays on validation loss
     "benchmarks": {
@@ -81,6 +81,11 @@ DEFAULTS: dict[str, Any] = {
         "decision_index": {"enabled": False, "suite_dir": None, "rows": None, "edition": "0.2.1",
                            "max_len": 16384, "max_tokens": 16384, "every": 2000},
     },
+    # Hugging Face Hub backup: every checkpoint save uploads the LoRA adapter + SCRM set block/head + config + tokenizer
+    # (not the frozen base model) in the background to {repo_id}/{run}/best and {repo_id}/{run}/last; each upload is a
+    # commit, so older checkpoints stay reachable by revision. run = basename(output_dir) unless set.
+    # Load with load_scrm("hf://{repo_id}/{run}/best"). include_optimizer also uploads trainer_state.pt (resumable).
+    "hub": {"repo_id": None, "run": None, "private": True, "include_optimizer": False},
     "wandb": {"enabled": True, "project": None, "entity": None, "run_name": None,
               "tags": [], "mode": None},
 }

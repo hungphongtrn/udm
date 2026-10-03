@@ -4,4 +4,4 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 CFG="${1:?usage: train.sh <config.yaml> [overrides]}"; shift
 cd "$REPO_ROOT"
-exec python -m scrm.train --config "$CFG" "$@"
+py -m scrm.train --config "$CFG" "$@"

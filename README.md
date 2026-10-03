@@ -43,9 +43,9 @@ Requirements:
 git clone https://github.com/hungphongtrn/udm.git && cd udm
 git checkout claude/set-conditioned-reward-model-hvsb9s
 
-scripts/data/setup.sh                       # uv: creates .venv-data with requirements-data.txt
-source .venv-data/bin/activate
-export HF_TOKEN=hf_...                      # write token (or: hf auth login)
+scripts/data/setup.sh                       # uv sync: .venv with the `data` dependency group (no torch)
+export HF_TOKEN=hf_...                      # write token (or: uv run hf auth login)
+# every scripts/data/*.sh runs Python through `uv run --no-default-groups --group data`
 
 # 0) optional, ~1 min: convert tiny remote slices of every source and validate them
 scripts/data/smoke.sh
@@ -72,7 +72,7 @@ How the build behaves:
 - **Original labels are kept.** The raw supervision stays recoverable in `source_label_or_null` and `probabilities_json`
   (score levels, expected level, raw `p_yes`, …). See DATA_SPEC §6.
 - **Splits are best effort.** Each source's own split is used where it exists, mapped to train / validation / test. `source_split` keeps the raw name (e.g. `ood`, `calibration`).
-- **Leakage and duplicates.** Train rows whose content appears in held-out rows are removed. Every drop is counted in `$OUT/receipts`, and `python -m scrm_data.report --out $OUT` prints the counts.
+- **Leakage and duplicates.** Train rows whose content appears in held-out rows are removed. Every drop is counted in `$OUT/receipts`, and `uv run python -m scrm_data.report --out $OUT` prints the counts.
 - **Append only.**
   - New files are `data/{split}-{source}-NNNNN-of-MMMMM.parquet`, with exactly the existing 26-column schema.
   - Existing files are never touched.
@@ -83,19 +83,22 @@ How the build behaves:
 ## Machine 2: pull and train (GPU box)
 
 Requirements:
-- One NVIDIA GPU with 24 GB (e.g. 4090, L4, A10) or 40 GB+ (A100-40G, A6000, L40S).
-- NVIDIA driver ≥ 580 (CUDA 13.0 runtime). uv is installed by the setup script if missing and provides Python 3.12.
-- The setup script (uv) pins **Python 3.12 + PyTorch 2.10.0 (cu130) + causal-conv1d 1.7.0**, all prebuilt wheels with nothing compiled.
+- One NVIDIA GPU with 24 GB (e.g. 3090, 4090, L4, A10) or 40 GB+ (A100-40G, A6000, L40S).
+- NVIDIA driver ≥ 570 for CUDA 12.8 (the default, `CU=128`) or ≥ 580 for CUDA 13.0 (`CU=130`; export it for every script).
+- Everything is a uv project: `pyproject.toml` dependency groups (`data`, `train`, `cu128` | `cu130`) locked in `uv.lock`
+  — **Python 3.12 + PyTorch 2.10.0 + causal-conv1d 1.7.0**, all prebuilt wheels with nothing compiled. The scripts run
+  Python through `uv run --locked`; setup installs uv to `~/.local/bin` if missing.
 - About 40 GB of disk for the parquet snapshot plus the base model.
+- Optional HF checkpoint backup: the 24 GB config uploads every checkpoint (LoRA adapter + set block/head + config +
+  tokenizer, not the base model) to the private repo `hungphongtrn/scrm-qwen3_5-4b` under `<run>/best` and `<run>/last`
+  (`<run>` = basename of `output_dir`); needs an HF write token. `hub.repo_id=null` turns it off.
 
 ```bash
 git clone https://github.com/hungphongtrn/udm.git && cd udm
 git checkout claude/set-conditioned-reward-model-hvsb9s
 
-# uv: creates .venv with Python 3.12, installs torch==2.10.0 from the cu130 index, requirements-train.txt
-# (transformers>=5.18, peft, liger-kernel, flash-linear-attention, wandb, ...) and the prebuilt causal-conv1d wheel
-# (cu13 / torch2.10 / cp312), then runs HF + wandb login. Optional --flash-attn also tries to install flash-attn
-# (it is only used by the 1-in-4 full-attention layers; sdpa is fine without it).
+# uv sync --locked of the data + train + cu128 groups (CU=130 scripts/train/setup.sh for CUDA 13), checks torch/CUDA/
+# causal-conv1d, then HF + wandb login (--no-login to skip)
 scripts/train/setup.sh
 
 # 0) optional: CPU smoke test (tiny random Qwen3.5, synthetic data, no downloads)
@@ -114,6 +117,11 @@ scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml --resume auto data.loca
 # 3) evaluate the best checkpoint (lowest validation loss) on test, and on the OOD slice
 scripts/train/eval.sh outputs/scrm_qwen3_5_4b_24gb/best --split test --out test.json data.local_dir=data_cache/udm
 scripts/train/eval.sh outputs/scrm_qwen3_5_4b_24gb/best --split test --filter source_split=ood --out ood.json data.local_dir=data_cache/udm
+#    or straight from the HF backup (any machine): hf://hungphongtrn/scrm-qwen3_5-4b/scrm_qwen3_5_4b_24gb/best
+#    an older upload: hf://hungphongtrn/scrm-qwen3_5-4b@<commit>/scrm_qwen3_5_4b_24gb/best
+
+# 4) optional: full model (LoRA merged into a bf16 backbone) from a local or hf:// checkpoint
+uv run python -m scrm.export --ckpt hf://hungphongtrn/scrm-qwen3_5-4b/scrm_qwen3_5_4b_24gb/best --out exported/scrm --merge
 ```
 
 Notes for the GPU box:
@@ -125,7 +133,7 @@ Notes for the GPU box:
 - **Memory (estimated, not yet measured).**
   - The 24 GB config should peak around 14–17 GB.
   - If it OOMs, add `model.quantize_4bit=true` (QLoRA, about 9–11 GB) or lower `data.batch.max_tokens_per_batch` and raise `train.grad_accum`.
-  - Install `flash-linear-attention` (it is in the requirements). Without it, the Gated DeltaNet layers use a slow torch fallback.
+  - `flash-linear-attention` (in the `train` group) is required for speed. Without it, the Gated DeltaNet layers use a slow torch fallback.
 - **Data mixing.**
   - Mixing is set per source in the config's `data.groups`. The weight is the sampling share and `max_rows` is a cap; MASSIVE and samatv are capped.
   - Every row is kept on the Hub; caps and mixing happen only at train time.
@@ -133,13 +141,16 @@ Notes for the GPU box:
   - Training logs to W&B project `scrm`: losses, LR, grad norms, reward histograms, and validation metrics (pair accuracy, top-1, MRR, NDCG, Kendall τ). Each metric is reported overall and per family/source.
   - Set `WANDB_MODE=disabled` to run without W&B. `WANDB_PROJECT`, `WANDB_ENTITY`, `WANDB_RUN_NAME` and `WANDB_TAGS` are honoured.
 - **Overrides.** Any config value can be overridden on the command line with dotted keys, e.g. `train.max_steps=5000 model.lora.r=32`.
+- **HF backup.** Uploads run in a background thread after each save (best on every val-loss improvement, last every
+  `save_every`) and never stop training on failure (`[hub] upload failed` is printed). `hub.include_optimizer=true` also
+  uploads `trainer_state.pt`, so `--resume hf://.../last` works on a new machine; by default only the weights are kept.
 - **Streaming.** Instead of prefetching, `data.streaming=true` reads from `hf://` directly. The prefetch above is faster and exact.
 
 Inference:
 
 ```python
 from scrm.model import load_scrm
-m = load_scrm("outputs/scrm_qwen3_5_4b_24gb/best", "cuda")
+m = load_scrm("outputs/scrm_qwen3_5_4b_24gb/best", "cuda")   # or "hf://hungphongtrn/scrm-qwen3_5-4b/<run>/best"
 m.rank(instruction, state, ["candidate a", "candidate b", "candidate c"])  # [{index, reward}, ...] best first
 ```
 
@@ -153,12 +164,8 @@ scripts/data/    Machine 1 entry points        scripts/train/   Machine 2 entry 
 tests/           pytest: test_data_* (per-source conversion formats, tiers, build) and test_scrm_* (model, losses, data, train)
 ```
 
-Tests run offline on CPU in about 15 s:
+Tests run offline on CPU in their own env (CPU torch, no CUDA kernels):
 
 ```bash
-uv venv --python 3.12 .venv-test && uv pip install --python .venv-test/bin/python torch==2.10.0 \
-  --index-url https://download.pytorch.org/whl/cpu
-uv pip install --python .venv-test/bin/python -r requirements-data.txt "transformers>=5.18" "peft>=0.14" "datasets>=3.0" \
-  safetensors pyyaml
-PYTHONPATH=src .venv-test/bin/python -m pytest -q tests/
+UV_PROJECT_ENVIRONMENT=.venv-cpu uv run --locked --exact --no-default-groups --group data --group train --group cpu pytest -q tests/
 ```

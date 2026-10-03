@@ -21,6 +21,7 @@ from .data import TrainStream, build_groups, make_train_loader, EvalSet
 from .evaluate import run_eval, run_perm_eval, _amp
 from .losses import compute_loss, reduce_loss
 from .metrics import flatten
+from .hub import HubSync, resolve_ckpt
 from .model import build_scrm
 from .render import Renderer
 from .wandb_utils import init_wandb
@@ -66,7 +67,10 @@ def list_ckpts(out_dir):
     return [os.path.join(out_dir, d) for d in sorted(ds)]
 
 
-def save_ckpt(model, opt, sched, step, cfg, out_dir, state_extra: dict, name=None, keep_last=3, with_opt=True):
+def save_ckpt(model, opt, sched, step, cfg, out_dir, state_extra: dict, name=None, keep_last=3, with_opt=True,
+              hub: HubSync | None = None):
+    if hub is not None:
+        hub.wait()   # the previous upload may still be reading a directory replaced / pruned below
     path = os.path.join(out_dir, name or f"step_{step:07d}")
     tmp = path + ".tmp"
     if os.path.isdir(tmp):
@@ -82,6 +86,8 @@ def save_ckpt(model, opt, sched, step, cfg, out_dir, state_extra: dict, name=Non
     if os.path.isdir(path):
         shutil.rmtree(path)
     os.rename(tmp, path)
+    if hub is not None:
+        hub.push(path, name or "last", f"step {step}, best val loss {state_extra.get('best', float('nan')):.4f}")
     if name is None:
         for old in list_ckpts(out_dir)[:-keep_last]:
             shutil.rmtree(old, ignore_errors=True)
@@ -166,6 +172,7 @@ def train(cfg: dict, resume: str | None = None):
             cks = list_ckpts(out_dir)
             resume = cks[-1] if cks else None
         if resume:
+            resume = resolve_ckpt(resume)   # hf://... works when the run uploaded with hub.include_optimizer
             st = load_ckpt(model, opt, sched, resume)
             if st.get("best_metric") != "val_loss" or st.get("optim") != tcfg["optim"]:
                 raise ValueError(f"cannot resume {resume}: checkpoint has best_metric={st.get('best_metric')!r}, "
@@ -180,6 +187,7 @@ def train(cfg: dict, resume: str | None = None):
     bcfg = cfg["benchmarks"]
     wb = init_wandb(cfg["wandb"], cfg, out_dir)
     mlog = open(os.path.join(out_dir, "metrics.jsonl"), "a")
+    hub = HubSync(cfg["hub"], out_dir)
 
     def log(data, s):
         data = {k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in data.items()}
@@ -207,7 +215,7 @@ def train(cfg: dict, resume: str | None = None):
         vloss = a.get("loss", float("inf"))
         if math.isfinite(vloss) and vloss < best - tcfg["early_stop_min_delta"]:
             best, bad_evals = vloss, 0
-            save_ckpt(model, opt, sched, s, cfg, out_dir, meta(), name="best")   # with optimizer: `best` is resumable
+            save_ckpt(model, opt, sched, s, cfg, out_dir, meta(), name="best", hub=hub)   # with optimizer: `best` is resumable
         else:
             bad_evals += 1
         model.train()
@@ -249,7 +257,7 @@ def train(cfg: dict, resume: str | None = None):
     if tcfg.get("eval_at_start") and step == 0:
         do_eval(0)
 
-    t_last, tok_acc = time.time(), 0
+    t_last, tok_acc, saved_at = time.time(), 0, None
     src_acc: dict[str, list] = {}   # source_id -> [sum of per-set loss, n sets] since the last log
     while step < max_steps:
         try:
@@ -329,13 +337,19 @@ def train(cfg: dict, resume: str | None = None):
                 break
         if tcfg["save_every"] and step % tcfg["save_every"] == 0:
             do_benchmarks(step)
-            save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"])
+            save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)
+            saved_at = step
 
-    if tcfg["eval_every"] and step % tcfg["eval_every"] != 0:
+    final_eval = bool(tcfg["eval_every"]) and step % tcfg["eval_every"] != 0
+    if final_eval:
         do_eval(step)
     do_benchmarks(step, final=True)
-    path = save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"])
+    if saved_at == step and not final_eval:   # this exact state was just saved (and uploaded) in the loop
+        path = os.path.join(out_dir, f"step_{step:07d}")
+    else:
+        path = save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)
     print(f"[scrm] done. final checkpoint: {path}; best val loss={best:.4f}", flush=True)
+    hub.wait()
     wb.finish(); mlog.close()
     return {"step": step, "best": best, "ckpt": path}
 

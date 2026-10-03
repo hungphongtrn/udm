@@ -55,4 +55,6 @@ train:
 benchmarks:
   decision_index: {enabled: true, suite_dir: ../decision-index/suite-0.2, rows: ../decision-index/sample-1000.jsonl.gz,
                    every: 2000}
+# LoRA + set block/head backups -> hf://hungphongtrn/scrm-qwen3_5-4b/<basename(output_dir)>/{best,last} (private)
+hub: {repo_id: hungphongtrn/scrm-qwen3_5-4b, private: true, include_optimizer: false}
 wandb: {enabled: true, project: scrm, tags: [qwen3.5-4b, 24gb]}
