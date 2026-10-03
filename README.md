@@ -34,7 +34,7 @@ Machine 1 (many CPUs)                         Machine 2 (1 GPU, 24-40 GB)
 ## Machine 1: build the data and push it to HF (CPU box)
 
 Requirements:
-- Python ≥ 3.10.
+- [uv](https://docs.astral.sh/uv/) (the setup script installs it to `~/.local/bin` if missing; it also provides Python 3.12).
 - Many cores. The build is parallel over source files; `WORKERS` defaults to `nproc`.
 - Disk: about 25 GB of output plus about 22 GB of source downloads. Pass `--delete-source` or `--stream` to avoid keeping the downloads.
 - An HF token with write access to `hungphongtrn/udm-massive-typed`.
@@ -43,7 +43,7 @@ Requirements:
 git clone https://github.com/hungphongtrn/udm.git && cd udm
 git checkout claude/set-conditioned-reward-model-hvsb9s
 
-scripts/data/setup.sh                       # creates .venv-data with requirements-data.txt
+scripts/data/setup.sh                       # uv: creates .venv-data with requirements-data.txt
 source .venv-data/bin/activate
 export HF_TOKEN=hf_...                      # write token (or: hf auth login)
 
@@ -84,15 +84,15 @@ How the build behaves:
 
 Requirements:
 - One NVIDIA GPU with 24 GB (e.g. 4090, L4, A10) or 40 GB+ (A100-40G, A6000, L40S).
-- NVIDIA driver ≥ 580 (CUDA 13.0 runtime) and Python 3.12.
-- The setup script pins **Python 3.12 + PyTorch 2.10.0 (cu130) + causal-conv1d 1.7.0**, all prebuilt wheels with nothing compiled.
+- NVIDIA driver ≥ 580 (CUDA 13.0 runtime). uv is installed by the setup script if missing and provides Python 3.12.
+- The setup script (uv) pins **Python 3.12 + PyTorch 2.10.0 (cu130) + causal-conv1d 1.7.0**, all prebuilt wheels with nothing compiled.
 - About 40 GB of disk for the parquet snapshot plus the base model.
 
 ```bash
 git clone https://github.com/hungphongtrn/udm.git && cd udm
 git checkout claude/set-conditioned-reward-model-hvsb9s
 
-# creates .venv with python3.12, installs torch==2.10.0 from the cu130 index, requirements-train.txt
+# uv: creates .venv with Python 3.12, installs torch==2.10.0 from the cu130 index, requirements-train.txt
 # (transformers>=5.18, peft, liger-kernel, flash-linear-attention, wandb, ...) and the prebuilt causal-conv1d wheel
 # (cu13 / torch2.10 / cp312), then runs HF + wandb login. Optional --flash-attn also tries to install flash-attn
 # (it is only used by the 1-in-4 full-attention layers; sdpa is fine without it).
@@ -156,6 +156,9 @@ tests/           pytest: test_data_* (per-source conversion formats, tiers, buil
 Tests run offline on CPU in about 15 s:
 
 ```bash
-pip install -r requirements-data.txt -r requirements-train.txt   # or reuse either venv plus the other's requirements
-PYTHONPATH=src pytest -q tests/
+uv venv --python 3.12 .venv-test && uv pip install --python .venv-test/bin/python torch==2.10.0 \
+  --index-url https://download.pytorch.org/whl/cpu
+uv pip install --python .venv-test/bin/python -r requirements-data.txt "transformers>=5.18" "peft>=0.14" "datasets>=3.0" \
+  safetensors pyyaml
+PYTHONPATH=src .venv-test/bin/python -m pytest -q tests/
 ```

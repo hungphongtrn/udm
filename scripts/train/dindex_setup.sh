@@ -12,8 +12,8 @@ DI_DIR="${DI_DIR:-$REPO_ROOT/../decision-index}"
 N="${N:-1000}"
 [ -d "$DI_DIR" ] || git clone https://github.com/apolinario/decision-index "$DI_DIR"
 cd "$DI_DIR" && git checkout -q "$DI_REV"
-[ -d .venv ] || python3 -m venv .venv
-.venv/bin/pip install -q -e ".[rebuild]"
+[ -d .venv ] || uv venv --python 3.12 .venv
+uv pip install -q --python .venv/bin/python -e ".[rebuild]"
 export HF_HUB_DISABLE_XET=1
 OUT=work/artifacts/benchmark-suite/release-v2-rebuilt
 [ -f "$OUT/added-rows.jsonl.gz" ] || .venv/bin/python -m decision_index suite rebuild --work work
