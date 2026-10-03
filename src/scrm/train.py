@@ -17,7 +17,7 @@ import torch
 
 from .collator import align_slots, collate, to_device
 from .config import load_config
-from .data import TrainStream, build_groups, make_train_loader, EvalSet, select_eval_rows
+from .data import TrainStream, build_groups, make_train_loader, EvalSet
 from .evaluate import run_eval, run_perm_eval, _amp
 from .losses import compute_loss, reduce_loss
 from .metrics import flatten
@@ -190,7 +190,7 @@ def train(cfg: dict, resume: str | None = None):
         nonlocal evalset, best, bad_evals
         if evalset is None:
             evalset = EvalSet.from_config(cfg, renderer)
-            print(f"[eval] set: {len(evalset.items)} items ({evalset.n_dropped} dropped)", flush=True)
+            print(f"[eval] set: {evalset.describe()}", flush=True)
         t0 = time.time()
         m = run_eval(model, evalset.batches(), lcfg, device, amp, max_tokens=d["batch"]["max_tokens_per_batch"])
         pm = run_perm_eval(model, evalset, renderer, d["perm_eval_rows"], d["batch"], device, amp)
@@ -221,7 +221,7 @@ def train(cfg: dict, resume: str | None = None):
             done_bench["test"] = s
             if testset is None:
                 testset = EvalSet.from_config(cfg, renderer, bcfg["test_split"])
-                print(f"[test] set: {len(testset.items)} items ({testset.n_dropped} dropped)", flush=True)
+                print(f"[test] set: {testset.describe()}", flush=True)
             t0 = time.time()
             m = run_eval(model, testset.batches(), lcfg, device, amp, max_tokens=d["batch"]["max_tokens_per_batch"])
             flat = flatten(m, "test")
@@ -248,6 +248,7 @@ def train(cfg: dict, resume: str | None = None):
         do_eval(0)
 
     t_last, tok_acc = time.time(), 0
+    src_acc: dict[str, list] = {}   # source_id -> [sum of per-set loss, n sets] since the last log
     while step < max_steps:
         try:
             batches = [next(it) for _ in range(tcfg["grad_accum"])]
@@ -279,6 +280,10 @@ def train(cfg: dict, resume: str | None = None):
             for k, v in lo.parts.items():
                 parts_acc[k] = parts_acc.get(k, 0.0) + float((v.detach() * lo.valid).sum()) / n_valid
             pairs += int(lo.n_pairs.sum()); ex_n += r.size(0)
+            for s, l, v in zip(b["source_id"], lo.per_example.detach().cpu().tolist(), lo.valid.cpu().tolist()):
+                if v:
+                    a = src_acc.setdefault(s, [0.0, 0])
+                    a[0] += l; a[1] += 1
             tok_acc += int(b["n_tokens"])
             last_r, last_b = r.detach(), bd
         params = [p for g in opt.param_groups for p in g["params"] if p.grad is not None]
@@ -300,6 +305,10 @@ def train(cfg: dict, resume: str | None = None):
                    "train/pair_acc_lastmb": _train_pair_acc(last_r, last_b["tiers"], last_b["pair_mask"]),
                    "train/reward_mean": float(m.mean()), "train/reward_std": float(m.std()) if m.numel() > 1 else 0.0}
             rec.update({f"train/loss_{k}": v for k, v in parts_acc.items()})
+            for s, (l, n) in src_acc.items():   # mean per-set loss per source over the log window
+                rec[f"train/source/{s}/loss"] = l / n
+                rec[f"train/source/{s}/n_sets"] = n
+            src_acc.clear()
             for g in opt.param_groups:
                 rec[f"lr/{g['name']}"] = g["lr"]
             if device.type == "cuda":

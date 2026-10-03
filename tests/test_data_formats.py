@@ -247,7 +247,7 @@ def test_trainer_round_trip_through_real_build_path(tmp_path):
     total = 0
     families = set()
     for sp in ("train", "validation", "test"):
-        rows = select_eval_rows(cfg["data"], sp, {}, None, None, streaming=False)
+        rows = select_eval_rows(cfg["data"], sp, {}, None, None)
         assert rows
         es = EvalSet(rows, renderer, cfg["data"])
         assert es.n_dropped == 0 and len(es.items) == len(rows)

@@ -258,73 +258,149 @@ def make_train_loader(cfg: dict, renderer: Renderer, seed: int, max_examples=Non
 
 
 # ----------------------------------------------------------------------------- eval
-def select_eval_rows(dcfg: dict, split: str, filters: dict, max_rows, per_source, seed: int = 0, streaming=None) -> list[dict]:
-    """Deterministic capped sample of rows (includes candidate_rows for canonical order)."""
-    streaming = dcfg["streaming"] if streaming is None else streaming
+EVAL_DRAW_FACTOR = 10   # per source, read at most this many x the quota while replacing sets that do not render
+
+
+def _open(path: str):
+    if path.startswith("hf://"):
+        import fsspec
+        return fsspec.open(path, "rb").open()
+    return path
+
+
+def _concrete(paths: list[str]) -> list[str]:
+    """Expand hf:// glob patterns (local paths from `_files` are already concrete)."""
+    out = []
+    for p in paths:
+        if p.startswith("hf://"):
+            import fsspec
+            out += sorted(f"hf://{x}" for x in fsspec.filesystem("hf").glob(p[len("hf://"):]))
+        else:
+            out.append(p)
+    return out
+
+
+def _eval_candidates(dcfg: dict, split: str, filters: dict, seed: int):
+    """(files, {source_id: [(file_idx, row_idx), ...] in a seeded random order}) over every file of the split.
+    Only the filter columns are read here, so every source of the split is reachable regardless of file order."""
+    import pyarrow.parquet as pq
     pred = Pred(filters.get("include"), filters.get("exclude"))
-    rows: list[dict] = []
-    if not streaming:
-        ds = load_base(dcfg, split, False, candidate_rows=True)
-        table = ds.data.table if hasattr(ds.data, "table") else ds.data
-        keep = pred.mask(table)
-        src = np.asarray(table.column("source_id").to_numpy(zero_copy_only=False))
-        srcs = sorted(set(src[keep].tolist()))
-        per = per_source
-        idx = []
-        rng = np.random.default_rng(seed)
-        for s in srcs:
-            ii = np.where(keep & (src == s))[0]
-            if per and len(ii) > per:
-                ii = rng.permutation(ii)[:per]
-            idx.extend(ii.tolist())
-        idx = sorted(idx)
-        if max_rows and len(idx) > max_rows:
-            idx = sorted(rng.permutation(idx)[:max_rows].tolist())
-        for s in range(0, len(idx), 256):
-            ch = ds[idx[s:s + 256]]
-            ks = list(ch.keys())
-            rows += [{k: ch[k][j] for k in ks} for j in range(len(ch[ks[0]]))]
-    else:
-        ds = load_base(dcfg, split, True, candidate_rows=True)
-        counts: dict[str, int] = {}
-        scanned = 0
-        for r in ds:
-            scanned += 1
-            if pred.row(r) and (not per_source or counts.get(r["source_id"], 0) < per_source):
-                counts[r["source_id"]] = counts.get(r["source_id"], 0) + 1
-                rows.append(r)
-            if (max_rows and len(rows) >= max_rows) or scanned >= dcfg.get("eval_max_scan_rows", 200000):
-                break
-    return rows
+    files = _concrete(_files(dcfg, split))
+    by_src: dict[str, list] = {}
+    for fi, f in enumerate(files):
+        t = pq.read_table(_open(f), columns=list(FILTER_COLS))
+        keep = np.where(pred.mask(t))[0]
+        src = np.asarray(t.column("source_id").to_numpy(zero_copy_only=False))[keep]
+        for s in np.unique(src):
+            by_src.setdefault(str(s), []).append(np.stack([np.full((src == s).sum(), fi), keep[src == s]], 1))
+    rng = np.random.default_rng(seed)
+    return files, {s: [tuple(x) for x in rng.permutation(np.concatenate(by_src[s]))] for s in sorted(by_src)}
+
+
+def _read_rows(files: list[str], locs: list[tuple[int, int]]) -> list[dict]:
+    """Rows at (file_idx, row_idx) locations (BASE_COLS + candidate_rows), in the order given; reads only the row
+    groups that contain them."""
+    import pyarrow.parquet as pq
+    cols = BASE_COLS + ["candidate_rows"]
+    out: dict[tuple[int, int], dict] = {}
+    by_file: dict[int, list[int]] = {}
+    for fi, ri in locs:
+        by_file.setdefault(int(fi), []).append(int(ri))
+    for fi, rows in by_file.items():
+        pf = pq.ParquetFile(_open(files[fi]))
+        starts = np.cumsum([0] + [pf.metadata.row_group(g).num_rows for g in range(pf.num_row_groups)])
+        rg = np.searchsorted(starts, rows, side="right") - 1
+        for g in np.unique(rg):
+            local = [r - int(starts[g]) for r, gg in zip(rows, rg) if gg == g]
+            for r, rec in zip(local, pf.read_row_group(int(g), columns=cols).take(local).to_pylist()):
+                out[(fi, r + int(starts[g]))] = rec
+    return [out[(int(fi), int(ri))] for fi, ri in locs]
+
+
+def _cap_total(per_src: dict[str, list], max_rows, seed: int) -> list:
+    """Flatten per-source picks (sorted by source); if more than max_rows, keep a seeded random subset."""
+    flat = [x for s in sorted(per_src) for x in per_src[s]]
+    if max_rows and len(flat) > max_rows:
+        keep = np.sort(np.random.default_rng(seed + 1).permutation(len(flat))[:max_rows])
+        flat = [flat[i] for i in keep]
+    return flat
+
+
+def select_eval_rows(dcfg: dict, split: str, filters: dict, max_rows, per_source, seed: int = 0) -> list[dict]:
+    """Deterministic sample: `per_source` random rows of every source in the split (None = all), then at most
+    `max_rows` in total (includes candidate_rows for canonical order)."""
+    files, cands = _eval_candidates(dcfg, split, filters, seed)
+    picks = {s: c[:per_source] if per_source else c for s, c in cands.items()}
+    return _read_rows(files, _cap_total(picks, max_rows, seed))
+
+
+def _eval_renderer(renderer: Renderer) -> Renderer:
+    # eval grades every shown option (render.eval_max_graded, default None = all), whatever train uses
+    return Renderer(renderer.tok, {**renderer.cfg, "max_graded": renderer.cfg.get("eval_max_graded")})
+
+
+def _eval_item(renderer: Renderer, row: dict):
+    ex = parse_row(row, use_candidate_rows=True)
+    return renderer.assemble(renderer.tokenize(ex), None, False) if ex is not None else None
 
 
 class EvalSet:
     """Tokenised, canonical-order eval items (cached) split into token-budget batches."""
 
     def __init__(self, rows: list[dict], renderer: Renderer, dcfg: dict):
-        # eval grades every shown option (render.eval_max_graded, default None = all), whatever train uses
-        renderer = Renderer(renderer.tok, {**renderer.cfg, "max_graded": renderer.cfg.get("eval_max_graded")})
-        self.r = renderer
-        self.items = []
-        self.n_rows, self.n_dropped = len(rows), 0
-        for row in rows:
-            ex = parse_row(row, use_candidate_rows=True)
-            it = renderer.assemble(renderer.tokenize(ex), None, False) if ex is not None else None
-            if it is None:
-                self.n_dropped += 1
-                continue
-            self.items.append(it)
+        self.r = _eval_renderer(renderer)
+        items = [_eval_item(self.r, row) for row in rows]
+        self._init(dcfg, [i for i in items if i is not None], len(rows), {})
+        self.n_dropped = sum(i is None for i in items)
+
+    def _init(self, dcfg, items, n_rows, dropped_by_source):
+        self.items, self.n_rows = items, n_rows
+        self.dropped_by_source = dropped_by_source
+        self.n_dropped = sum(dropped_by_source.values())
         b = dcfg["batch"]
-        self._batches = [collate(x, renderer.pad_id) for x in make_batches(self.items, b["max_tokens_per_batch"], b["max_batch_size"])]
+        self._batches = [collate(x, self.r.pad_id) for x in make_batches(self.items, b["max_tokens_per_batch"], b["max_batch_size"])]
 
     def batches(self):
         return self._batches
 
+    def per_source(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for i in self.items:
+            out[i.source_id] = out.get(i.source_id, 0) + 1
+        return dict(sorted(out.items()))
+
+    def describe(self) -> str:
+        return (f"{len(self.items)} items from {len(self.per_source())} sources {self.per_source()}; "
+                f"{self.n_dropped} drawn rows did not render (over max_len / untrainable) {self.dropped_by_source}")
+
     @classmethod
     def from_config(cls, cfg: dict, renderer: Renderer, split: str | None = None, filters: dict | None = None,
                     max_rows="cfg", per_source="cfg"):
+        """`per_source` rendered sets from every source of the split: rows are drawn in a seeded random order and a
+        row that does not render is replaced by the next one (at most EVAL_DRAW_FACTOR x quota rows per source),
+        then at most `max_rows` sets in total."""
         d = cfg["data"]
-        rows = select_eval_rows(d, split or d["eval_split"], filters if filters is not None else d["eval_filters"],
-                                d["eval_max_rows"] if max_rows == "cfg" else max_rows,
-                                d["eval_max_rows_per_source"] if per_source == "cfg" else per_source, cfg["seed"])
-        return cls(rows, renderer, d)
+        max_rows = d["eval_max_rows"] if max_rows == "cfg" else max_rows
+        per_source = d["eval_max_rows_per_source"] if per_source == "cfg" else per_source
+        files, cands = _eval_candidates(d, split or d["eval_split"], filters if filters is not None else d["eval_filters"],
+                                        cfg["seed"])
+        self = cls.__new__(cls)
+        self.r = _eval_renderer(renderer)
+        kept, dropped, n_rows = {}, {}, 0
+        for s, locs in cands.items():
+            quota = per_source or len(locs)
+            limit = min(len(locs), quota * EVAL_DRAW_FACTOR)
+            got, pos = [], 0
+            while len(got) < quota and pos < limit:
+                chunk = locs[pos:min(limit, pos + 2 * (quota - len(got)))]
+                pos += len(chunk)
+                for row in _read_rows(files, chunk):
+                    it = _eval_item(self.r, row)
+                    if it is None:
+                        dropped[s] = dropped.get(s, 0) + 1
+                    elif len(got) < quota:
+                        got.append(it)
+                n_rows += len(chunk)
+            kept[s] = got
+        self._init(d, _cap_total(kept, max_rows, cfg["seed"]), n_rows, dropped)
+        return self

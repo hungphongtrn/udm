@@ -170,6 +170,35 @@ def test_eval_set_deterministic_and_excludes_ood(synth, tok):
     assert max(Counter(x["source_id"] for x in rows).values()) <= 10
 
 
+def test_eval_set_covers_every_source_and_refills_unrenderable(tmp_path, synth, tok):
+    """Regression: eval sampling must reach sources stored after large files and replace sets over max_len."""
+    import pyarrow.compute as pc
+    import pyarrow.parquet as pq
+    from scrm.data import select_eval_rows
+    t = pq.read_table(f"{synth}/data/train-00000-of-00001.parquet")
+    src = t.column("source_id")
+    big = t.filter(pc.not_equal(src, "samatv256/agent"))      # many rows, several row groups, first in file order
+    sam = t.filter(pc.equal(src, "samatv256/agent")).to_pylist()
+    for r in sam[::2]:                                          # every other samatv set cannot render at max_len
+        r["state_json"] = json.dumps("long state " * 2000)
+    (tmp_path / "data").mkdir()
+    pq.write_table(big, tmp_path / "data/validation-00000-of-00002.parquet", row_group_size=16)
+    pq.write_table(type(t).from_pylist(sam, schema=t.schema), tmp_path / "data/validation-00001-of-00002.parquet",
+                   row_group_size=7)
+    cfg = load_config(None, [f"data.local_dir={tmp_path}", "data.render.max_len=2048", "data.eval_max_rows=1000",
+                             "data.eval_max_rows_per_source=6"])
+    r = Renderer(tok, cfg["data"]["render"])
+    es = EvalSet.from_config(cfg, r)
+    assert es.per_source() == {"AmazonScience/massive": 6, "LocalLLaMA/typed-decisions": 6, "samatv256/agent": 6}
+    assert es.dropped_by_source.get("samatv256/agent", 0) > 0
+    ids = [i.decision_set_id for i in es.items]
+    assert len(set(ids)) == len(ids) and ids == [i.decision_set_id for i in EvalSet.from_config(cfg, r).items]
+    # row lookup across row groups returns exactly the stored rows
+    rows = select_eval_rows(cfg["data"], "validation", cfg["data"]["eval_filters"], None, None)
+    want = {x["decision_set_id"]: x for x in big.to_pylist() + sam if x["source_split"] != "ood"}
+    assert {x["decision_set_id"]: x["state_json"] for x in rows} == {k: v["state_json"] for k, v in want.items()}
+
+
 def test_prompt_lists_all_options_and_each_row_grades_one(tok):
     n_vocab = len(tok)
     r = Renderer(tok, {"max_len": 256})

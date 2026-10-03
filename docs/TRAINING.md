@@ -179,9 +179,13 @@ stream restarts with a different seed (it is not replayed exactly).
 ## Metrics (train log, `metrics.jsonl`, W&B)
 
 Train: `train/loss` (+ parts), `lr/*`, `grad_norm`, `tokens_per_s` (packed, no padding), `pairs_per_step`, `examples_per_step`, running
-`pair_acc_lastmb`, `reward_mean/std`, `sys/gpu_mem_alloc_gb`, `train/reward_hist` (W&B).
-Eval (`eval/{all,family/<f>,source/<s>}/*`, plus a `eval/by_group` W&B table), computed on a deterministic capped validation
-sample (`eval_max_rows`, `eval_max_rows_per_source`), canonical candidate order:
+`pair_acc_lastmb`, `reward_mean/std`, `sys/gpu_mem_alloc_gb`, `train/reward_hist` (W&B), and per source
+`train/source/<s>/{loss,n_sets}` (mean per-set loss over the sets seen since the previous log line).
+Eval (`eval/{all,family/<f>,source/<s>}/*`, plus a `eval/by_group` W&B table), computed on a deterministic validation
+sample: `eval_max_rows_per_source` rendered sets drawn at random (seeded) from every source in the split, rows that do not
+render (over `max_len`) replaced by further draws (up to 10x the quota), then at most `eval_max_rows` in total. Only the
+filter columns of every split file are scanned for the draw, so all sources are covered whatever the file order; the
+log line `[eval] set:` shows sets per source and dropped draws. Canonical candidate order:
 
 * `pair_acc`: per-example fraction of tier pairs with higher reward for the better tier (ties = 0.5), averaged over examples;
   `pair_acc_micro`: pooled over all pairs. Random = 0.5.

@@ -54,7 +54,8 @@ def run_perm_eval(model, evalset: EvalSet, renderer: Renderer, n: int, bcfg, dev
     """Score the same sets under two random candidate shuffles; report agreement."""
     was = model.training
     model.eval()
-    base = evalset.items[:n]
+    pick = np.unique(np.linspace(0, len(evalset.items) - 1, min(n, len(evalset.items))).round().astype(int))
+    base = [evalset.items[i] for i in pick]   # spread over the set (items are grouped by source)
     its1 = [renderer.reshuffle(i, np.random.default_rng(seeds[0] + k)) for k, i in enumerate(base)]
     its2 = [renderer.reshuffle(i, np.random.default_rng(seeds[1] + k)) for k, i in enumerate(base)]
     r1 = _rewards_for(model, its1, renderer, bcfg, device, amp)

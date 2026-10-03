@@ -55,7 +55,6 @@ DEFAULTS: dict[str, Any] = {
         "shuffle_buffer": 10000,           # streaming only
         "eval_max_rows": 2000,
         "eval_max_rows_per_source": 200,
-        "eval_max_scan_rows": 200000,      # streaming eval: max rows scanned
         "perm_eval_rows": 64,
         # max_len: tokens per sequence (prompt + one graded option); longer sets are dropped, never truncated
         "render": {"max_len": 8192, "max_candidates": 64},
