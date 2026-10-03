@@ -202,6 +202,7 @@ def train(cfg: dict, resume: str | None = None):
         a = m.get("all", {})
         print(f"[eval] step {s}: pair_acc={a.get('pair_acc', 0):.4f} top1={a.get('top1', 0):.4f} "
               f"mrr={a.get('mrr', 0):.4f} ndcg={a.get('ndcg', 0):.4f} loss={a.get('loss', 0):.4f} "
+              f"ece={a.get('ece_top1', float('nan')):.3f} overconf={a.get('overconf', float('nan')):+.3f} "
               f"perm_agree={pm.get('rank_agree', float('nan')):.3f} ({time.time()-t0:.0f}s)", flush=True)
         vloss = a.get("loss", float("inf"))
         if math.isfinite(vloss) and vloss < best - tcfg["early_stop_min_delta"]:
@@ -230,7 +231,8 @@ def train(cfg: dict, resume: str | None = None):
             wb.log_group_table("test/by_group", m, s)
             a = m.get("all", {})
             print(f"[test] step {s}: pair_acc={a.get('pair_acc', 0):.4f} top1={a.get('top1', 0):.4f} "
-                  f"mrr={a.get('mrr', 0):.4f} loss={a.get('loss', 0):.4f} ({time.time()-t0:.0f}s)", flush=True)
+                  f"mrr={a.get('mrr', 0):.4f} loss={a.get('loss', 0):.4f} ece={a.get('ece_top1', float('nan')):.3f} "
+                  f"overconf={a.get('overconf', float('nan')):+.3f} ({time.time()-t0:.0f}s)", flush=True)
         di = bcfg.get("decision_index") or {}
         if di.get("enabled") and done_bench.get("dindex") != s and (final or not di.get("every") or s % di["every"] == 0):
             done_bench["dindex"] = s

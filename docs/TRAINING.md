@@ -192,6 +192,10 @@ log line `[eval] set:` shows sets per source and dropped draws. Canonical candid
 * `top1`: the top-scored candidate is in tier 0 (ties share credit). `mrr`: 1/rank of the best-ranked tier-0 item.
 * `ndcg`: gains `2^(max_tier - tier) - 1`, log2 discount. `kendall_tau`: tau-b between reward and tier order, only for sets with
   >= 3 tiers (ordinal score rows).
+* Calibration of the set softmax (the probabilities `rank()` and the Decision Index use; tracking only, not trained
+  on): `conf` = mean top-1 probability, `overconf` = `conf - top1` (> 0: overconfident), `ece_top1` = expected
+  calibration error of top-1 probability vs top-1 correctness (10 equal-width bins), `brier_top1`, `p_best` =
+  probability mass on the best tier, `nll_best` = `-log p_best`.
 * `loss`: BT loss. `eval/perm/*` (small subset, two shuffles): `score_std` / `abs_diff` (score change under reordering),
   `rank_agree` (pairwise order agreement), `top1_agree`. Should approach 0 / 1 as training progresses.
 

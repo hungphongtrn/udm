@@ -55,8 +55,24 @@ def example_metrics(r: torch.Tensor, tiers: torch.Tensor) -> dict[str, np.ndarra
     tau = (C - D) / torch.sqrt((n0 - n1).clamp(min=1e-9) * (n0 - n2).clamp(min=1e-9))
     ntier = torch.tensor([len(set(t[v].tolist())) for t, v in zip(tiers, valid)])
     tau = torch.where(ntier >= 3, tau, torch.full_like(tau, float("nan")))
+    # calibration of the set softmax (the probabilities rank()/Decision Index use): confidence = top-1 probability vs
+    # top-1 correctness; p_best = probability mass on the best tier, nll_best = -log p_best
+    logp = torch.log_softmax(r.masked_fill(~valid, float("-inf")), 1)
+    p = logp.exp()
+    conf = p.max(1).values
+    p_best = (p * in0).sum(1)
     return {"pair_acc": pair_acc.numpy(), "correct": correct.numpy(), "npairs": npairs.numpy(), "top1": top1.numpy(),
-            "mrr": mrr.numpy(), "ndcg": ndcg.numpy(), "kendall_tau": tau.numpy(), "n_cands": n.numpy()}
+            "mrr": mrr.numpy(), "ndcg": ndcg.numpy(), "kendall_tau": tau.numpy(), "n_cands": n.numpy(),
+            "conf": conf.numpy(), "brier_top1": ((conf - top1) ** 2).numpy(), "p_best": p_best.numpy(),
+            "nll_best": (-torch.log(p_best.clamp(min=1e-12))).numpy()}
+
+
+def ece(conf: np.ndarray, hit: np.ndarray, bins: int = 10) -> float:
+    """Expected calibration error: |mean hit - mean conf| per equal-width confidence bin, weighted by bin size."""
+    if len(conf) == 0:
+        return float("nan")
+    b = np.minimum((conf * bins).astype(int), bins - 1)
+    return float(sum(abs(hit[b == k].mean() - conf[b == k].mean()) * (b == k).sum() for k in np.unique(b)) / len(conf))
 
 
 class MetricAccumulator:
@@ -83,6 +99,8 @@ class MetricAccumulator:
                 d[k] = float(np.nanmean(a)) if np.isfinite(a).any() else float("nan")
             tot = float(np.sum(cols["npairs"]))
             d["pair_acc_micro"] = float(np.sum(cols["correct"]) / tot) if tot else float("nan")
+            d["ece_top1"] = ece(np.asarray(cols["conf"]), np.asarray(cols["top1"]))
+            d["overconf"] = d["conf"] - d["top1"]     # > 0: top-1 probability exceeds top-1 accuracy
             out[key] = d
         return out
 
