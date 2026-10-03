@@ -155,7 +155,11 @@ def train(cfg: dict, resume: str | None = None):
     model.train()
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_all = sum(p.numel() for p in model.parameters())
-    print(f"[scrm] device={device} trainable params={n_train/1e6:.2f}M / {n_all/1e6:.2f}M total", flush=True)
+    gpu = ""
+    if device.type == "cuda":
+        p = torch.cuda.get_device_properties(device)
+        gpu = f" ({p.name}, {p.total_memory / 2**30:.1f} GiB; CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')})"
+    print(f"[scrm] device={device}{gpu} trainable params={n_train/1e6:.2f}M / {n_all/1e6:.2f}M total", flush=True)
 
     max_steps = tcfg["max_steps"]
     if tcfg.get("epochs"):
