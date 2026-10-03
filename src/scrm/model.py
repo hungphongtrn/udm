@@ -284,12 +284,15 @@ def build_scrm(mcfg: dict, device: torch.device | str = "cpu", tokenizer=None, a
     return model, tokenizer
 
 
-def load_scrm(ckpt_dir: str, device: str | torch.device = "cpu", merged_ok: bool = True) -> "SCRM":
+def load_scrm(ckpt_dir: str, device: str | torch.device = "auto", merged_ok: bool = True) -> "SCRM":
     """Load a checkpoint written by SCRM.save_pretrained (LoRA adapter + head + tokenizer + config).
-    `ckpt_dir` may be `hf://org/repo[@revision]/run/best` (a hub backup); the base model comes from model.name_or_path."""
+    `ckpt_dir` may be `hf://org/repo[@revision]/run/best` (a hub backup); the base model comes from model.name_or_path.
+    device="auto" -> cuda when available (Qwen3.5 can't run on CPU while causal-conv1d is installed)."""
     from transformers import AutoTokenizer
     from .hub import resolve_ckpt
     ckpt_dir = resolve_ckpt(ckpt_dir)
+    if str(device) == "auto":
+        device = "cuda" if torch.cuda.is_available() else "cpu"
     with open(os.path.join(ckpt_dir, "scrm_config.json")) as f:
         saved = json.load(f)
     mcfg = saved["model"]
