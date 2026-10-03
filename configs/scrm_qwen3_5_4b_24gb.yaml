@@ -1,6 +1,6 @@
 # SCRM, Qwen3.5-4B (text decoder only) + LoRA r=64, single 24 GB GPU (bf16 base, grad checkpointing, no LM head).
 # max_len 4096 per sequence; sets that do not fit are dropped, never truncated (only samatv has longer states:
-# ~68% of its rows are dropped, plenty remain). Run with PYTORCH_ALLOC_CONF=expandable_segments:True.
+# ~68% of its rows are dropped, plenty remain). scripts/train/_env.sh sets PYTORCH_ALLOC_CONF=expandable_segments:True.
 seed: 1234
 output_dir: outputs/scrm_qwen3_5_4b_24gb
 model:

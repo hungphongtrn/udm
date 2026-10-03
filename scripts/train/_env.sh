@@ -4,5 +4,6 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 export CU="${CU:-128}"
 export HF_HUB_ENABLE_HF_TRANSFER="${HF_HUB_ENABLE_HF_TRANSFER:-1}"
 export TOKENIZERS_PARALLELISM=false
+export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"   # less fragmentation with variable-length packs
 uvr() { uv run --locked --project "$REPO_ROOT" --no-default-groups --group data --group train --group "cu$CU" "$@"; }
 py() { uvr python "$@"; }
