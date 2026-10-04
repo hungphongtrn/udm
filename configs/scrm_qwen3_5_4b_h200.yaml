@@ -10,10 +10,10 @@ data:
   batch: {max_tokens_per_batch: 262144, max_batch_size: 64, bucket_size: 512}
 train:
   grad_cache: true
-  grad_cache_chunk_tokens: 32768      # backbone pass budget; the actual memory knob in grad-cache mode
+  grad_cache_chunk_tokens: 16384      # backbone pass budget; the actual memory knob in grad-cache mode (OOM -> 8192)
   grad_accum: 1                       # the group is already large
 model:
-  gradient_checkpointing: true        # try false with smaller chunks (less recompute, more activation memory)
+  gradient_checkpointing: false       # no recompute; activation memory ~ chunk tokens (ckpt on at 32k chunks peaked 45 GB)
 # Decision Index over the longer context
 benchmarks:
   decision_index: {enabled: true, suite_dir: ../decision-index/suite-0.2, rows: ../decision-index/sample-1000.jsonl.gz,

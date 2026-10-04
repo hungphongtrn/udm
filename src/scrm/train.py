@@ -424,8 +424,10 @@ def train(cfg: dict, resume: str | None = None):
         dist.all_reduce(t, op=dist.ReduceOp.SUM)
         return t.tolist()
 
-    t_last, saved_at = time.time(), None
+    saved_at = None
+    win_tok, win_time, win_steps = 0, 0.0, 0   # tokens / wall time / steps since the last log (excludes eval / saves)
     while step < max_steps:
+        t_step = time.time()
         batches, ok = [], 1
         try:
             batches = [next(it) for _ in range(tcfg["grad_accum"])]
@@ -443,7 +445,8 @@ def train(cfg: dict, resume: str | None = None):
                              grad_cache=tcfg.get("grad_cache", False),
                              chunk_tokens=tcfg.get("grad_cache_chunk_tokens", 16384),
                              renderer=renderer, seed=cfg["seed"], step=step, use_perm=use_perm)
-        tot, pairs, ex_n, tok_acc = st["loss"], st["pairs"], st["examples"], st["tokens"]
+        tot, pairs, ex_n = st["loss"], st["pairs"], st["examples"]
+        win_tok += st["tokens"]
         last_r, last_b, parts_acc, src_acc = st["last_r"], st["last_b"], st["parts"], st["src"]
         all_reduce_grads([p for p in model.parameters() if p.requires_grad])   # one coalesced SUM before clipping
         params = [p for g in opt.param_groups for p in g["params"] if p.grad is not None]
@@ -457,13 +460,14 @@ def train(cfg: dict, resume: str | None = None):
         opt.zero_grad(set_to_none=True)
         sched.step()
         step += 1
+        win_time += time.time() - t_step; win_steps += 1
 
         if step % tcfg["log_every"] == 0 or step == 1:
-            now = time.time(); dt = max(now - t_last, 1e-6)
-            tot, pairs, ex_n, tok_acc = reduce_log([tot, pairs, ex_n, tok_acc])   # SUM over ranks (global loss)
+            tot, pairs, ex_n, tok_acc = reduce_log([tot, pairs, ex_n, win_tok])   # SUM over ranks (global loss)
+            dt = max(win_time, 1e-6)
             m = last_r[last_b["candidate_mask"]]
             rec = {"train/loss": tot, "train/grad_norm": gnorm, "train/pairs_per_step": pairs, "train/examples_per_step": ex_n,
-                   "train/tokens_per_s": tok_acc / dt,
+                   "train/tokens_per_s": tok_acc / dt, "train/s_per_step": dt / win_steps,
                    "train/pair_acc_lastmb": _train_pair_acc(last_r, last_b["tiers"], last_b["pair_mask"]),
                    "train/reward_mean": float(m.mean()), "train/reward_std": float(m.std()) if m.numel() > 1 else 0.0}
             rec.update({f"train/loss_{k}": v for k, v in parts_acc.items()})
@@ -477,8 +481,8 @@ def train(cfg: dict, resume: str | None = None):
             log(rec, step)
             if rank == 0:
                 print(f"[train] step {step}/{max_steps} loss={tot:.4f} gnorm={gnorm:.2f} ex/step={ex_n} pairs={pairs} "
-                      f"tok/s={tok_acc/dt:.0f}", flush=True)
-            t_last = now
+                      f"tok/s={tok_acc/dt:.0f} s/step={dt/win_steps:.1f}", flush=True)
+            win_tok, win_time, win_steps = 0, 0.0, 0
         if tcfg["hist_every"] and step % tcfg["hist_every"] == 0 and wb.enabled:
             wb.log_hist("train/reward_hist", last_r[last_b["candidate_mask"]].cpu().numpy(), step)
         if tcfg["eval_every"] and step % tcfg["eval_every"] == 0:

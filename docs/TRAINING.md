@@ -132,8 +132,8 @@ is bounded by the new knob `train.grad_cache_chunk_tokens` (default 16384). Each
 
 1. **Pass 1** — the backbone runs under `torch.no_grad()` (same autocast as always) over chunks of at most
    `grad_cache_chunk_tokens` tokens (`pack_bfd` over the sequences; a sequence longer than the budget gets its own
-   chunk). Only the last-token embedding of each sequence is kept, scattered into `e[M, d]` in original sequence order.
-   The RNG state (CPU + CUDA) is recorded before each chunk.
+   chunk). Only the last-token embedding of each sequence is kept, scattered (fp32) into `e[M, d]` in original sequence
+   order. The RNG state (CPU + CUDA) is recorded before each chunk.
 2. **Pass 2** — `e.detach().requires_grad_()` feeds the set block/head (`SCRM.head`); the loss is exactly the standard one
    (`compute_loss` + `reduce_loss` over the global number of valid sets) and `loss.backward()` yields the set-head grads
    and `g = e.grad`.
@@ -147,6 +147,16 @@ including dropout replay). `loss.perm_detach=true` (default) keeps the second-sh
 `loss.perm_detach=false` caches both shuffle packs through all three passes. A frozen backbone (`model.freeze_backbone`
 / `ablation_frozen.yaml`) simply skips pass 3. `model.gradient_checkpointing` still applies (turn it off once chunks are
 small enough). Under DDP the group budget is per rank and the loss is divided by the globally summed valid-set count.
+
+**Cross-rank balancing (DDP).** Set cost scales with graded candidates × prompt length, so per-rank groups are very
+uneven and one rank idles at the gradient all-reduce. In grad-cache mode the backbone work is therefore balanced at
+sequence granularity: each rank's pack token ids / positions / lengths are all-gathered into one pool, every sequence is
+assigned longest-first to the least-loaded rank by tokens (`balance_plan`; ties keep it on its owner), each rank encodes
+its assigned sequences in chunks, and the embeddings are exchanged with one `all_reduce(SUM)` over a zero-filled fp32
+`[pool, d]` buffer. Pass 2 runs on the owning rank (its own sets only); the embedding grads go back the same way and
+pass 3 re-encodes on the encoding rank. Backbone grads thus accumulate on whichever rank encoded a sequence, and the
+existing SUM all-reduce of the trainable grads yields the same gradient (tested against a single process, including a
+skewed split). The set head itself and `perm_detach=true` second-shuffle scoring stay rank-local.
 
 ## Multi-GPU (`torchrun`)
 
@@ -168,7 +178,7 @@ backbone directly and backwards many times:
 * Rank 0 only: eval/test/Decision Index, checkpoint saves + HubSync, W&B, `metrics.jsonl`, prints. `train/loss`,
   `pairs_per_step`, `examples_per_step`, `tokens_per_s` are SUM-reduced across ranks; per-source and loss-part metrics
   stay rank-local. "Data exhausted" and the early-stop decision are agreed with `all_reduce` (MIN / MAX) so no rank hangs.
-* `grad_cache` and the standard path both work under DDP.
+* `grad_cache` and the standard path both work under DDP; only grad cache balances backbone work across ranks.
 
 ## Data: filters, mixing, truncation
 

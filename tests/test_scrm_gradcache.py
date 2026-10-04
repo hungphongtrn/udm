@@ -83,7 +83,7 @@ def test_grad_cache_rng_replay_matches_standard(synth):
     _assert_grads_close(g_std, g_gc)
 
 
-def _ddp_worker(rank, world, synth, out_dir, mode, chunk_tokens, n_items):
+def _ddp_worker(rank, world, synth, out_dir, mode, chunk_tokens, n_items, skew=False):
     dist.init_process_group("gloo", init_method=f"file://{out_dir}/pg", rank=rank, world_size=world)
     torch.manual_seed(0)
     model, tok = build_scrm(dict(TINY, set_dropout=0.0), "cpu")
@@ -93,7 +93,8 @@ def _ddp_worker(rank, world, synth, out_dir, mode, chunk_tokens, n_items):
     cfg = load_config(None, [f"data.local_dir={synth}", f"data.eval_max_rows={n_items}",
                              f"data.eval_max_rows_per_source={n_items}"])
     items = EvalSet.from_config(cfg, r).items[:n_items]
-    b = collate(items[rank::world], r.pad_id)
+    # skew: rank 0 holds all but one set, so grad-cache balancing must move rank 0's sequences to rank 1
+    b = collate((items[:-1], items[-1:])[rank] if skew else items[rank::world], r.pad_id)
     n_valid = reduce_ints(max(1, int(b["pair_mask"].flatten(1).any(1).sum())), torch.device("cpu"), dist.ReduceOp.SUM)
     accumulate_step(model, [b], lcfg={}, d_batch={"max_tokens_per_batch": 10 ** 9}, device=torch.device("cpu"),
                     amp=False, n_valid=n_valid, grad_cache=(mode == "gc"), chunk_tokens=chunk_tokens, use_perm=False)
@@ -104,9 +105,10 @@ def _ddp_worker(rank, world, synth, out_dir, mode, chunk_tokens, n_items):
     dist.destroy_process_group()
 
 
-@pytest.mark.parametrize("mode,chunk", [("std", 10 ** 9), ("gc", 64)])
-def test_ddp_gradient_reduction_matches_single_process(synth, tmp_path, mode, chunk):
-    """2 ranks over disjoint shards, grads SUM-all-reduced, == single-process grads over the union (both modes)."""
+@pytest.mark.parametrize("mode,chunk,skew", [("std", 10 ** 9, False), ("gc", 64, False), ("gc", 64, True)])
+def test_ddp_gradient_reduction_matches_single_process(synth, tmp_path, mode, chunk, skew):
+    """2 ranks over disjoint shards, grads SUM-all-reduced, == single-process grads over the union (both modes;
+    grad cache also with cross-rank sequence balancing of a skewed split)."""
     n_items = 6
     torch.manual_seed(0)
     model, tok = build_scrm(dict(TINY, set_dropout=0.0), "cpu")
@@ -120,17 +122,27 @@ def test_ddp_gradient_reduction_matches_single_process(synth, tmp_path, mode, ch
                     amp=False, n_valid=n_valid, grad_cache=(mode == "gc"), chunk_tokens=chunk, use_perm=False)
     ref = _grads(model)
 
-    out = tmp_path / mode
+    out = tmp_path / f"{mode}_{chunk}_{skew}"
     out.mkdir()
     # spawn, not fork: the parent already ran multithreaded torch ops, and a forked child deadlocks on the
     # inherited intra-op (OpenMP) thread pool at its first parallel kernel
-    mp.start_processes(_ddp_worker, args=(2, synth, str(out), mode, chunk, n_items), nprocs=2, join=True,
+    mp.start_processes(_ddp_worker, args=(2, synth, str(out), mode, chunk, n_items, skew), nprocs=2, join=True,
                        start_method="spawn")
     g0 = torch.load(out / "grads_0.pt", weights_only=True)
     g1 = torch.load(out / "grads_1.pt", weights_only=True)
     _assert_grads_close(ref, g0)
     for n in g0:   # identical after the all-reduce
         assert torch.equal(g0[n], g1[n]), n
+
+
+def test_balance_plan_splits_tokens_evenly():
+    from scrm.gradcache import balance_plan
+    lens = [900, 50, 400, 400, 300, 120, 80, 10, 10, 700]
+    plan = balance_plan(lens, owner=[0] * len(lens), world=3)
+    assert sorted(i for p in plan for i in p) == list(range(len(lens)))
+    loads = [sum(lens[i] for i in p) for p in plan]
+    assert max(loads) - min(loads) <= max(lens), loads
+    assert balance_plan([5, 5], owner=[1, 0], world=2) == [[1], [0]]   # equal-load ties keep sequences home
 
 
 def test_train_grad_cache_end_to_end(synth, tmp_path):
