@@ -32,8 +32,9 @@ pre-LN transformer encoder **without positional embeddings** (so scores do not d
 returns one unbounded scalar reward per candidate. Training uses Bradley-Terry over tier pairs
 (`tier_i < tier_j`, never same-tier). Data contract: `docs/CONTRACT.md`.
 
-Code: `src/scrm/` (`model.py`, `losses.py`, `render.py`, `collator.py`, `data.py`, `metrics.py`, `train.py`,
-`evaluate.py`, `export.py`, `wandb_utils.py`). Everything is plain PyTorch, single GPU.
+Code: `src/scrm/` (`model.py`, `losses.py`, `render.py`, `collator.py`, `data.py`, `gradcache.py`, `metrics.py`, `train.py`,
+`evaluate.py`, `export.py`, `wandb_utils.py`). Everything is plain PyTorch; single GPU by default, multi-GPU via
+`torchrun` (manual all-reduce, no `DistributedDataParallel`), with optional gradient caching on large-memory cards.
 
 ## Quick start
 
@@ -113,11 +114,59 @@ recompute activations.
 | `scrm_qwen3_5_4b_24gb.yaml` | 4096 | 4096 | bf16 base + LoRA (8192 OOMs on a 4090) |
 | same + `model.quantize_4bit=true` | 4096 | 4096 | QLoRA (nf4), a bit slower, needs bitsandbytes |
 | `scrm_qwen3_5_4b_40gb.yaml` | 16384 | 16384 | |
+| `scrm_qwen3_5_4b_h200.yaml` | 32768 | 262144 group | 2x H200, gradient caching (chunks of 32768), DDP |
 | `ablation_frozen.yaml` | see config | see config | no grads through backbone |
 
 Knobs if you hit OOM: lower `data.batch.max_tokens_per_batch` (micro-batch) and raise `train.grad_accum`; lower
 `data.render.max_len` (more sets dropped); `model.quantize_4bit=true`. Micro-batch set counts vary; the loss is normalised
 by the number of examples with a trainable pair over the whole accumulation window, so this does not bias the gradient.
+
+## Gradient caching (`train.grad_cache`)
+
+Off by default; the standard path above is unchanged. With `train.grad_cache=true` a loader micro-batch is a "group":
+`data.batch.max_tokens_per_batch` becomes the group budget (whole sets, can be large) and the backbone activation memory
+is bounded by the new knob `train.grad_cache_chunk_tokens` (default 16384). Each group is a three-pass step
+(`src/scrm/gradcache.py`):
+
+1. **Pass 1** — the backbone runs under `torch.no_grad()` (same autocast as always) over chunks of at most
+   `grad_cache_chunk_tokens` tokens (`pack_bfd` over the sequences; a sequence longer than the budget gets its own
+   chunk). Only the last-token embedding of each sequence is kept, scattered into `e[M, d]` in original sequence order.
+   The RNG state (CPU + CUDA) is recorded before each chunk.
+2. **Pass 2** — `e.detach().requires_grad_()` feeds the set block/head (`SCRM.head`); the loss is exactly the standard one
+   (`compute_loss` + `reduce_loss` over the global number of valid sets) and `loss.backward()` yields the set-head grads
+   and `g = e.grad`.
+3. **Pass 3** — if the backbone is trainable, each chunk is re-encoded **with grad** after restoring its pass-1 RNG state,
+   then `torch.autograd.backward(h_chunk, g[chunk])`. The graph is freed per chunk. After pass 3 the RNG state is restored
+   to the value after pass 2, so the stream advances exactly as one standard forward would.
+
+With a chunk budget >= the whole group this is bit-for-bit the standard path (single chunk, original order). Chunking
+never changes the result: sequences are independent, so regrouping only changes which tensors share a forward (tested,
+including dropout replay). `loss.perm_detach=true` (default) keeps the second-shuffle forward under `no_grad` as before;
+`loss.perm_detach=false` caches both shuffle packs through all three passes. A frozen backbone (`model.freeze_backbone`
+/ `ablation_frozen.yaml`) simply skips pass 3. `model.gradient_checkpointing` still applies (turn it off once chunks are
+small enough). Under DDP the group budget is per rank and the loss is divided by the globally summed valid-set count.
+
+## Multi-GPU (`torchrun`)
+
+`NPROC=2 scripts/train/train.sh configs/scrm_qwen3_5_4b_h200.yaml ...` launches
+`python -m torch.distributed.run --standalone --nproc_per_node 2 -m scrm.train ...`; `NPROC` unset/1 runs the plain
+single-process command (identical behaviour). DDP is manual — no `DistributedDataParallel`, since grad caching calls the
+backbone directly and backwards many times:
+
+* Process group from `WORLD_SIZE`/`RANK`/`LOCAL_RANK` (nccl on CUDA, gloo on CPU), device `cuda:LOCAL_RANK`, timeout
+  `train.ddp_timeout_min` (default 240) because rank 0 alone runs eval / test / Decision Index while the others wait.
+* After the model is built (and after a resume load) rank 0 broadcasts all trainable weights (LoRA + set block/head).
+* Each rank accumulates local grads; before clipping one coalesced `all_reduce(SUM)` over all trainable params' grads
+  (flattened per dtype; params without a grad contribute zeros) makes every rank's grads identical. Each rank's loss is
+  divided by the global valid-set count (all-reduced before the backward passes), so SUM-reduced grads are the gradient
+  of the mean over all ranks' valid sets.
+* Data is sharded: non-streaming groups split their indices by global worker id `rank*num_workers + wid` with
+  `world*num_workers` shards; streaming groups `shard(world, rank)` before HF's per-worker sharding. `train.epochs`
+  estimates steps over the global dataset (divided by world size).
+* Rank 0 only: eval/test/Decision Index, checkpoint saves + HubSync, W&B, `metrics.jsonl`, prints. `train/loss`,
+  `pairs_per_step`, `examples_per_step`, `tokens_per_s` are SUM-reduced across ranks; per-source and loss-part metrics
+  stay rank-local. "Data exhausted" and the early-stop decision are agreed with `all_reduce` (MIN / MAX) so no rank hangs.
+* `grad_cache` and the standard path both work under DDP.
 
 ## Data: filters, mixing, truncation
 

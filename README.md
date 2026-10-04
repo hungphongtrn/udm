@@ -111,6 +111,8 @@ scripts/train/prefetch_data.sh data_cache/udm
 scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml data.local_dir=data_cache/udm
 #    40 GB card: longer sequences and bigger micro-batches
 scripts/train/train.sh configs/scrm_qwen3_5_4b_40gb.yaml data.local_dir=data_cache/udm
+#    2x H200: gradient caching + multi-GPU DDP (NPROC>1 -> torchrun; see docs/TRAINING.md)
+NPROC=2 scripts/train/train.sh configs/scrm_qwen3_5_4b_h200.yaml data.local_dir=data_cache/udm
 #    resume after an interruption
 scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml --resume auto data.local_dir=data_cache/udm
 

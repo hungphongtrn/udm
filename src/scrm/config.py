@@ -69,6 +69,11 @@ DEFAULTS: dict[str, Any] = {
         "early_stop_patience": 8, "early_stop_min_delta": 0.0,   # stop after N evals without val-loss improvement (0/None = off)
         "optim": "adamw_8bit",              # adamw_8bit (bitsandbytes, CUDA) | adamw (torch fused)
         "grad_clip": 1.0, "amp": True, "device": "auto",
+        # gradient caching: encode a whole loader micro-batch (group) without grad, then re-encode only the chunks
+        # needed to push the set head's embedding grads into the backbone (see docs/TRAINING.md). The group budget
+        # is data.batch.max_tokens_per_batch; grad_cache_chunk_tokens caps the backbone pass memory.
+        "grad_cache": False, "grad_cache_chunk_tokens": 16384,
+        "ddp_timeout_min": 240,             # process-group timeout (min) under torchrun; rank 0 alone runs eval/dindex
         "log_every": 10, "eval_every": 500, "hist_every": 500, "save_every": 500, "keep_last": 3,
         "eval_at_start": True,
     },

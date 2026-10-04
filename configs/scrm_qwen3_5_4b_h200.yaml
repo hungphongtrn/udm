@@ -1,0 +1,21 @@
+# SCRM on 2x H200 (141 GB each) with gradient caching + DDP. STARTING POINT: tune on the first run and watch
+# sys/gpu_mem_alloc_gb (raise grad_cache_chunk_tokens / max_tokens_per_batch while memory allows; try turning
+# gradient_checkpointing off once chunks are small). Launch: NPROC=2 scripts/train/train.sh <this file> ...
+base: scrm_qwen3_5_4b_24gb.yaml
+output_dir: outputs/scrm_qwen3_5_4b_h200
+data:
+  # A loader micro-batch ("group") is now the gradient-cache group budget: whole sets are packed up to this many
+  # tokens and the backbone is run over the group in chunks of train.grad_cache_chunk_tokens (not per group).
+  render: {max_len: 32768, max_candidates: 64, max_graded: null}   # grade every shown option
+  batch: {max_tokens_per_batch: 262144, max_batch_size: 64, bucket_size: 512}
+train:
+  grad_cache: true
+  grad_cache_chunk_tokens: 32768      # backbone pass budget; the actual memory knob in grad-cache mode
+  grad_accum: 1                       # the group is already large
+model:
+  gradient_checkpointing: true        # try false with smaller chunks (less recompute, more activation memory)
+# Decision Index over the longer context
+benchmarks:
+  decision_index: {enabled: true, suite_dir: ../decision-index/suite-0.2, rows: ../decision-index/sample-1000.jsonl.gz,
+                   max_len: 32768, max_tokens: 32768, every: 2000}
+wandb: {enabled: true, project: scrm, tags: [qwen3.5-4b, h200]}

@@ -11,20 +11,72 @@ import os
 import re
 import shutil
 import time
+from datetime import timedelta
 
 import numpy as np
 import torch
+import torch.distributed as dist
 
 from .collator import align_slots, collate, to_device
 from .config import load_config
 from .data import TrainStream, build_groups, make_train_loader, EvalSet
 from .evaluate import run_eval, run_perm_eval, _amp
+from .gradcache import grad_cache_step
 from .losses import compute_loss, reduce_loss
 from .metrics import flatten
 from .hub import HubSync, resolve_ckpt
 from .model import build_scrm
 from .render import Renderer
-from .wandb_utils import init_wandb
+from .wandb_utils import init_wandb, NullRun
+
+
+# ----------------------------------------------------------------------------- distributed
+def dist_info():
+    """(world_size, rank, local_rank) from the torchrun env; defaults are the single-process values."""
+    world = int(os.environ.get("WORLD_SIZE") or 1)
+    rank = int(os.environ.get("RANK") or 0)
+    local_rank = int(os.environ.get("LOCAL_RANK") or 0)
+    return world, rank, local_rank
+
+
+def dist_on() -> bool:
+    return dist.is_available() and dist.is_initialized()
+
+
+def all_reduce_grads(params):
+    """One coalesced SUM all-reduce over all trainable params' grads (flattened per dtype). Params without a grad
+    contribute zeros so every rank reduces the same layout; after this all ranks hold identical grads."""
+    if not dist_on():
+        return
+    by_dtype: dict = {}
+    for p in params:
+        by_dtype.setdefault(p.dtype, []).append(p)
+    for ps in by_dtype.values():
+        gs = [p.grad if p.grad is not None else torch.zeros_like(p) for p in ps]
+        flat = torch._utils._flatten_dense_tensors(gs)
+        dist.all_reduce(flat, op=dist.ReduceOp.SUM)
+        for p, g in zip(ps, torch._utils._unflatten_dense_tensors(flat, gs)):
+            if p.grad is None:
+                p.grad = g.clone()
+            else:
+                p.grad.copy_(g)
+
+
+def broadcast_params(model):
+    """Rank 0's trainable weights (LoRA + set block/head) win; called after build and after a resume load."""
+    if not dist_on():
+        return
+    for p in model.parameters():
+        if p.requires_grad:
+            dist.broadcast(p.data, src=0)
+
+
+def reduce_ints(x, device, op=dist.ReduceOp.SUM):
+    if not dist_on():
+        return int(x)
+    t = torch.tensor([int(x)], device=device, dtype=torch.long)
+    dist.all_reduce(t, op=op)
+    return int(t.item())
 
 
 # ----------------------------------------------------------------------------- optimiser
@@ -116,7 +168,7 @@ def seed_all(s):
         torch.cuda.manual_seed_all(s)
 
 
-def estimate_steps(cfg, renderer, seed):
+def estimate_steps(cfg, renderer, seed, world: int = 1):
     d = cfg["data"]
     groups = build_groups(d, d["train_split"], d["filters"], d["streaming"], seed)
     total = sum(g.size for g in groups) if all(g.size is not None for g in groups) else None
@@ -128,7 +180,7 @@ def estimate_steps(cfg, renderer, seed):
         nb += 1
         ne += b["candidate_mask"].size(0)
     avg = ne / max(nb, 1)
-    return int(math.ceil(cfg["train"]["epochs"] * total / (avg * cfg["train"]["grad_accum"]))), total
+    return int(math.ceil(cfg["train"]["epochs"] * total / (avg * cfg["train"]["grad_accum"] * max(1, world)))), total
 
 
 @torch.no_grad()
@@ -137,34 +189,128 @@ def _train_pair_acc(r, tiers, M):
     return (((d > 0) & M).sum().float() / M.sum().clamp(min=1)).item()
 
 
+def accumulate_step(model, batches, *, lcfg, d_batch, device, amp, n_valid, grad_cache=False,
+                    chunk_tokens: int = 16384, renderer=None, seed: int = 0, step: int = 0, use_perm=False):
+    """Forward + backward over one optimizer step's micro-batches and accumulate gradients into `model`.
+
+    `n_valid` is the number of valid sets over the WHOLE accumulation window (already globally reduced under DDP),
+    so the per-example losses are divided consistently. Both the standard path and `train.grad_cache` live here:
+    grad-cache groups each micro-batch into backbone chunks (see `scrm.gradcache`). Returns loss/parts/pair/example/
+    token sums plus the last micro-batch's rewards/batch for logging."""
+    tot, parts_acc, pairs, ex_n, tok_n = 0.0, {}, 0, 0, 0
+    src_acc: dict[str, list] = {}
+    last_r = last_b = None
+    max_tokens = d_batch["max_tokens_per_batch"]
+    perm_detach = lcfg.get("perm_detach", True)
+    for b in batches:
+        bd = to_device(b, device)
+        its2, b2 = None, None
+        if use_perm:
+            its2 = [renderer.reshuffle(i, np.random.default_rng(seed * 7 + step * 131 + k))
+                    for k, i in enumerate(b["items"])]
+            b2 = to_device(collate(its2, renderer.pad_id), device)
+        if grad_cache:
+            packs = [(bd["pack"], bd["candidate_mask"])]
+            if use_perm and not perm_detach:
+                packs.append((b2["pack"], b2["candidate_mask"]))
+
+            def head_loss(leaves):
+                rewards = [model.head(leaves[i], packs[i][0], packs[i][1]) for i in range(len(packs))]
+                rr = rewards[0].float()
+                r2a = None
+                if use_perm:
+                    if perm_detach:
+                        with torch.no_grad(), _amp(device, amp):
+                            rr2 = model.score(b2, max_tokens=max_tokens).float()
+                    else:
+                        rr2 = rewards[1].float()
+                    r2a = torch.zeros_like(rr)
+                    for k, (i1, i2) in enumerate(zip(b["items"], its2)):
+                        n = len(i1.order)
+                        r2a[k, :n] = rr2[k, align_slots(i1.order, i2.order)]
+                lo = compute_loss(rr, bd["tiers"], lcfg, bd["pair_mask"], r2a)
+                return reduce_loss(lo, n_valid), (rr, lo)
+
+            loss, (rr, lo), _ = grad_cache_step(model, packs, chunk_tokens,
+                                                amp_ctx=lambda: _amp(device, amp), head_loss=head_loss)
+            r = rr.detach().float()
+        else:
+            with _amp(device, amp):
+                r = model.score(bd, max_tokens=max_tokens)
+            r = r.float()
+            r2 = None
+            if use_perm:
+                with torch.set_grad_enabled(not perm_detach):
+                    with _amp(device, amp):
+                        rr2 = model.score(b2, max_tokens=max_tokens).float()
+                r2 = torch.zeros_like(r)
+                for k, (i1, i2) in enumerate(zip(b["items"], its2)):
+                    n = len(i1.order)
+                    r2[k, :n] = rr2[k, align_slots(i1.order, i2.order)]
+            lo = compute_loss(r, bd["tiers"], lcfg, bd["pair_mask"], r2)
+            loss = reduce_loss(lo, n_valid)
+            loss.backward()
+        tot += float(loss.detach())
+        for k, v in lo.parts.items():
+            parts_acc[k] = parts_acc.get(k, 0.0) + float((v.detach() * lo.valid).sum()) / n_valid
+        pairs += int(lo.n_pairs.sum())
+        ex_n += r.size(0)
+        for s, l, v in zip(b["source_id"], lo.per_example.detach().cpu().tolist(), lo.valid.cpu().tolist()):
+            if v:
+                a = src_acc.setdefault(s, [0.0, 0])
+                a[0] += l
+                a[1] += 1
+        tok_n += int(b["n_tokens"])
+        last_r, last_b = r.detach(), bd
+    return {"loss": tot, "parts": parts_acc, "pairs": pairs, "examples": ex_n, "tokens": tok_n,
+            "last_r": last_r, "last_b": last_b, "src": src_acc}
+
+
 # ----------------------------------------------------------------------------- main
 def train(cfg: dict, resume: str | None = None):
     tcfg, lcfg, d = cfg["train"], cfg["loss"], cfg["data"]
-    seed_all(cfg["seed"])
+    world, rank, local_rank = dist_info()
+    if world > 1:
+        if not dist.is_initialized():
+            backend = "nccl" if torch.cuda.is_available() else "gloo"
+            dist.init_process_group(backend=backend, timeout=timedelta(minutes=int(tcfg.get("ddp_timeout_min", 240))))
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+    seed_all(cfg["seed"] + 10007 * rank)
     dev = tcfg["device"]
-    device = torch.device("cuda" if dev == "auto" and torch.cuda.is_available() else ("cpu" if dev == "auto" else dev))
+    if world > 1 and torch.cuda.is_available():
+        device = torch.device("cuda", local_rank)
+    else:
+        device = torch.device("cuda" if dev == "auto" and torch.cuda.is_available() else ("cpu" if dev == "auto" else dev))
     out_dir = cfg["output_dir"]
     os.makedirs(out_dir, exist_ok=True)
-    with open(os.path.join(out_dir, "config.json"), "w") as f:
-        json.dump(cfg, f, indent=2)
+    if rank == 0:
+        with open(os.path.join(out_dir, "config.json"), "w") as f:
+            json.dump(cfg, f, indent=2)
+    if dist_on():
+        dist.barrier()
     amp = bool(tcfg["amp"]) and device.type == "cuda"
 
     model, tok = build_scrm(cfg["model"], device, seed=cfg["seed"])
     model.render_cfg = dict(d["render"])
     renderer = Renderer(tok, d["render"])
     model.train()
+    broadcast_params(model)
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     n_all = sum(p.numel() for p in model.parameters())
     gpu = ""
     if device.type == "cuda":
         p = torch.cuda.get_device_properties(device)
         gpu = f" ({p.name}, {p.total_memory / 2**30:.1f} GiB; CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES', 'unset')})"
-    print(f"[scrm] device={device}{gpu} trainable params={n_train/1e6:.2f}M / {n_all/1e6:.2f}M total", flush=True)
+    if rank == 0:
+        print(f"[scrm] device={device}{gpu} trainable params={n_train/1e6:.2f}M / {n_all/1e6:.2f}M total "
+              f"(world={world}, rank={rank})", flush=True)
 
     max_steps = tcfg["max_steps"]
     if tcfg.get("epochs"):
-        max_steps, nrows = estimate_steps(cfg, renderer, cfg["seed"])
-        print(f"[scrm] epochs={tcfg['epochs']} over {nrows} rows -> ~{max_steps} optimizer steps", flush=True)
+        max_steps, nrows = estimate_steps(cfg, renderer, cfg["seed"], world)
+        if rank == 0:
+            print(f"[scrm] epochs={tcfg['epochs']} over {nrows} rows -> ~{max_steps} optimizer steps", flush=True)
     warm = tcfg["warmup_steps"] if tcfg.get("warmup_ratio") is None else int(tcfg["warmup_ratio"] * max_steps)
     opt = make_optimizer(model, tcfg)
     sched = make_scheduler(opt, warm, max_steps, tcfg["min_lr_ratio"])
@@ -182,18 +328,22 @@ def train(cfg: dict, resume: str | None = None):
                 raise ValueError(f"cannot resume {resume}: checkpoint has best_metric={st.get('best_metric')!r}, "
                                  f"optim={st.get('optim')!r}; this run uses best_metric='val_loss', optim={tcfg['optim']!r}")
             step, best, bad_evals = st["step"], st["best"], st.get("bad_evals", 0)
-            print(f"[scrm] resumed from {resume} at step {step}", flush=True)
+            broadcast_params(model)
+            if rank == 0:
+                print(f"[scrm] resumed from {resume} at step {step}", flush=True)
 
     use_perm = lcfg.get("w_perm", 0.0) > 0
-    loader, stream = make_train_loader(cfg, renderer, cfg["seed"] + step, keep_items=use_perm)
+    loader, stream = make_train_loader(cfg, renderer, cfg["seed"] + step, keep_items=use_perm, world=world, rank=rank)
     it = iter(loader)
     evalset = testset = dindex = None
     bcfg = cfg["benchmarks"]
-    wb = init_wandb(cfg["wandb"], cfg, out_dir)
-    mlog = open(os.path.join(out_dir, "metrics.jsonl"), "a")
-    hub = HubSync(cfg["hub"], out_dir)
+    wb = init_wandb(cfg["wandb"], cfg, out_dir) if rank == 0 else NullRun()
+    mlog = open(os.path.join(out_dir, "metrics.jsonl"), "a") if rank == 0 else None
+    hub = HubSync(cfg["hub"], out_dir) if rank == 0 else None
 
     def log(data, s):
+        if rank != 0:
+            return
         data = {k: (None if isinstance(v, float) and not math.isfinite(v) else v) for k, v in data.items()}
         mlog.write(json.dumps({"step": s, **data}) + "\n"); mlog.flush()
         wb.log({k: v for k, v in data.items() if v is not None}, s)
@@ -259,57 +409,48 @@ def train(cfg: dict, resume: str | None = None):
         model.train()
 
     di0 = bcfg.get("decision_index") or {}
-    if di0.get("enabled"):   # fail at step 0, not at the first benchmark hours in, if the suite / sample / kit is missing
+    if di0.get("enabled") and rank == 0:   # fail at step 0, not at the first benchmark hours in, if the suite / sample / kit is missing
         from .dindex import DecisionIndexEval
         dindex = DecisionIndexEval(di0)
         print(f"[dindex] sample: {len(dindex.rows)} requests from {di0['rows']}", flush=True)
 
-    if tcfg.get("eval_at_start") and step == 0:
+    if tcfg.get("eval_at_start") and step == 0 and rank == 0:
         do_eval(0)
 
-    t_last, tok_acc, saved_at = time.time(), 0, None
-    src_acc: dict[str, list] = {}   # source_id -> [sum of per-set loss, n sets] since the last log
+    def reduce_log(vals):
+        if not dist_on():
+            return list(vals)
+        t = torch.tensor(list(vals), device=device, dtype=torch.float64)
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+        return t.tolist()
+
+    t_last, saved_at = time.time(), None
     while step < max_steps:
+        batches, ok = [], 1
         try:
             batches = [next(it) for _ in range(tcfg["grad_accum"])]
         except StopIteration:
-            print("[scrm] data exhausted", flush=True)
+            ok = 0
+        if world > 1:
+            ok = reduce_ints(ok, device, dist.ReduceOp.MIN)
+        if not ok:
+            if rank == 0:
+                print("[scrm] data exhausted", flush=True)
             break
         n_valid = max(1, sum(int(b["pair_mask"].flatten(1).any(1).sum()) for b in batches))
-        tot, parts_acc, pairs, ex_n = 0.0, {}, 0, 0
-        for b in batches:
-            bd = to_device(b, device)
-            with _amp(device, amp):
-                r = model.score(bd, max_tokens=d["batch"]["max_tokens_per_batch"])
-            r = r.float()
-            r2 = None
-            if use_perm:
-                its2 = [renderer.reshuffle(i, np.random.default_rng(cfg["seed"] * 7 + step * 131 + k)) for k, i in enumerate(b["items"])]
-                b2 = to_device(collate(its2, renderer.pad_id), device)
-                with torch.set_grad_enabled(not lcfg.get("perm_detach", True)):
-                    with _amp(device, amp):
-                        rr2 = model.score(b2, max_tokens=d["batch"]["max_tokens_per_batch"]).float()
-                r2 = torch.zeros_like(r)
-                for k, (i1, i2) in enumerate(zip(b["items"], its2)):
-                    n = len(i1.order)
-                    r2[k, :n] = rr2[k, align_slots(i1.order, i2.order)]
-            lo = compute_loss(r, bd["tiers"], lcfg, bd["pair_mask"], r2)
-            loss = reduce_loss(lo, n_valid)
-            loss.backward()
-            tot += float(loss.detach())
-            for k, v in lo.parts.items():
-                parts_acc[k] = parts_acc.get(k, 0.0) + float((v.detach() * lo.valid).sum()) / n_valid
-            pairs += int(lo.n_pairs.sum()); ex_n += r.size(0)
-            for s, l, v in zip(b["source_id"], lo.per_example.detach().cpu().tolist(), lo.valid.cpu().tolist()):
-                if v:
-                    a = src_acc.setdefault(s, [0.0, 0])
-                    a[0] += l; a[1] += 1
-            tok_acc += int(b["n_tokens"])
-            last_r, last_b = r.detach(), bd
+        n_valid = reduce_ints(n_valid, device, dist.ReduceOp.SUM)   # global over ranks: SUM-reduced grads == mean grad
+        st = accumulate_step(model, batches, lcfg=lcfg, d_batch=d["batch"], device=device, amp=amp, n_valid=n_valid,
+                             grad_cache=tcfg.get("grad_cache", False),
+                             chunk_tokens=tcfg.get("grad_cache_chunk_tokens", 16384),
+                             renderer=renderer, seed=cfg["seed"], step=step, use_perm=use_perm)
+        tot, pairs, ex_n, tok_acc = st["loss"], st["pairs"], st["examples"], st["tokens"]
+        last_r, last_b, parts_acc, src_acc = st["last_r"], st["last_b"], st["parts"], st["src"]
+        all_reduce_grads([p for p in model.parameters() if p.requires_grad])   # one coalesced SUM before clipping
         params = [p for g in opt.param_groups for p in g["params"] if p.grad is not None]
         gnorm = float(torch.nn.utils.clip_grad_norm_(params, tcfg["grad_clip"]))
         if not math.isfinite(gnorm):
-            print(f"[scrm] non-finite grad norm at step {step}; skipping update", flush=True)
+            if rank == 0:
+                print(f"[scrm] non-finite grad norm at step {step}; skipping update", flush=True)
             opt.zero_grad(set_to_none=True)
         else:
             opt.step()
@@ -319,48 +460,62 @@ def train(cfg: dict, resume: str | None = None):
 
         if step % tcfg["log_every"] == 0 or step == 1:
             now = time.time(); dt = max(now - t_last, 1e-6)
+            tot, pairs, ex_n, tok_acc = reduce_log([tot, pairs, ex_n, tok_acc])   # SUM over ranks (global loss)
             m = last_r[last_b["candidate_mask"]]
             rec = {"train/loss": tot, "train/grad_norm": gnorm, "train/pairs_per_step": pairs, "train/examples_per_step": ex_n,
                    "train/tokens_per_s": tok_acc / dt,
                    "train/pair_acc_lastmb": _train_pair_acc(last_r, last_b["tiers"], last_b["pair_mask"]),
                    "train/reward_mean": float(m.mean()), "train/reward_std": float(m.std()) if m.numel() > 1 else 0.0}
             rec.update({f"train/loss_{k}": v for k, v in parts_acc.items()})
-            for s, (l, n) in src_acc.items():   # mean per-set loss per source over the log window
+            for s, (l, n) in src_acc.items():   # mean per-set loss per source over the log window (rank-local)
                 rec[f"train/source/{s}/loss"] = l / n
                 rec[f"train/source/{s}/n_sets"] = n
-            src_acc.clear()
             for g in opt.param_groups:
                 rec[f"lr/{g['name']}"] = g["lr"]
             if device.type == "cuda":
                 rec["sys/gpu_mem_alloc_gb"] = torch.cuda.max_memory_allocated() / 2**30
             log(rec, step)
-            print(f"[train] step {step}/{max_steps} loss={tot:.4f} gnorm={gnorm:.2f} ex/step={ex_n} pairs={pairs} "
-                  f"tok/s={tok_acc/dt:.0f}", flush=True)
-            t_last, tok_acc = now, 0
+            if rank == 0:
+                print(f"[train] step {step}/{max_steps} loss={tot:.4f} gnorm={gnorm:.2f} ex/step={ex_n} pairs={pairs} "
+                      f"tok/s={tok_acc/dt:.0f}", flush=True)
+            t_last = now
         if tcfg["hist_every"] and step % tcfg["hist_every"] == 0 and wb.enabled:
             wb.log_hist("train/reward_hist", last_r[last_b["candidate_mask"]].cpu().numpy(), step)
         if tcfg["eval_every"] and step % tcfg["eval_every"] == 0:
-            do_eval(step)
-            pat = tcfg["early_stop_patience"]
-            if pat and bad_evals >= pat:
-                print(f"[scrm] early stop at step {step}: val loss did not improve for {bad_evals} evals (best {best:.4f})", flush=True)
+            stop = False
+            if rank == 0:
+                do_eval(step)
+                pat = tcfg["early_stop_patience"]
+                stop = bool(pat and bad_evals >= pat)
+                if stop:
+                    print(f"[scrm] early stop at step {step}: val loss did not improve for {bad_evals} evals "
+                          f"(best {best:.4f})", flush=True)
+            if world > 1:
+                stop = bool(reduce_ints(int(stop), device, dist.ReduceOp.MAX))
+            if stop:
                 break
-        if tcfg["save_every"] and step % tcfg["save_every"] == 0:
+        if tcfg["save_every"] and step % tcfg["save_every"] == 0 and rank == 0:
             save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)   # before the log-only benchmarks: a benchmark crash must not lose the interval
             saved_at = step
             do_benchmarks(step)
 
-    final_eval = bool(tcfg["eval_every"]) and step % tcfg["eval_every"] != 0
-    if final_eval:
-        do_eval(step)
-    do_benchmarks(step, final=True)
-    if saved_at == step and not final_eval:   # this exact state was just saved (and uploaded) in the loop
-        path = os.path.join(out_dir, f"step_{step:07d}")
-    else:
-        path = save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)
-    print(f"[scrm] done. final checkpoint: {path}; best val loss={best:.4f}", flush=True)
-    hub.wait()
-    wb.finish(); mlog.close()
+    path = None
+    if rank == 0:
+        final_eval = bool(tcfg["eval_every"]) and step % tcfg["eval_every"] != 0
+        if final_eval:
+            do_eval(step)
+        do_benchmarks(step, final=True)
+        if saved_at == step and not final_eval:   # this exact state was just saved (and uploaded) in the loop
+            path = os.path.join(out_dir, f"step_{step:07d}")
+        else:
+            path = save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)
+        print(f"[scrm] done. final checkpoint: {path}; best val loss={best:.4f}", flush=True)
+        hub.wait()
+        wb.finish()
+        mlog.close()
+    if dist_on():
+        dist.barrier()
+        dist.destroy_process_group()
     return {"step": step, "best": best, "ckpt": path}
 
 

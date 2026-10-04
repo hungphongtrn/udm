@@ -74,6 +74,19 @@ class SCRM(nn.Module):
                 i, t = j, t + n
         return torch.cat(outs, 0)
 
+    def embed_indices(self, pack: dict, idx) -> torch.Tensor:
+        """Hidden states at the last token of exactly the sequences listed in `idx` (indices into pack seq order).
+        Same layout as `embed`'s output rows: `[len(idx), d]` in the order of `idx` (idx is used as given)."""
+        lens = [int(x) for x in pack["seq_lens"]]
+        starts = [0]
+        for n in lens:
+            starts.append(starts[-1] + n)
+        ids, pos = pack["input_ids"], pack["position_ids"]
+        idx = [int(i) for i in idx]
+        ci = torch.cat([ids[starts[i]:starts[i] + lens[i]] for i in idx])
+        cp = torch.cat([pos[starts[i]:starts[i] + lens[i]] for i in idx])
+        return self._encode_chunk(ci, cp, [lens[i] for i in idx], _varlen_kernels(ci.device))
+
     def _encode_chunk(self, ids, pos, lens: list, varlen: bool) -> torch.Tensor:
         dev = ids.device
         if varlen:   # one padding-free row: block-diagonal attention + per-sequence Gated DeltaNet conv / scan
@@ -95,14 +108,19 @@ class SCRM(nn.Module):
         h = self.backbone(input_ids=x, attention_mask=am, use_cache=False).last_hidden_state
         return h[torch.arange(len(lens), device=dev), torch.tensor(lens, device=dev) - 1]
 
+    def head(self, e: torch.Tensor, pack: dict, candidate_mask: torch.Tensor) -> torch.Tensor:
+        """Per-sequence embeddings [M, d] (in pack sequence order) -> rewards [B, N] (0 at padded slots).
+        The embedding of a sequence is its hidden state at the assistant header (see `embed`)."""
+        B, N = candidate_mask.shape
+        E = e.new_zeros(B, N, e.size(-1)).index_put((pack["row_set"], pack["row_slot"]), e)
+        return self.set_encoder(E, candidate_mask)
+
     def forward(self, pack: dict, candidate_mask: torch.Tensor, max_tokens=None) -> torch.Tensor:
         """pack: every graded option as a full sequence (see collator). Each option's embedding is the hidden state
         at the end of its sequence (assistant header); the set encoder then scores the options of each set jointly.
         Returns rewards [B, N] (0 at padded slots)."""
-        B, N = candidate_mask.shape
         e = self.embed(pack, max_tokens)
-        E = e.new_zeros(B, N, e.size(-1)).index_put((pack["row_set"], pack["row_slot"]), e)
-        return self.set_encoder(E, candidate_mask)
+        return self.head(e, pack, candidate_mask)
 
     def score(self, b: dict, max_tokens=None):
         """Forward on a collated batch dict."""

@@ -127,18 +127,24 @@ class MapGroup(GroupSource):
 
 
 class StreamGroup(GroupSource):
-    def __init__(self, name, weight, max_rows, ds, buffer: int, seed: int):
+    def __init__(self, name, weight, max_rows, ds, buffer: int, seed: int, world: int = 1, rank: int = 0):
         super().__init__(name, weight, max_rows)
         self.ds, self.buffer, self.seed = ds, buffer, seed
+        # HF IterableDatasets shard across DataLoader workers themselves; for DDP, shard across ranks here so the
+        # per-rank streams stay disjoint (world=1 -> no-op, identical to before).
+        self.world, self.rank = int(world), int(rank)
 
     def iter_rows(self, seed, wid=0, nw=1):
         ds = self.ds.shuffle(seed=seed, buffer_size=self.buffer)
         if self.max_rows:
             ds = ds.take(self.max_rows)
+        if self.world > 1:
+            ds = ds.shard(self.world, self.rank)
         yield from ds   # HF IterableDataset shards across DataLoader workers itself
 
 
-def build_groups(dcfg: dict, split: str, filters: dict, streaming: bool, seed: int) -> list[GroupSource]:
+def build_groups(dcfg: dict, split: str, filters: dict, streaming: bool, seed: int,
+                 world: int = 1, rank: int = 0) -> list[GroupSource]:
     groups_cfg = dcfg.get("groups") or []
     router = Router(filters, groups_cfg, dcfg.get("drop_unmatched", False))
     names = [g.get("name", f"group{i}") for i, g in enumerate(groups_cfg)] + ["other"]
@@ -159,7 +165,7 @@ def build_groups(dcfg: dict, split: str, filters: dict, streaming: bool, seed: i
                 continue
             ds = load_base(dcfg, split, True, globs=globs)
             ds = ds.filter(lambda r, g=g: router.assign_row(r) == g)
-            out.append(StreamGroup(names[g], weights[g], caps[g], ds, dcfg.get("shuffle_buffer", 10000), seed))
+            out.append(StreamGroup(names[g], weights[g], caps[g], ds, dcfg.get("shuffle_buffer", 10000), seed, world, rank))
     out = [o for o in out if o.weight > 0]
     if not out:
         raise RuntimeError("no training rows matched filters/groups")
@@ -213,20 +219,23 @@ class TrainStream(IterableDataset):
     """Yields collated, token-budget batches (tokenisation + collation happen inside DataLoader workers)."""
 
     def __init__(self, groups, renderer: Renderer, dcfg: dict, seed: int, max_examples=None, keep_items=False,
-                 epoch0: int = 0):
+                 epoch0: int = 0, world: int = 1, rank: int = 0):
         self.groups, self.r, self.seed = groups, renderer, seed
         self.bcfg = dcfg["batch"]
         self.max_examples, self.keep_items, self.epoch0 = max_examples, keep_items, epoch0
+        self.world, self.rank = int(world), int(rank)
         self.total_rows = sum(g.size for g in groups) if all(g.size is not None for g in groups) else None
         self.stats = {"dropped": 0}
 
     def __iter__(self):
         wi = get_worker_info()
         wid, nw = (wi.id, wi.num_workers) if wi else (0, 1)
-        rng = np.random.default_rng([self.seed, wid, 99])
-        me = None if self.max_examples is None else max(1, self.max_examples // nw)
+        # global worker id / count: rank*workers + local worker, so shards (and RNG streams) are disjoint per rank
+        gwid, gnw = self.rank * nw + wid, self.world * nw
+        rng = np.random.default_rng([self.seed, gwid, 99])
+        me = None if self.max_examples is None else max(1, self.max_examples // gnw)
         pool = []
-        for _, row in Mixer(self.groups, self.seed, wid, nw, me, self.epoch0):
+        for _, row in Mixer(self.groups, self.seed, gwid, gnw, me, self.epoch0):
             ex = parse_row(row, use_candidate_rows=False)
             if ex is None:
                 continue
@@ -248,10 +257,11 @@ class TrainStream(IterableDataset):
             yield b
 
 
-def make_train_loader(cfg: dict, renderer: Renderer, seed: int, max_examples=None, keep_items=False, epoch0=0):
+def make_train_loader(cfg: dict, renderer: Renderer, seed: int, max_examples=None, keep_items=False, epoch0=0,
+                      world: int = 1, rank: int = 0):
     d = cfg["data"]
-    groups = build_groups(d, d["train_split"], d["filters"], d["streaming"], seed)
-    stream = TrainStream(groups, renderer, d, seed, max_examples, keep_items, epoch0)
+    groups = build_groups(d, d["train_split"], d["filters"], d["streaming"], seed, world, rank)
+    stream = TrainStream(groups, renderer, d, seed, max_examples, keep_items, epoch0, world, rank)
     nw = d["num_workers"]
     kw = dict(num_workers=nw, prefetch_factor=d["prefetch_factor"], persistent_workers=True) if nw > 0 else {}
     return DataLoader(stream, batch_size=None, **kw), stream
