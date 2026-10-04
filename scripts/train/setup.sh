@@ -17,11 +17,11 @@ if ! command -v uv >/dev/null; then
 fi
 uv sync --locked --project "$REPO_ROOT" --no-default-groups --group data --group train --group "cu$CU"
 py - <<'PY'
-import os, torch, causal_conv1d
+import os, torch, causal_conv1d, fla, tilelang   # tilelang: fla's Hopper backward backend (fla issue #640)
 assert torch.__version__.startswith("2.10.0"), torch.__version__
 assert torch.version.cuda.replace(".", "") == os.environ["CU"], (torch.version.cuda, os.environ["CU"])
 print("torch", torch.__version__, "cuda", torch.version.cuda, "gpu", torch.cuda.is_available(),
-      "| causal_conv1d", causal_conv1d.__version__)
+      "| causal_conv1d", causal_conv1d.__version__, "| fla", fla.__version__, "| tilelang", tilelang.__version__)
 PY
 if [ "$LOGIN" = 1 ]; then
   uvr hf auth login || echo "HF login skipped"
