@@ -18,10 +18,12 @@ fi
 uv sync --locked --project "$REPO_ROOT" --no-default-groups --group data --group train --group "cu$CU"
 py - <<'PY'
 import os, torch, causal_conv1d, fla, tilelang   # tilelang: fla's Hopper backward backend (fla issue #640)
+import flash_attn   # varlen attention for packed sequences (else sdpa builds a dense [T, T] mask per chunk)
 assert torch.__version__.startswith("2.10.0"), torch.__version__
 assert torch.version.cuda.replace(".", "") == os.environ["CU"], (torch.version.cuda, os.environ["CU"])
 print("torch", torch.__version__, "cuda", torch.version.cuda, "gpu", torch.cuda.is_available(),
-      "| causal_conv1d", causal_conv1d.__version__, "| fla", fla.__version__, "| tilelang", tilelang.__version__)
+      "| causal_conv1d", causal_conv1d.__version__, "| fla", fla.__version__, "| tilelang", tilelang.__version__,
+      "| flash_attn", flash_attn.__version__)
 from fla.utils import IS_NVIDIA_HOPPER
 from fla.utils import has_usable_nvcc
 # fla refuses Hopper training with triton 3.6 unless its TileLang backend is usable, which needs nvcc (fla #640)

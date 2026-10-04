@@ -101,7 +101,9 @@ Packing (padding-free, `src/scrm/packing.py`): whole sets are best-fit-decreasin
 than the budget is a micro-batch of its own). All sequences of a micro-batch are concatenated into one row with
 per-sequence `position_ids`; on CUDA with `flash-linear-attention` + `causal-conv1d` the backbone gets
 `cu_seq_lens` / `seq_idx`, so full attention is block-diagonal and the Gated DeltaNet conv/recurrent state restarts at
-each sequence boundary (no leakage; tested against the padded batch). `model.embed` runs the row in chunks of at most
+each sequence boundary (no leakage; tested against the padded batch). The block-diagonal attention needs `flash-attn`
+(in the `cu128` / `cu130` groups; `model.attn_implementation: auto` picks it): under `sdpa`, HF materialises a dense
+`[T, T]` mask per chunk (a 256k-token chunk = 64 GiB) and computes full `T^2` attention. `model.embed` runs the row in chunks of at most
 `max_tokens_per_batch` tokens, cutting only between sequences (a sequence is never split); the set encoder then sees
 all options of a set together. Without those kernels (CPU) the same sequences run as a right-padded batch.
 

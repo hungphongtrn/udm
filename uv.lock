@@ -459,6 +459,48 @@ wheels = [
 ]
 
 [[package]]
+name = "flash-attn"
+version = "2.8.3+cu128torch2.10"
+source = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-linux_x86_64.whl" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "einops", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "torch", version = "2.10.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+wheels = [
+    { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-linux_x86_64.whl", hash = "sha256:a58c95a080363606e691c342d47dd173b510f4c013a8c5fcb8744def12e36a0f" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "einops" },
+    { name = "torch" },
+]
+
+[[package]]
+name = "flash-attn"
+version = "2.8.3+cu130torch2.10"
+source = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu130torch2.10-cp312-cp312-linux_x86_64.whl" }
+resolution-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+]
+dependencies = [
+    { name = "einops", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "torch", version = "2.10.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+]
+wheels = [
+    { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu130torch2.10-cp312-cp312-linux_x86_64.whl", hash = "sha256:bb67bd3c2784ffedf07a2633b18722ccdaf54eb0aba18203fc02cae9ced44977" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "einops" },
+    { name = "torch" },
+]
+
+[[package]]
 name = "flash-linear-attention"
 version = "0.5.2"
 source = { registry = "https://pypi.org/simple" }
@@ -2030,6 +2072,7 @@ cpu = [
 cu128 = [
     { name = "bitsandbytes", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "causal-conv1d", version = "1.7.0", source = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "flash-attn", version = "2.8.3+cu128torch2.10", source = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-linux_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "flash-linear-attention", extra = ["tilelang"], marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-8-udm-scrm-cu128') or (platform_machine != 'x86_64' and extra == 'group-8-udm-scrm-cu128' and extra == 'group-8-udm-scrm-cu130') or (sys_platform != 'linux' and extra == 'group-8-udm-scrm-cu128' and extra == 'group-8-udm-scrm-cu130') or (extra == 'group-8-udm-scrm-cpu' and extra == 'group-8-udm-scrm-cu128') or (extra == 'group-8-udm-scrm-cpu' and extra == 'group-8-udm-scrm-cu130')" },
     { name = "liger-kernel", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "torch", version = "2.10.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -2037,6 +2080,7 @@ cu128 = [
 cu130 = [
     { name = "bitsandbytes", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "causal-conv1d", version = "1.7.0", source = { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "flash-attn", version = "2.8.3+cu130torch2.10", source = { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu130torch2.10-cp312-cp312-linux_x86_64.whl" }, marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "flash-linear-attention", extra = ["tilelang"], marker = "(platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'group-8-udm-scrm-cu130') or (platform_machine != 'x86_64' and extra == 'group-8-udm-scrm-cu128' and extra == 'group-8-udm-scrm-cu130') or (sys_platform != 'linux' and extra == 'group-8-udm-scrm-cu128' and extra == 'group-8-udm-scrm-cu130') or (extra == 'group-8-udm-scrm-cpu' and extra == 'group-8-udm-scrm-cu128') or (extra == 'group-8-udm-scrm-cpu' and extra == 'group-8-udm-scrm-cu130')" },
     { name = "liger-kernel", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "nvidia-cuda-cccl", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
@@ -2077,6 +2121,7 @@ cpu = [{ name = "torch", specifier = "==2.10.0", index = "https://download.pytor
 cu128 = [
     { name = "bitsandbytes", specifier = ">=0.43" },
     { name = "causal-conv1d", url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
+    { name = "flash-attn", url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-linux_x86_64.whl" },
     { name = "flash-linear-attention", extras = ["tilelang"] },
     { name = "liger-kernel", specifier = ">=0.8.4" },
     { name = "torch", specifier = "==2.10.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "udm-scrm", group = "cu128" } },
@@ -2084,6 +2129,7 @@ cu128 = [
 cu130 = [
     { name = "bitsandbytes", specifier = ">=0.43" },
     { name = "causal-conv1d", url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl" },
+    { name = "flash-attn", url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu130torch2.10-cp312-cp312-linux_x86_64.whl" },
     { name = "flash-linear-attention", extras = ["tilelang"] },
     { name = "liger-kernel", specifier = ">=0.8.4" },
     { name = "nvidia-cuda-cccl", specifier = "==13.0.*" },
