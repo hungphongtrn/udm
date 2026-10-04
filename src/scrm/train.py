@@ -258,6 +258,12 @@ def train(cfg: dict, resume: str | None = None):
                   f"answered={m['answered_frac']:.3f} ({m['seconds']:.0f}s)", flush=True)
         model.train()
 
+    di0 = bcfg.get("decision_index") or {}
+    if di0.get("enabled"):   # fail at step 0, not at the first benchmark hours in, if the suite / sample / kit is missing
+        from .dindex import DecisionIndexEval
+        dindex = DecisionIndexEval(di0)
+        print(f"[dindex] sample: {len(dindex.rows)} requests from {di0['rows']}", flush=True)
+
     if tcfg.get("eval_at_start") and step == 0:
         do_eval(0)
 
@@ -340,9 +346,9 @@ def train(cfg: dict, resume: str | None = None):
                 print(f"[scrm] early stop at step {step}: val loss did not improve for {bad_evals} evals (best {best:.4f})", flush=True)
                 break
         if tcfg["save_every"] and step % tcfg["save_every"] == 0:
-            do_benchmarks(step)
-            save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)
+            save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)   # before the log-only benchmarks: a benchmark crash must not lose the interval
             saved_at = step
+            do_benchmarks(step)
 
     final_eval = bool(tcfg["eval_every"]) and step % tcfg["eval_every"] != 0
     if final_eval:
