@@ -40,10 +40,12 @@ train = [
 # Torch build + GPU kernels: exactly one of these. Prebuilt wheels: torch 2.10.0, causal-conv1d 1.7.0 (Gated DeltaNet
 # conv); flash-linear-attention = fast Gated DeltaNet kernels (else slow torch fallback), [tilelang] = its TileLang
 # backend, required on Hopper (H100/H200): torch 2.10 pins triton 3.6, whose chunk_bwd_dqkwg gives wrong grads there
-# (fla issue #640; fla refuses to run); liger-kernel = RMSNorm/SwiGLU
+# (fla issue #640; fla refuses to run). TileLang JIT-compiles with nvcc and fla silently ignores it without one:
+# cu130 ships nvcc as a wheel (tilelang[nvcc]); cu128 needs a system CUDA 12.x toolkit (CUDA_HOME / PATH /
+# /usr/local/cuda) — there is no CUDA 12 nvcc wheel. liger-kernel = RMSNorm/SwiGLU
 # for qwen3_5 (model.liger_kernel); bitsandbytes = train.optim=adamw_8bit (default) and model.quantize_4bit.
 cu128 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention[tilelang]", "liger-kernel>=0.8.4", "bitsandbytes>=0.43"]   # CUDA 12.8, driver >= 570 (default)
-cu130 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention[tilelang]", "liger-kernel>=0.8.4", "bitsandbytes>=0.43"]   # CUDA 13.0, driver >= 580
+cu130 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention[tilelang]", "tilelang[nvcc]", "liger-kernel>=0.8.4", "bitsandbytes>=0.43"]   # CUDA 13.0, driver >= 580
 # CPU-only torch, no GPU kernels (they reject CPU tensors), for the test suite / CPU smoke runs:
 #   UV_PROJECT_ENVIRONMENT=.venv-cpu uv run --locked --no-default-groups --group data --group train --group cpu pytest
 cpu = ["torch==2.10.0"]
