@@ -45,7 +45,11 @@ train = [
 # /usr/local/cuda) — there is no CUDA 12 nvcc wheel. liger-kernel = RMSNorm/SwiGLU
 # for qwen3_5 (model.liger_kernel); bitsandbytes = train.optim=adamw_8bit (default) and model.quantize_4bit.
 cu128 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention[tilelang]", "liger-kernel>=0.8.4", "bitsandbytes>=0.43"]   # CUDA 12.8, driver >= 570 (default)
-cu130 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention[tilelang]", "tilelang[nvcc]", "liger-kernel>=0.8.4", "bitsandbytes>=0.43"]   # CUDA 13.0, driver >= 580
+# nvcc wheels pinned to 13.0 = torch cu130's nvidia-cuda-runtime: all share nvidia/cu13/include, and cccl refuses an
+# nvcc newer than the runtime headers ("CUDA compiler and CUDA toolkit headers are incompatible")
+cu130 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention[tilelang]", "tilelang[nvcc]",
+         "nvidia-cuda-nvcc==13.0.*", "nvidia-cuda-crt==13.0.*", "nvidia-nvvm==13.0.*", "nvidia-cuda-cccl==13.0.*",
+         "liger-kernel>=0.8.4", "bitsandbytes>=0.43"]   # CUDA 13.0, driver >= 580
 # CPU-only torch, no GPU kernels (they reject CPU tensors), for the test suite / CPU smoke runs:
 #   UV_PROJECT_ENVIRONMENT=.venv-cpu uv run --locked --no-default-groups --group data --group train --group cpu pytest
 cpu = ["torch==2.10.0"]
