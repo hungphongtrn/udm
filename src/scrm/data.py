@@ -7,6 +7,7 @@ from typing import Iterator
 
 import numpy as np
 import torch
+from datasets.distributed import split_dataset_by_node
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from .collator import collate
@@ -127,24 +128,28 @@ class MapGroup(GroupSource):
 
 
 class StreamGroup(GroupSource):
-    def __init__(self, name, weight, max_rows, ds, buffer: int, seed: int, world: int = 1, rank: int = 0):
+    def __init__(self, name, weight, max_rows, ds, buffer: int, seed: int):
         super().__init__(name, weight, max_rows)
         self.ds, self.buffer, self.seed = ds, buffer, seed
-        # HF IterableDatasets shard across DataLoader workers themselves; for DDP, shard across ranks here so the
-        # per-rank streams stay disjoint (world=1 -> no-op, identical to before).
-        self.world, self.rank = int(world), int(rank)
 
     def iter_rows(self, seed, wid=0, nw=1):
+        # wid/nw = global worker id/count (rank*workers + worker). Every worker builds the identical seeded stream, then
+        # split_dataset_by_node keeps its part: whole shards if num_shards % nw == 0, else every nw-th row. Plain
+        # ds.shard(world, rank) gives ranks >= num_shards zero shards (IndexError on a single-file group).
         ds = self.ds.shuffle(seed=seed, buffer_size=self.buffer)
         if self.max_rows:
             ds = ds.take(self.max_rows)
-        if self.world > 1:
-            ds = ds.shard(self.world, self.rank)
-        yield from ds   # HF IterableDataset shards across DataLoader workers itself
+        if nw > 1:
+            ds = split_dataset_by_node(ds, rank=wid, world_size=nw)
+        # .iter() skips HF's own per-DataLoader-worker shard split (inside a worker `for r in ds` re-shards by local
+        # worker id and idles workers beyond num_shards), which would double-split on top of the global split above.
+        for b in ds.iter(batch_size=64):
+            keys = list(b)
+            for j in range(len(b[keys[0]])):
+                yield {k: b[k][j] for k in keys}
 
 
-def build_groups(dcfg: dict, split: str, filters: dict, streaming: bool, seed: int,
-                 world: int = 1, rank: int = 0) -> list[GroupSource]:
+def build_groups(dcfg: dict, split: str, filters: dict, streaming: bool, seed: int) -> list[GroupSource]:
     groups_cfg = dcfg.get("groups") or []
     router = Router(filters, groups_cfg, dcfg.get("drop_unmatched", False))
     names = [g.get("name", f"group{i}") for i, g in enumerate(groups_cfg)] + ["other"]
@@ -165,7 +170,7 @@ def build_groups(dcfg: dict, split: str, filters: dict, streaming: bool, seed: i
                 continue
             ds = load_base(dcfg, split, True, globs=globs)
             ds = ds.filter(lambda r, g=g: router.assign_row(r) == g)
-            out.append(StreamGroup(names[g], weights[g], caps[g], ds, dcfg.get("shuffle_buffer", 10000), seed, world, rank))
+            out.append(StreamGroup(names[g], weights[g], caps[g], ds, dcfg.get("shuffle_buffer", 10000), seed))
     out = [o for o in out if o.weight > 0]
     if not out:
         raise RuntimeError("no training rows matched filters/groups")
@@ -260,7 +265,7 @@ class TrainStream(IterableDataset):
 def make_train_loader(cfg: dict, renderer: Renderer, seed: int, max_examples=None, keep_items=False, epoch0=0,
                       world: int = 1, rank: int = 0):
     d = cfg["data"]
-    groups = build_groups(d, d["train_split"], d["filters"], d["streaming"], seed, world, rank)
+    groups = build_groups(d, d["train_split"], d["filters"], d["streaming"], seed)
     stream = TrainStream(groups, renderer, d, seed, max_examples, keep_items, epoch0, world, rank)
     nw = d["num_workers"]
     kw = dict(num_workers=nw, prefetch_factor=d["prefetch_factor"], persistent_workers=True) if nw > 0 else {}
