@@ -11,8 +11,7 @@ dependencies = [
     "pyarrow>=15",
     "numpy>=1.24",
     "pyyaml>=6",
-    "huggingface_hub>=0.25",
-    "hf_transfer>=0.1.6",
+    "huggingface_hub>=1.0",   # transfers via hf_xet (HF_XET_HIGH_PERFORMANCE); hf_transfer is no longer used
 ]
 
 # Environments are uv dependency groups; scripts select them via `uv run --group ...` (see scripts/*/_env.sh).

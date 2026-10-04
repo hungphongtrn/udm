@@ -39,8 +39,8 @@ Code: `src/scrm/` (`model.py`, `losses.py`, `render.py`, `collator.py`, `data.py
 ## Quick start
 
 ```bash
-scripts/train/setup.sh [--no-login]           # uv sync (data+train+cu128 groups; CU=130 for cu130), stack check, hf + wandb login
-scripts/train/prefetch_data.sh data_cache/udm  # snapshot parquet (hf_transfer) -> training starts immediately / offline
+scripts/train/setup.sh [--no-login]           # uv sync (data+train+cu128 groups; CU=130 for cu130), stack check, hf + wandb login; re-run after a pull that changes uv.lock
+scripts/train/prefetch_data.sh data_cache/udm  # snapshot parquet (hf_xet) -> training starts immediately / offline
 scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml data.local_dir=data_cache/udm
 scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml --resume auto data.local_dir=data_cache/udm
 scripts/train/eval.sh outputs/scrm_qwen3_5_4b_24gb/best --split test --out test.json data.local_dir=data_cache/udm

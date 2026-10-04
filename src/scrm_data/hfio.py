@@ -28,7 +28,7 @@ def retry(fn, tries: int = 8, base: float = 5.0, what: str = ""):
 
 
 def download(repo_id: str, revision: str, path: str, cache_dir: Optional[str]) -> str:
-    """Download ONE file with huggingface_hub (honours HF_HUB_ENABLE_HF_TRANSFER / hf_xet) and return its
+    """Download ONE file with huggingface_hub (hf_xet; HF_XET_HIGH_PERFORMANCE) and return its
     local path. Resumable and lock-protected, so concurrent workers can request the same file."""
     from huggingface_hub import hf_hub_download
 
