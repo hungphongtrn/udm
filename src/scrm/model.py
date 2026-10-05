@@ -216,6 +216,32 @@ def _varlen_kernels(device: torch.device) -> bool:
     return True
 
 
+def _cpu_safe_gdn() -> None:
+    """HF binds causal-conv1d / fla Gated DeltaNet kernels at import time whenever the packages are installed, with no
+    device check, so CPU tensors hit CUDA-only kernels (`Expected x.is_cuda()`). Rebind the module-level functions to
+    dispatch on device: CUDA -> installed kernel, otherwise -> HF's torch reference. Idempotent."""
+    import inspect
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as mq
+
+    def dispatch(kernel):
+        ref = inspect.unwrap(kernel)
+        if ref is kernel or getattr(kernel, "_scrm_dispatch", False):
+            return kernel
+        sig = inspect.signature(ref).parameters
+        ref_kw = None if any(p.kind is p.VAR_KEYWORD for p in sig.values()) else set(sig)
+
+        def fn(x, *args, **kwargs):
+            if x.is_cuda:
+                return kernel(x, *args, **kwargs)
+            return ref(x, *args, **(kwargs if ref_kw is None else {k: v for k, v in kwargs.items() if k in ref_kw}))
+        fn._scrm_dispatch = True
+        return fn
+
+    for name in ("causal_conv1d_fn", "causal_conv1d_update", "torch_chunk_gated_delta_rule",
+                 "torch_recurrent_gated_delta_rule"):
+        setattr(mq, name, dispatch(getattr(mq, name)))
+
+
 def _resolve_attn(impl: str, device: torch.device) -> str:
     if impl != "auto":
         return impl
@@ -261,6 +287,8 @@ def _text_only(m: nn.Module) -> nn.Module:
 def _load_backbone(mcfg: dict, device: torch.device, tokenizer_len: int):
     import transformers
     from transformers import AutoModel
+
+    _cpu_safe_gdn()
 
     dtype = torch.bfloat16 if (mcfg["dtype"] == "bfloat16" and device.type == "cuda") or \
         (mcfg["dtype"] == "bfloat16" and device.type != "cuda" and mcfg["name_or_path"] != "tiny") else torch.float32
@@ -325,7 +353,7 @@ def build_scrm(mcfg: dict, device: torch.device | str = "cpu", tokenizer=None, a
 def load_scrm(ckpt_dir: str, device: str | torch.device = "auto", merged_ok: bool = True) -> "SCRM":
     """Load a checkpoint written by SCRM.save_pretrained (LoRA adapter + head + tokenizer + config).
     `ckpt_dir` may be `hf://org/repo[@revision]/run/best` (a hub backup); the base model comes from model.name_or_path.
-    device="auto" -> cuda when available (Qwen3.5 can't run on CPU while causal-conv1d is installed)."""
+    device="auto" -> cuda when available."""
     from transformers import AutoTokenizer
     from .hub import resolve_ckpt
     ckpt_dir = resolve_ckpt(ckpt_dir)
