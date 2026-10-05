@@ -73,6 +73,10 @@ DEFAULTS: dict[str, Any] = {
         # needed to push the set head's embedding grads into the backbone (see docs/TRAINING.md). The group budget
         # is data.batch.max_tokens_per_batch; grad_cache_chunk_tokens caps the backbone pass memory.
         "grad_cache": False, "grad_cache_chunk_tokens": 16384,
+        # selective checkpointing in grad-cache pass 3 (needs model.gradient_checkpointing): a chunk of T tokens keeps
+        # the activations of floor(L * act_tokens / T) of its L decoder layers, recomputing only the rest. null = all
+        # layers checkpointed. Memory ~ act_tokens tokens of full (uncheckpointed) activations.
+        "grad_cache_act_tokens": None,
         "ddp_timeout_min": 240,             # process-group timeout (min) under torchrun; rank 0 alone runs eval/dindex
         "log_every": 10, "eval_every": 500, "hist_every": 500, "save_every": 500, "keep_last": 3,
         "eval_at_start": True,

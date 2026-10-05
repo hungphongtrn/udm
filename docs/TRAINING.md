@@ -116,7 +116,7 @@ recompute activations.
 | `scrm_qwen3_5_4b_24gb.yaml` | 4096 | 4096 | bf16 base + LoRA (8192 OOMs on a 4090) |
 | same + `model.quantize_4bit=true` | 4096 | 4096 | QLoRA (nf4), a bit slower, needs bitsandbytes |
 | `scrm_qwen3_5_4b_40gb.yaml` | 16384 | 16384 | |
-| `scrm_qwen3_5_4b_h200.yaml` | 32768 | 262144 group | 2x H200, gradient caching (chunks of 32768), DDP |
+| `scrm_qwen3_5_4b_h200.yaml` | 32768 | 262144 group | 2x H200, gradient caching (8192 chunks, selective checkpointing), DDP |
 | `ablation_frozen.yaml` | see config | see config | no grads through backbone |
 
 Knobs if you hit OOM: lower `data.batch.max_tokens_per_batch` (micro-batch) and raise `train.grad_accum`; lower
@@ -145,10 +145,19 @@ With a chunk budget >= the whole group this is bit-for-bit the standard path (si
 never changes the result: sequences are independent, so regrouping only changes which tensors share a forward (tested,
 including dropout replay). `loss.perm_detach=true` (default) keeps the second-shuffle forward under `no_grad` as before;
 `loss.perm_detach=false` caches both shuffle packs through all three passes. A frozen backbone (`model.freeze_backbone`
-/ `ablation_frozen.yaml`) simply skips pass 3. `model.gradient_checkpointing` still applies. A sequence longer than the
-chunk budget gets its own chunk, so the chunk never bounds memory below `data.render.max_len`; without checkpointing a
-16k-token chunk of Qwen3.5-4B (LoRA all-linear, dropout 0.05) exceeds 136 GB, so keep it on unless `max_len` <= ~8192.
-Under DDP the group budget is per rank and the loss is divided by the globally summed valid-set count.
+/ `ablation_frozen.yaml`) simply skips pass 3. Under DDP the group budget is per rank and the loss is divided by the
+globally summed valid-set count.
+
+**Selective checkpointing (`train.grad_cache_act_tokens`).** A sequence longer than the chunk budget gets its own
+chunk, so the chunk never bounds memory below `data.render.max_len`, and turning `model.gradient_checkpointing` off
+outright OOMs (a 16k-token chunk of Qwen3.5-4B with LoRA all-linear stores > 136 GB, ~8.3 MB/token). Instead keep
+checkpointing on and set `grad_cache_act_tokens`: in pass 3 a chunk of T tokens runs `floor(L * act_tokens / T)` of its
+L decoder layers (evenly spaced, so the linear/full attention mix is kept) without checkpointing and recomputes only the
+rest, so stored activations stay ~`act_tokens` tokens' worth for any chunk length. With `grad_cache_chunk_tokens` =
+`act_tokens`, every packed chunk runs with no recompute and only sequences longer than the budget are partly
+checkpointed. Pass 1, evaluation and the Decision Index are unaffected (all layers return to checkpointed after pass 3).
+Grads are identical to the standard path (tested with LoRA dropout replay). Tune by `mem=` in the `[train]` line
+(`torch.cuda.max_memory_allocated`, rank 0): raise `act_tokens` while the peak leaves headroom.
 
 **Cross-rank balancing (DDP).** Set cost scales with graded candidates × prompt length, so per-rank groups are very
 uneven and one rank idles at the gradient all-reduce. In grad-cache mode the backbone work is therefore balanced at

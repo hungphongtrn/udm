@@ -96,13 +96,16 @@ def _pool(packs, world: int, rank: int):
     return {"input_ids": torch.cat(ids), "position_ids": torch.cat(pos), "seq_lens": lens}, owner, own
 
 
-def grad_cache_step(model, packs, chunk_tokens: int | None, *, amp_ctx, head_loss):
+def grad_cache_step(model, packs, chunk_tokens: int | None, *, amp_ctx, head_loss, act_tokens: int | None = None):
     """Three-pass gradient-cached forward/backward over one group (balanced across DDP ranks, see module doc).
 
     `packs`: list of (pack, candidate_mask) that need backbone embeddings (the main pack, and the second permutation
     pack when `loss.perm_detach=false`). `head_loss(leaves) -> (loss, extras)` runs the set head on the detached,
     grad-enabled embeddings and returns a scalar loss to backward. Every rank must call this with the same number of
-    packs. Returns `(loss.detach(), extras, embeds_detached)`.
+    packs. `act_tokens` (needs `model.gradient_checkpointing`): selective checkpointing in pass 3 — a chunk of T tokens
+    keeps the activations of `L * act_tokens // T` of its L decoder layers (all of them when T <= act_tokens), so the
+    stored activations stay ~ act_tokens full-model tokens whatever the chunk length. Returns
+    `(loss.detach(), extras, embeds_detached)`.
     """
     device = packs[0][0]["input_ids"].device
     world, rank = _world()
@@ -133,13 +136,22 @@ def grad_cache_step(model, packs, chunk_tokens: int | None, *, amp_ctx, head_los
                 grad[a:b] = leaf.grad
         if world > 1:
             dist.all_reduce(grad, op=dist.ReduceOp.SUM)
-        for idx, s in zip(plan, states):
-            g = grad[torch.as_tensor(idx, device=device)]
-            if not g.any():
-                continue
-            _set_rng_state(s, device)
-            with amp_ctx():
-                h = model.embed_indices(pool, idx)
-            torch.autograd.backward(h, g.to(h.dtype))
+        n_layers = len(model.ckpt_layers()) if act_tokens else 0
+        try:
+            for idx, s in zip(plan, states):
+                g = grad[torch.as_tensor(idx, device=device)]
+                if not g.any():
+                    continue
+                if n_layers:
+                    n_tok = sum(max(int(pool["seq_lens"][i]), 1) for i in idx)
+                    model.keep_activations(n_layers * int(act_tokens) // n_tok)
+                _set_rng_state(s, device)
+                with amp_ctx():
+                    h = model.embed_indices(pool, idx)
+                torch.autograd.backward(h, g.to(h.dtype))
+                del h
+        finally:
+            if n_layers:
+                model.keep_activations(0)
         _set_rng_state(final_rng, device)
     return loss.detach(), extras, [x.detach() for x in leaves]

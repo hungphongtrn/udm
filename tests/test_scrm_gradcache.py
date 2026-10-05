@@ -83,6 +83,38 @@ def test_grad_cache_rng_replay_matches_standard(synth):
     _assert_grads_close(g_std, g_gc)
 
 
+def test_grad_cache_selective_checkpointing_matches_standard(synth):
+    """Pass 3 with half the layers keeping activations (rest checkpointed) and LoRA dropout gives the standard
+    path's grads, and every layer is checkpointed again afterwards (pass 1 / eval stay low-memory)."""
+    torch.manual_seed(0)
+    model, tok = build_scrm(dict(TINY, set_dropout=0.0, gradient_checkpointing=True,
+                                 lora={"enabled": True, "r": 4, "alpha": 8, "dropout": 0.5}), "cpu")
+    model.train()
+    layers = model.ckpt_layers()
+    assert len(layers) == 4
+    r, b = _batch(synth, tok, 6)
+    n_tok = sum(int(x) for x in b["pack"]["seq_lens"])
+    n_valid = max(1, int(b["pair_mask"].flatten(1).any(1).sum()))
+    kw = dict(lcfg={}, d_batch={"max_tokens_per_batch": 10 ** 9}, device=torch.device("cpu"), amp=False,
+              n_valid=n_valid, renderer=r, seed=0, step=0, use_perm=False)
+    torch.manual_seed(0)
+    model.zero_grad(set_to_none=True)
+    std = accumulate_step(model, [b], grad_cache=False, **kw)
+    g_std = _grads(model)
+    stored = []   # layers keeping activations during each pass-3 chunk's forward
+    enc = model.embed_indices
+    model.embed_indices = lambda pool, idx: (stored.append(sum(not m.gradient_checkpointing for m in layers)),
+                                             enc(pool, idx))[1]
+    torch.manual_seed(0)
+    model.zero_grad(set_to_none=True)
+    gc = accumulate_step(model, [b], grad_cache=True, chunk_tokens=10 ** 9, act_tokens=n_tok // 2, **kw)
+    g_gc = _grads(model)
+    assert stored == [0, 2]   # pass 1 fully checkpointed, pass 3 keeps 2 of 4 layers
+    assert all(m.gradient_checkpointing for m in layers)
+    assert abs(std["loss"] - gc["loss"]) < 1e-5
+    _assert_grads_close(g_std, g_gc)
+
+
 def _ddp_worker(rank, world, synth, out_dir, mode, chunk_tokens, n_items, skew=False):
     dist.init_process_group("gloo", init_method=f"file://{out_dir}/pg", rank=rank, world_size=world)
     torch.manual_seed(0)

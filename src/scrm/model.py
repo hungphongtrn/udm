@@ -55,6 +55,26 @@ class SCRM(nn.Module):
                                       cfg["set_dropout"], cfg.get("head_hidden"), cfg.get("input_norm", True))
         self.tokenizer = None
         self.render_cfg: dict | None = None
+        self._ckpt_layers: list[nn.Module] | None = None
+
+    def ckpt_layers(self) -> list[nn.Module]:
+        """Decoder layers HF gradient checkpointing was enabled on at build time, in depth order ([] if it is off)."""
+        if self._ckpt_layers is None:
+            from transformers.modeling_layers import GradientCheckpointingLayer
+            self._ckpt_layers = [m for m in self.backbone.modules()
+                                 if isinstance(m, GradientCheckpointingLayer) and m.gradient_checkpointing]
+        return self._ckpt_layers
+
+    def keep_activations(self, k: int):
+        """Selective checkpointing: `k` evenly spaced layers of `ckpt_layers()` keep their activations (no recompute in
+        backward), the rest stay checkpointed. `k >= len(layers)` turns checkpointing off, `k = 0` restores it fully.
+        Evenly spaced so the stored set keeps the hybrid model's linear/full attention layer mix."""
+        layers = self.ckpt_layers()
+        n = len(layers)
+        k = max(0, min(int(k), n))
+        keep = {(2 * i + 1) * n // (2 * k) for i in range(k)} if k else set()
+        for j, m in enumerate(layers):
+            m.gradient_checkpointing = j not in keep
 
     def embed(self, pack: dict, max_tokens=None) -> torch.Tensor:
         """Packed sequences (see collator) -> [M, d]: last-layer hidden state at the last token of each sequence.

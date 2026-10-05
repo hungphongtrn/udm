@@ -190,7 +190,8 @@ def _train_pair_acc(r, tiers, M):
 
 
 def accumulate_step(model, batches, *, lcfg, d_batch, device, amp, n_valid, grad_cache=False,
-                    chunk_tokens: int = 16384, renderer=None, seed: int = 0, step: int = 0, use_perm=False):
+                    chunk_tokens: int = 16384, act_tokens: int | None = None, renderer=None, seed: int = 0, step: int = 0,
+                    use_perm=False):
     """Forward + backward over one optimizer step's micro-batches and accumulate gradients into `model`.
 
     `n_valid` is the number of valid sets over the WHOLE accumulation window (already globally reduced under DDP),
@@ -231,7 +232,7 @@ def accumulate_step(model, batches, *, lcfg, d_batch, device, amp, n_valid, grad
                 lo = compute_loss(rr, bd["tiers"], lcfg, bd["pair_mask"], r2a)
                 return reduce_loss(lo, n_valid), (rr, lo)
 
-            loss, (rr, lo), _ = grad_cache_step(model, packs, chunk_tokens,
+            loss, (rr, lo), _ = grad_cache_step(model, packs, chunk_tokens, act_tokens=act_tokens,
                                                 amp_ctx=lambda: _amp(device, amp), head_loss=head_loss)
             r = rr.detach().float()
         else:
@@ -444,6 +445,7 @@ def train(cfg: dict, resume: str | None = None):
         st = accumulate_step(model, batches, lcfg=lcfg, d_batch=d["batch"], device=device, amp=amp, n_valid=n_valid,
                              grad_cache=tcfg.get("grad_cache", False),
                              chunk_tokens=tcfg.get("grad_cache_chunk_tokens", 16384),
+                             act_tokens=tcfg.get("grad_cache_act_tokens"),
                              renderer=renderer, seed=cfg["seed"], step=step, use_perm=use_perm)
         tot, pairs, ex_n = st["loss"], st["pairs"], st["examples"]
         win_tok += st["tokens"]
@@ -480,8 +482,9 @@ def train(cfg: dict, resume: str | None = None):
                 rec["sys/gpu_mem_alloc_gb"] = torch.cuda.max_memory_allocated() / 2**30
             log(rec, step)
             if rank == 0:
+                mem = f" mem={torch.cuda.max_memory_allocated() / 2**30:.0f}G" if device.type == "cuda" else ""
                 print(f"[train] step {step}/{max_steps} loss={tot:.4f} gnorm={gnorm:.2f} ex/step={ex_n} pairs={pairs} "
-                      f"tok/s={tok_acc/dt:.0f} s/step={dt/win_steps:.1f}", flush=True)
+                      f"tok/s={tok_acc/dt:.0f} s/step={dt/win_steps:.1f}{mem}", flush=True)
             win_tok, win_time, win_steps = 0, 0.0, 0
         if tcfg["hist_every"] and step % tcfg["hist_every"] == 0 and wb.enabled:
             wb.log_hist("train/reward_hist", last_r[last_b["candidate_mask"]].cpu().numpy(), step)
