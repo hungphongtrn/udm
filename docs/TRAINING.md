@@ -145,8 +145,10 @@ With a chunk budget >= the whole group this is bit-for-bit the standard path (si
 never changes the result: sequences are independent, so regrouping only changes which tensors share a forward (tested,
 including dropout replay). `loss.perm_detach=true` (default) keeps the second-shuffle forward under `no_grad` as before;
 `loss.perm_detach=false` caches both shuffle packs through all three passes. A frozen backbone (`model.freeze_backbone`
-/ `ablation_frozen.yaml`) simply skips pass 3. `model.gradient_checkpointing` still applies (turn it off once chunks are
-small enough). Under DDP the group budget is per rank and the loss is divided by the globally summed valid-set count.
+/ `ablation_frozen.yaml`) simply skips pass 3. `model.gradient_checkpointing` still applies. A sequence longer than the
+chunk budget gets its own chunk, so the chunk never bounds memory below `data.render.max_len`; without checkpointing a
+16k-token chunk of Qwen3.5-4B (LoRA all-linear, dropout 0.05) exceeds 136 GB, so keep it on unless `max_len` <= ~8192.
+Under DDP the group budget is per rank and the loss is divided by the globally summed valid-set count.
 
 **Cross-rank balancing (DDP).** Set cost scales with graded candidates × prompt length, so per-rank groups are very
 uneven and one rank idles at the gradient all-reduce. In grad-cache mode the backbone work is therefore balanced at

@@ -1,6 +1,7 @@
-# SCRM on 2x H200 (141 GB each) with gradient caching + DDP. STARTING POINT: tune on the first run and watch
-# sys/gpu_mem_alloc_gb (raise grad_cache_chunk_tokens / max_tokens_per_batch while memory allows; try turning
-# gradient_checkpointing off once chunks are small). Launch: NPROC=2 scripts/train/train.sh <this file> ...
+# SCRM on 2x H200 (141 GB each) with gradient caching + DDP. Watch sys/gpu_mem_alloc_gb.
+# Gradient checkpointing must stay on while data.render.max_len is 32768: a sequence longer than the chunk budget gets
+# its own chunk, and without checkpointing a 16k-token chunk alone exceeds 136 GB (OOM in pass 3).
+# Launch: NPROC=2 scripts/train/train.sh <this file> ...
 base: scrm_qwen3_5_4b_24gb.yaml
 output_dir: outputs/scrm_qwen3_5_4b_h200
 data:
@@ -10,10 +11,10 @@ data:
   batch: {max_tokens_per_batch: 262144, max_batch_size: 64, bucket_size: 512}
 train:
   grad_cache: true
-  grad_cache_chunk_tokens: 16384      # backbone pass budget; the actual memory knob in grad-cache mode (OOM -> 8192)
+  grad_cache_chunk_tokens: 32768      # backbone pass budget (>= max_len); ckpt on at 32k peaked ~42 GB
   grad_accum: 1                       # the group is already large
 model:
-  gradient_checkpointing: false       # no recompute; activation memory ~ chunk tokens (ckpt on at 32k chunks peaked 45 GB)
+  gradient_checkpointing: true        # off OOMs at 16k chunks (>136 GB); only viable with max_len <= ~8192
 # Decision Index over the longer context
 benchmarks:
   decision_index: {enabled: true, suite_dir: ../decision-index/suite-0.2, rows: ../decision-index/sample-1000.jsonl.gz,
