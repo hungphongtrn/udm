@@ -104,12 +104,20 @@ def _oracle_fwd_bwd(model, items, pack, cm):
     return r.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
 
 
-def _assert_same(a, b, rtol=2e-2, atol=1e-4):
+def _assert_same(a, b, rtol=2e-2, atol=1e-4, label=""):
     (r1, g1), (r2, g2) = a, b
-    assert torch.allclose(r1, r2, atol=atol, rtol=rtol), (r1 - r2).abs().max()
+    assert torch.allclose(r1, r2, atol=atol, rtol=rtol), f"{label} rewards: max err {(r1 - r2).abs().max():.3e}"
     assert g1.keys() == g2.keys() and any("lora_" in n for n in g1)
-    for n in g1:   # delta-rule gate params accumulate a little fp32 noise; everything else is ~exact
-        assert (g1[n] - g2[n]).abs().max() <= rtol * g1[n].abs().max() + 1e-6, n
+    stats = []   # (max err / max ref, name, norm-relative err, cosine)
+    for n in g1:
+        x, y = g1[n].float().flatten(), g2[n].float().flatten()
+        stats.append((((x - y).abs().max() / x.abs().max().clamp(min=1e-12)).item(), n,
+                      ((x - y).norm() / x.norm().clamp(min=1e-12)).item(),
+                      torch.nn.functional.cosine_similarity(x, y, dim=0).item()))
+    bad = [n for n in g1 if (g1[n] - g2[n]).abs().max() > rtol * g1[n].abs().max() + 1e-6]
+    worst = "\n".join(f"  {m:.3e} max-rel  {r:.3e} norm-rel  cos {c:.6f}  {n}" for m, n, r, c in sorted(stats)[::-1][:8])
+    # delta-rule gate params accumulate a little fp32 noise; everything else is ~exact
+    assert not bad, f"{label}: {len(bad)}/{len(g1)} grads differ beyond rtol={rtol}; worst:\n{worst}"
 
 
 def test_chunked_encoding_matches_single_chunk_forward_and_grad():

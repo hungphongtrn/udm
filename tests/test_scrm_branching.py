@@ -155,7 +155,15 @@ def test_branch_gpu_varlen_matches_torch_path_and_oracle(monkeypatch):
     monkeypatch.setattr(M, "_varlen_kernels", lambda d: False)
     with amp:
         pad = _fwd_bwd(model, pack, cm, None)
-    _assert_same(pad, ref)
     with amp:
         orc = _oracle_fwd_bwd(model, items, pack, cm)
-    _assert_same(orc, ref, atol=5e-3)
+    # report every comparison before failing: oracle vs kernels tells a real branch bug from bf16 kernel noise
+    errs = []
+    for args, kw in (((pad, ref), {"label": "torch-branch vs cuda-branch"}),
+                     ((orc, ref), {"label": "oracle vs cuda-branch", "atol": 5e-3}),
+                     ((orc, pad), {"label": "oracle vs torch-branch", "atol": 5e-3})):
+        try:
+            _assert_same(*args, **kw)
+        except AssertionError as e:
+            errs.append(str(e))
+    assert not errs, "\n".join(errs)
