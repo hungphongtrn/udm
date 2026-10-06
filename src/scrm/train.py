@@ -346,11 +346,11 @@ def train(cfg: dict, resume: str | None = None):
     keep_best = int(tcfg.get("keep_best") or 0)
     top = []   # [(value, step)], best first
     if rank == 0 and keep_best and os.path.isdir(out_dir):
-        for d in os.listdir(out_dir):
-            m_ = re.fullmatch(r"best_step_(\d+)", d)
+        for name in os.listdir(out_dir):
+            m_ = re.fullmatch(r"best_step_(\d+)", name)
             if not m_:
                 continue
-            p = os.path.join(out_dir, d)
+            p = os.path.join(out_dir, name)
             st_ = torch.load(os.path.join(p, "trainer_state.pt"), map_location="cpu", weights_only=False)
             if int(m_.group(1)) > step or "value" not in st_:
                 shutil.rmtree(p, ignore_errors=True)
