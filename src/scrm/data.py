@@ -312,17 +312,17 @@ def _eval_candidates(dcfg: dict, split: str, filters: dict, seed: int):
     return files, {s: [tuple(x) for x in rng.permutation(np.concatenate(by_src[s]))] for s in sorted(by_src)}
 
 
-def _read_rows(files: list[str], locs: list[tuple[int, int]]) -> list[dict]:
-    """Rows at (file_idx, row_idx) locations (BASE_COLS + candidate_rows), in the order given; reads only the row
-    groups that contain them."""
+def _read_rows(files: list[str], locs: list[tuple[int, int]], extra_cols=()) -> list[dict]:
+    """Rows at (file_idx, row_idx) locations (BASE_COLS + candidate_rows + the `extra_cols` the file has), in the
+    order given; reads only the row groups that contain them."""
     import pyarrow.parquet as pq
-    cols = BASE_COLS + ["candidate_rows"]
     out: dict[tuple[int, int], dict] = {}
     by_file: dict[int, list[int]] = {}
     for fi, ri in locs:
         by_file.setdefault(int(fi), []).append(int(ri))
     for fi, rows in by_file.items():
         pf = pq.ParquetFile(_open(files[fi]))
+        cols = BASE_COLS + ["candidate_rows"] + [c for c in extra_cols if c in pf.schema_arrow.names]
         starts = np.cumsum([0] + [pf.metadata.row_group(g).num_rows for g in range(pf.num_row_groups)])
         rg = np.searchsorted(starts, rows, side="right") - 1
         for g in np.unique(rg):

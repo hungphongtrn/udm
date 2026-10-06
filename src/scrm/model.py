@@ -98,14 +98,18 @@ class SCRM(nn.Module):
         for j, m in enumerate(layers):
             m.gradient_checkpointing = j not in keep
 
-    def embed(self, pack: dict, max_tokens=None) -> torch.Tensor:
+    def embed(self, pack: dict, max_tokens=None, layers=None):
         """Encode the pack -> [M, d]: last-layer hidden state at the last token of every graded option, in pack row
         order. Runs in contiguous chunks of <= max_tokens encoded tokens (see `row_chunks`: whole sets when
-        branching, single full sequences otherwise; a unit bigger than the budget gets its own chunk)."""
+        branching, single full sequences otherwise; a unit bigger than the budget gets its own chunk).
+        `layers` (feature extraction, branching only): list of layer indices -> {layer: [M, d]} instead of one
+        tensor, see `_branch_encode`."""
         ctx = contextlib.nullcontext() if self.backbone_trainable else torch.no_grad()
         with ctx:
-            return torch.cat([self._embed_rows(pack, rows)
-                              for rows in row_chunks(pack, max_tokens, self.branching)], 0)
+            parts = [self._embed_rows(pack, rows, layers) for rows in row_chunks(pack, max_tokens, self.branching)]
+            if layers is None:
+                return torch.cat(parts, 0)
+            return {l: torch.cat([p[l] for p in parts], 0) for l in parts[0]}
 
     def embed_indices(self, pack: dict, idx) -> torch.Tensor:
         """Hidden states at the last token of exactly the graded rows listed in `idx` (indices into pack row order).
@@ -113,11 +117,13 @@ class SCRM(nn.Module):
         every row of a set is encoded together with that set's prefix (one branch layout per set)."""
         return self._embed_rows(pack, [int(i) for i in idx])
 
-    def _embed_rows(self, pack: dict, rows) -> torch.Tensor:
+    def _embed_rows(self, pack: dict, rows, layers=None):
         if not self.branching:
+            if layers is not None:
+                raise ValueError("layers= needs the branch encoder (model.branching: true)")
             return self._encode_full(*_full_chunk(pack, rows))
         ids, pos, plan, read = _branch_chunk(pack, rows)
-        return self._branch_encode(ids, pos, plan, read)
+        return self._branch_encode(ids, pos, plan, read, layers)
 
     def _encode_full(self, ids: torch.Tensor, pos: torch.Tensor, lens: list) -> torch.Tensor:
         """Stock HF forward over full sequences (concatenated in `ids`, positions restarting at 0) -> hidden state at
@@ -145,19 +151,37 @@ class SCRM(nn.Module):
         h = self.backbone(input_ids=x, attention_mask=am, use_cache=False).last_hidden_state
         return h[torch.arange(len(lens), device=dev), torch.tensor(lens, device=dev) - 1]
 
-    def _branch_encode(self, ids: torch.Tensor, pos: torch.Tensor, plan: BranchPlan, read: torch.Tensor):
+    def _branch_encode(self, ids: torch.Tensor, pos: torch.Tensor, plan: BranchPlan, read: torch.Tensor, layers=None):
         """Run the decoder over one branch layout (prefix segments + their suffix branches) and gather the read-out
         hidden states. Equivalent to encoding each full sequence `prefix + suffix_k` on its own, at a fraction of the
-        prompt tokens."""
+        prompt tokens.
+        `layers=None` -> the last-layer states [len(read), d] (after the final norm). Otherwise a list of layer
+        indices -> {layer: [len(read), d]}: -1 is the last layer exactly as above; l in 1..num_hidden_layers is the
+        residual stream after the l-th decoder layer (HF `hidden_states[l]` convention, l = num_hidden_layers is the
+        last layer before the norm). Intermediate states go through the final `tm.norm` too (per-token RMSNorm, so
+        gathering first is the same), which keeps their scale comparable across layers."""
         tm = _inner_text(self.backbone)
+        n_layers = tm.config.num_hidden_layers
+        want = None
+        if layers is not None:
+            want = [int(l) for l in layers]
+            bad = [l for l in want if l != -1 and not 1 <= l <= n_layers]
+            if bad:
+                raise ValueError(f"layers must be -1 or in 1..{n_layers}, got {bad}")
         h = tm.embed_tokens(ids)[None]
         pid = pos[None]
         pe = tm.rotary_emb(h, pid[None].expand(3, 1, -1))
         ctx = BranchCtx(plan, _branch_backend(ids.device))
-        for layer in tm.layers[: tm.config.num_hidden_layers]:
+        out = {}
+        for i, layer in enumerate(tm.layers[:n_layers], 1):
             h = layer(h, position_embeddings=pe, attention_mask=None, position_ids=pid, past_key_values=None,
                       branch_ctx=ctx)
-        return tm.norm(h)[0].index_select(0, read)
+            if want is not None and i in want:
+                out[i] = tm.norm(h[0].index_select(0, read))
+        if want is None:
+            return tm.norm(h)[0].index_select(0, read)
+        last = tm.norm(h[0].index_select(0, read))
+        return {l: (last if l == -1 else out[l]) for l in want}
 
     def head(self, e: torch.Tensor, pack: dict, candidate_mask: torch.Tensor) -> torch.Tensor:
         """Per-row embeddings [M, d] (graded options, in pack row order) -> rewards [B, N] (0 at padded slots).

@@ -1,0 +1,178 @@
+"""Frozen-backbone feature cache (scrm.features): format, row/permutation mapping, resume, absolute labels."""
+import json
+import os
+
+import numpy as np
+import pytest
+import torch
+
+from scrm import features as F
+from scrm.collator import collate
+from scrm.config import load_config
+from scrm.model import build_scrm
+from scrm.render import Renderer
+from scrm.synth import write_synth
+
+
+@pytest.fixture(scope="module")
+def synth(tmp_path_factory):
+    return write_synth(str(tmp_path_factory.mktemp("synth")))
+
+
+def _cfg(synth, out, *extra):
+    return load_config(None, [f"data.local_dir={synth}", "model.name_or_path=tiny", "model.dtype=float32",
+                              "data.render.max_len=2048", f"features.out_dir={out}", "features.layers=[2,-1]",
+                              "features.shard_size=4", "features.splits=[train,validation]",
+                              "features.max_sets={train: 6, validation: 3}", *extra])
+
+
+def _model(cfg):
+    mcfg = {**cfg["model"], "freeze_backbone": True, "gradient_checkpointing": False, "head": "linear",
+            "lora": {**cfg["model"]["lora"], "enabled": False}}
+    model, tok = build_scrm(mcfg, "cpu")
+    return model.eval(), Renderer(tok, {**cfg["data"]["render"], "max_graded": None, "min_graded": None})
+
+
+def test_extract_end_to_end_format(synth, tmp_path):
+    out = str(tmp_path / "f")
+    man = F.run(_cfg(synth, out))
+    assert json.load(open(os.path.join(out, "manifest.json")))["fingerprint"] == man["fingerprint"]
+    assert man["layers"] == [2, -1] and man["variants"] == 2 and man["hidden_size"] == 64 and man["dtype"] == "bfloat16"
+    assert man["keys"] == ["feat_L2", "feat_Llast"]
+    for split, n in (("train", 6), ("validation", 3)):
+        sp = man["splits"][split]
+        assert sp["complete"] and sp["n_selected"] == n and sp["n_sets"] == n - sp["n_dropped"]
+        assert [s["name"] for s in sp["shards"]] == [f"shard_{i:05d}" for i in range(len(sp["shards"]))]
+        tot = 0
+        for i, s in enumerate(sp["shards"]):
+            tens, tab = F.load_shard(os.path.join(out, split), i)
+            assert set(tens) == {"feat_L2", "feat_Llast"}
+            assert all(t.dtype == torch.bfloat16 and t.shape == (s["n_rows"], 64) for t in tens.values())
+            assert tab.column_names == list(F.SHARD_COLS)
+            rows = tab.to_pylist()
+            assert len(rows) == 2 * s["n_sets"]
+            off = 0
+            for r in rows:
+                assert r["row_offset"] == off and r["split"] == split
+                off += r["n_options"]
+                perm = json.loads(r["perm_json"])
+                assert sorted(perm) == list(range(r["n_options"]))
+                if r["variant"] == 0:
+                    assert perm == list(range(r["n_options"]))
+                assert len(json.loads(r["tiers_json"])) == len(json.loads(r["abs_label_json"])) == r["n_options"]
+                assert min(json.loads(r["tiers_json"])) == 0 and r["truncated"] is False
+            assert off == s["n_rows"]
+            tot += s["n_rows"]
+        assert tot == sp["n_rows"]
+
+
+def test_rows_match_embed_through_perm(synth, tmp_path):
+    out = str(tmp_path / "f")
+    cfg = _cfg(synth, out, "features.variants=3")
+    man = F.run(cfg)
+    model, renderer = _model(cfg)
+    from scrm.data import _read_rows
+    files, locs = F.select_locations(cfg["data"], "train", cfg["data"]["filters"], 6, 0)
+    rows = {r["decision_set_id"]: r for r in _read_rows(files, [tuple(x) for x in locs[:4]], F.EXTRA_COLS)}
+    tens, tab = F.load_shard(os.path.join(out, "train"), 0)
+    checked = 0
+    for rec in tab.to_pylist():
+        meta, items, perms = F._set_jobs(renderer, rows[rec["decision_set_id"]], 3, cfg["features"]["seed"])
+        it, perm = items[rec["variant"]], perms[rec["variant"]]
+        assert json.loads(rec["perm_json"]) == perm
+        assert rec["tiers_json"] == json.dumps(meta["tiers"])
+        with torch.no_grad():
+            e = model.embed(collate([it], renderer.pad_id)["pack"])    # presentation order
+        o = rec["row_offset"]
+        for p, c in enumerate(perm):                                   # position p shows canonical option c
+            assert torch.allclose(tens["feat_Llast"][o + c].float(), e[p], rtol=2e-2, atol=2e-2)
+        checked += 1
+    assert checked > 0
+    assert man["splits"]["train"]["n_sets"] >= 1
+    # variants >= 1 really reorder at least one set with >= 3 options
+    assert any(json.loads(r["perm_json"]) != sorted(json.loads(r["perm_json"])) for r in tab.to_pylist() if r["variant"] > 0)
+
+
+def test_embed_layers_api(synth):
+    model, renderer = _model(_cfg(synth, "unused"))
+    from test_scrm_model import _sets
+    pack, _ = _sets([3, 2], P=9, seed=2)
+    with torch.no_grad():
+        base = model.embed(pack)
+        d = model.embed(pack, layers=[2, 4, -1])
+        d2 = model.embed(pack, max_tokens=1, layers=[-1])      # chunked per set
+    n_layers = model.backbone.config.num_hidden_layers
+    assert n_layers == 4 and list(d) == [2, 4, -1]
+    assert torch.equal(d[-1], base) and torch.equal(d[4], base)   # layer 4 + final norm == last layer
+    assert torch.allclose(d2[-1], base, atol=1e-5)
+    assert not torch.allclose(d[2], base) and d[2].shape == base.shape
+    with pytest.raises(ValueError):
+        model.embed(pack, layers=[0])
+    with pytest.raises(ValueError):
+        model.embed(pack, layers=[n_layers + 1])
+
+
+def test_resume_skips_completed_shards(synth, tmp_path, monkeypatch):
+    out = str(tmp_path / "f")
+    cfg = _cfg(synth, out, "features.shard_size=2", "features.splits=[train]")
+    F.run(cfg)
+    d = os.path.join(out, "train")
+    files = sorted(f for f in os.listdir(d))
+    assert files == [f"shard_{i:05d}.{e}" for i in range(3) for e in ("parquet", "safetensors")]
+    stamp = {f: os.stat(os.path.join(d, f)).st_mtime_ns for f in files}
+    # forget the last shard (as after a crash before the manifest update) and re-run
+    man = json.load(open(os.path.join(out, "manifest.json")))
+    man["splits"]["train"]["shards"] = [s for s in man["splits"]["train"]["shards"] if s["name"] != "shard_00002"]
+    man["splits"]["train"]["complete"] = False
+    json.dump(man, open(os.path.join(out, "manifest.json"), "w"))
+    calls = []
+    real = F.extract_rows
+    monkeypatch.setattr(F, "extract_rows", lambda *a, **k: calls.append(1) or real(*a, **k))
+    man2 = F.run(cfg)
+    assert len(calls) == 1 and man2["splits"]["train"]["complete"]
+    assert len(man2["splits"]["train"]["shards"]) == 3
+    new = {f: os.stat(os.path.join(d, f)).st_mtime_ns for f in files}
+    assert all(new[f] == stamp[f] for f in files if not f.startswith("shard_00002"))
+    assert not [f for f in os.listdir(d) if f.endswith(".tmp")]
+    calls.clear()
+    F.run(cfg)
+    assert calls == []                                              # everything complete: nothing to do
+
+
+def test_config_change_needs_new_out_dir(synth, tmp_path):
+    out = str(tmp_path / "f")
+    F.run(_cfg(synth, out, "features.splits=[validation]"))
+    with pytest.raises(SystemExit):
+        F.run(_cfg(synth, out, "features.splits=[validation]", "features.variants=3"))
+
+
+def test_candidate_cap_is_recorded(synth, tmp_path):
+    out = str(tmp_path / "f")
+    cfg = _cfg(synth, out, "data.render.max_candidates=4", "features.splits=[train]", "features.max_sets={train: 3}")
+    F.run(cfg)
+    _, tab = F.load_shard(os.path.join(out, "train"), 0)
+    rows = tab.to_pylist()
+    assert all(r["n_options"] <= 4 for r in rows) and any(r["truncated"] for r in rows)       # massive: 8 options
+
+
+def _abs(kind, tiers, ids=None, **kw):
+    return F.absolute_labels({"label_kind": kind, "tiers": tiers, "choice_ids": ids or [f"c{i}" for i in range(len(tiers))], **kw})
+
+
+def test_absolute_labels_rules():
+    assert _abs("source_dataset_label", [1, 0, 1]) == [0.0, 1.0, 0.0]
+    assert _abs("source_dataset_label", [0, 0, 1]) == [1.0, 1.0, 0.0]
+    # noul: the option's own probability
+    assert _abs("independent_labels_binary_tiers", [1, 0], ["no", "yes"], probabilities=[0.2, 0.8]) == [0.2, 0.8]
+    assert _abs("independent_labels_binary_tiers", [0, 1], ["no", "yes"], probabilities={"yes": 0.3, "no": 0.7}) == [0.7, 0.3]
+    assert _abs("independent_labels_binary_tiers", [1, 0], probabilities=None) == [None, None]
+    # agent_choice: first target 1.0, co-targets excluded, rest 0.0
+    sl = {"ordered_target_candidate_ids": ["c2", "c0"]}
+    assert _abs("agent_choice_target", [1, 1, 0, 1], source_label=sl) == [None, 0.0, 1.0, 0.0]
+    assert _abs("agent_choice_target", [1, 0, 1], source_label={"ordered_target_candidate_ids": []}) == [0.0, 1.0, 0.0]
+    assert _abs("agent_choice_target", [1, 0, 1]) == [0.0, 1.0, 0.0]
+    assert _abs("agent_choice_target", [1, 0, 1], source_label={"ordered_target_candidate_ids": ["zzz"]}) == [0.0, 1.0, 0.0]
+    # no absolute meaning
+    assert _abs("ordinal_score_distance_tiers", [0, 1, 2]) == [None] * 3
+    assert _abs("soft_choice_distribution", [0, 1]) == [None] * 2
+    assert _abs("something_new", [0, 1]) == [None] * 2

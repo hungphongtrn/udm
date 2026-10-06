@@ -95,6 +95,15 @@ DEFAULTS: dict[str, Any] = {
         "keep_best": 0,                     # also keep the top-k evals by best_metric as best_step_N (weights only; 0 = off)
         "eval_at_start": True,
     },
+    # frozen-backbone feature cache (scrm.features): one backbone pass, per-option features for head experiments.
+    # layers: 1..num_hidden_layers = residual stream after that decoder layer (then the final norm), -1 = last layer.
+    # max_sets: rows drawn per split (sources interleaved; rows that do not render are dropped), null = every row.
+    "features": {
+        "out_dir": "outputs/features", "layers": [-1], "variants": 2, "seed": 0, "shard_size": 512,
+        "splits": ["train", "validation", "test"],
+        "max_sets": {"train": None, "validation": None, "test": None},
+        "max_tokens": 16384, "max_batch_size": 32, "overwrite": False,
+    },
     # test-only evaluations at every save step (and at the end); never used for checkpoint selection
     "benchmarks": {
         "test_split": "test",              # held-out split, same filters / row caps as validation (null = off)
