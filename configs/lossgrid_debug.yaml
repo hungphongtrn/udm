@@ -1,0 +1,9 @@
+# Tiny CPU run: python -m scrm.lossgrid --config configs/lossgrid_debug.yaml cache_dir=<tiny cache> output_dir=/tmp/lg
+cache_dir: outputs/feat_cache_debug
+output_dir: outputs/lossgrid_debug
+workers: 1
+data: {layer: 16, train_split: train, val_split: validation, test_splits: [test]}
+model: {head: linear}
+train: {steps: 2, batch_size: 8, eval_batch_size: 16, warmup_steps: 1, device: cpu, log_every: 1}
+grid: {terms: [ce, brier, bt, sigmoid], lr: [3.0e-4, 1.0e-3], weight: [1.0], seeds: [0, 1]}
+wandb: {enabled: false}

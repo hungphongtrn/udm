@@ -2,9 +2,11 @@
 accumulation window (examples with no pair are masked out)."""
 from __future__ import annotations
 
+import math
 from typing import NamedTuple
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 
@@ -99,3 +101,96 @@ def reduce_loss(lo: LossOut, denom: float | None = None) -> torch.Tensor:
     """Sum of per-example losses over valid examples / denom (default: number of valid examples)."""
     s = (lo.per_example * lo.valid).sum()
     return s / (denom if denom is not None else lo.valid.sum().clamp(min=1))
+
+
+# --------------------------------------------------------------------------------------------------------------------
+# Readout losses for frozen-feature experiments (scrm.feat_train / scrm.lossgrid). Each readout has its OWN learnable
+# scale: softmax temperature T (ce, brier), BT temperature tau, sigmoid slope alpha + bias. All return PER EXAMPLE [B].
+# --------------------------------------------------------------------------------------------------------------------
+
+def _masked_softmax_inputs(rewards, valid, scale):
+    """rewards / scale with padding at -inf (rows with no valid slot stay finite)."""
+    return (rewards / scale).masked_fill(~(valid | ~valid.any(1, keepdim=True)), float("-inf"))
+
+
+def target_distribution(tiers: torch.Tensor, probs: torch.Tensor | None = None,
+                        has_probs: torch.Tensor | None = None) -> torch.Tensor:
+    """Target over the set [B,N]: the given `probabilities` (renormalised over valid slots) where has_probs, else uniform
+    over the best tier (tier-0 = lowest tier present). Padding (-1) gets 0."""
+    valid = tiers >= 0
+    tmin = tiers.masked_fill(~valid, 10**9).min(1, keepdim=True).values
+    top = (valid & (tiers == tmin)).float()
+    q = top / top.sum(1, keepdim=True).clamp(min=1)
+    if probs is not None and has_probs is not None:
+        p = probs.float().masked_fill(~valid, 0.0).clamp(min=0)
+        p = p / p.sum(1, keepdim=True).clamp(min=1e-12)
+        q = torch.where(has_probs.unsqueeze(1) & (p.sum(1, keepdim=True) > 0), p, q)
+    return q
+
+
+def softmax_ce_loss(rewards, tiers, temperature=1.0, probs=None, has_probs=None):
+    """Cross-entropy of softmax(s/T) against the target distribution (soft `probabilities` if present, else uniform
+    over tier-0; with a single tier-0 item this equals listwise_loss at T=1)."""
+    valid = tiers >= 0
+    q = target_distribution(tiers, probs, has_probs)
+    logp = torch.log_softmax(_masked_softmax_inputs(rewards, valid, temperature), dim=-1).masked_fill(~valid, 0.0)
+    return -(q * logp).sum(1)
+
+
+def brier_loss(rewards, tiers, temperature=1.0, probs=None, has_probs=None):
+    """Brier score sum_i (softmax(s/T)_i - q_i)^2 against the same target distribution as softmax_ce_loss."""
+    valid = tiers >= 0
+    q = target_distribution(tiers, probs, has_probs)
+    p = torch.softmax(_masked_softmax_inputs(rewards, valid, temperature), dim=-1).masked_fill(~valid, 0.0)
+    return ((p - q) ** 2).sum(1)
+
+
+def sigmoid_loss(rewards, abs_labels, abs_mask, alpha, bias):
+    """SigLIP-style 'score each option': BCE(sigmoid(alpha * s + b), label) with soft labels in [0,1], averaged over the
+    options where abs_mask is set. bias: scalar or [B] (per-family). Returns (per_example [B], n_labelled [B])."""
+    bias = torch.as_tensor(bias, dtype=rewards.dtype, device=rewards.device)
+    if bias.dim() == 1:
+        bias = bias.unsqueeze(1)
+    logits = alpha * rewards + bias
+    l = F.binary_cross_entropy_with_logits(logits, abs_labels.float().clamp(0, 1).nan_to_num(0.0), reduction="none")
+    m = abs_mask.float()
+    n = m.sum(1)
+    return (l * m).sum(1) / n.clamp(min=1), n
+
+
+class Readouts(nn.Module):
+    """Learnable scalars of the readouts, one set per loss so each is calibrated independently:
+    softmax temperatures T_ce / T_brier, BT temperature tau_bt, sigmoid alpha (= exp(log_alpha), clamped to
+    <= max_alpha like CLIP's logit_scale) and bias b. Bias init is SigLIP-like -log(n_neg / n_pos) with n_neg/n_pos
+    ~ avg_set_size - 1 unless `bias_init` is given; `n_families > 1` gives one bias per family (index passed to
+    `bias_for`)."""
+
+    def __init__(self, avg_set_size: float = 4.0, n_families: int = 1, ce_temperature: float = 1.0,
+                 brier_temperature: float = 1.0, bt_tau: float = 1.0, alpha_init: float = 1.0,
+                 bias_init: float | None = None, max_alpha: float = 100.0, learnable: bool = True):
+        super().__init__()
+        self.max_log_alpha = math.log(max_alpha)
+        self.log_T_ce = nn.Parameter(torch.tensor(math.log(ce_temperature)), requires_grad=learnable)
+        self.log_T_brier = nn.Parameter(torch.tensor(math.log(brier_temperature)), requires_grad=learnable)
+        self.log_tau_bt = nn.Parameter(torch.tensor(math.log(bt_tau)), requires_grad=learnable)
+        self.log_alpha = nn.Parameter(torch.tensor(math.log(alpha_init)), requires_grad=learnable)
+        b0 = -math.log(max(avg_set_size - 1.0, 1.0)) if bias_init is None else float(bias_init)
+        self.bias = nn.Parameter(torch.full((max(1, n_families),), b0), requires_grad=learnable)
+
+    def alpha(self) -> torch.Tensor:
+        return self.log_alpha.clamp(max=self.max_log_alpha).exp()
+
+    def T_ce(self): return self.log_T_ce.exp()
+    def T_brier(self): return self.log_T_brier.exp()
+    def tau_bt(self): return self.log_tau_bt.exp()
+
+    def bias_for(self, fam_idx: torch.Tensor | None = None) -> torch.Tensor:
+        """[B] bias per set (family index), or the scalar bias when there is a single one."""
+        if self.bias.numel() == 1 or fam_idx is None:
+            return self.bias[0]
+        return self.bias[fam_idx]
+
+    @torch.no_grad()
+    def values(self) -> dict:
+        return {"T_ce": float(self.T_ce()), "T_brier": float(self.T_brier()), "tau_bt": float(self.tau_bt()),
+                "alpha": float(self.alpha()), "bias": [float(b) for b in self.bias]}
