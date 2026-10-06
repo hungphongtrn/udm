@@ -341,6 +341,23 @@ def train(cfg: dict, resume: str | None = None):
             if rank == 0:
                 print(f"[scrm] resumed from {resume} at step {step}", flush=True)
 
+    # train.keep_best > 0: also keep the top-k validation checkpoints as best_step_N (weights only), k best by
+    # train.best_metric; `best` stays the top-1 (resumable). Rebuilt from disk; ranks from after the resume step are redone.
+    keep_best = int(tcfg.get("keep_best") or 0)
+    top = []   # [(value, step)], best first
+    if rank == 0 and keep_best and os.path.isdir(out_dir):
+        for d in os.listdir(out_dir):
+            m_ = re.fullmatch(r"best_step_(\d+)", d)
+            if not m_:
+                continue
+            p = os.path.join(out_dir, d)
+            st_ = torch.load(os.path.join(p, "trainer_state.pt"), map_location="cpu", weights_only=False)
+            if int(m_.group(1)) > step or "value" not in st_:
+                shutil.rmtree(p, ignore_errors=True)
+            else:
+                top.append((float(st_["value"]), int(m_.group(1))))
+        top.sort(key=lambda t: (sign * t[0], t[1]))
+
     use_perm = lcfg.get("w_perm", 0.0) > 0
     loader, stream = make_train_loader(cfg, renderer, cfg["seed"] + step, keep_items=use_perm, world=world, rank=rank)
     it = iter(loader)
@@ -358,13 +375,22 @@ def train(cfg: dict, resume: str | None = None):
         wb.log({k: v for k, v in data.items() if v is not None}, s)
 
     def consider_best(value, s):
-        """Save `best` when `value` (of train.best_metric) improves on it; else count a bad eval."""
-        nonlocal best, bad_evals
+        """Save `best` when `value` (of train.best_metric) improves on it; else count a bad eval. Keep the top
+        `keep_best` evals as best_step_N."""
+        nonlocal best, bad_evals, top
         if math.isfinite(value) and sign * value < sign * best - tcfg["early_stop_min_delta"]:
             best, bad_evals = value, 0
             save_ckpt(model, opt, sched, s, cfg, out_dir, meta(), name="best", hub=hub)   # with optimizer: `best` is resumable
         else:
             bad_evals += 1
+        if keep_best and math.isfinite(value) and (len(top) < keep_best or sign * value < sign * top[-1][0]):
+            top = sorted(top + [(value, s)], key=lambda t: (sign * t[0], t[1]))
+            for _, old in top[keep_best:]:
+                shutil.rmtree(os.path.join(out_dir, f"best_step_{old:07d}"), ignore_errors=True)
+            top = top[:keep_best]
+            save_ckpt(model, opt, sched, s, cfg, out_dir, {**meta(), "value": value}, name=f"best_step_{s:07d}",
+                      with_opt=False)
+            print(f"[scrm] top-{keep_best} {metric}: " + ", ".join(f"step {t} = {v:.4f}" for v, t in top), flush=True)
 
     def stop_now() -> bool:
         pat = tcfg["early_stop_patience"]

@@ -87,6 +87,7 @@ DEFAULTS: dict[str, Any] = {
         "grad_cache_act_tokens": None,
         "ddp_timeout_min": 240,             # process-group timeout (min) under torchrun; rank 0 alone runs eval/dindex
         "log_every": 10, "eval_every": 500, "hist_every": 500, "save_every": 500, "keep_last": 3,
+        "keep_best": 0,                     # also keep the top-k evals by best_metric as best_step_N (weights only; 0 = off)
         "eval_at_start": True,
     },
     # test-only evaluations at every save step (and at the end); never used for checkpoint selection

@@ -22,11 +22,14 @@ train:
   warmup_steps: 300
   best_metric: val_index              # `best` = highest validation index; Decision Index is test-only
   early_stop_patience: 3              # 3 evals (eval_every 1000) without improvement
+  eval_every: 1000                    # validation -> best / best_step_N / early stop
+  save_every: 1000                    # step_N (resumable, keep_last 3) + test split + Decision Index
+  keep_best: 3                        # top-3 validation checkpoints kept as best_step_N
   grad_cache: true
   grad_cache_chunk_tokens: 8192
   grad_cache_act_tokens: null
   grad_accum: 1
 benchmarks:
   decision_index: {enabled: true, suite_dir: ../decision-index/suite-0.2, rows: ../decision-index/sample-1000.jsonl.gz,
-                   max_len: 16384, max_tokens: 16384, every: 1000}
+                   max_len: 16384, max_tokens: 16384, every: 1000}   # runs at save steps divisible by `every`
 wandb: {enabled: true, project: scrm, tags: [qwen3.5-4b, 3090, peek]}

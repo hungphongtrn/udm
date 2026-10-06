@@ -287,8 +287,9 @@ log line `[eval] set:` shows sets per source and dropped draws. Canonical candid
 
 Checkpoint selection (`best/`) and early stopping run on validation at every eval, `train.best_metric`: `val_index`
 (default, max `eval/index`) or `val_loss` (min `eval/loss`); `early_stop_patience` counts evals. A checkpoint resumes only
-under the `best_metric` it was trained with. At save steps (and at the end) two test-only evaluations are logged, never
-used for selection:
+under the `best_metric` it was trained with. `train.keep_best: k` (> 0) also keeps the top-k evals as `best_step_N`
+(weights only; `best` stays the resumable top-1). At save steps (and at the end) two test-only evaluations are logged,
+never used for selection:
 
 * `test/*`: the same metrics on `benchmarks.test_split` (default `test`, same filters and row caps as validation), incl.
   `test/index`, `test/raw_index`.
