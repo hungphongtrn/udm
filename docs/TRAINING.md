@@ -313,5 +313,9 @@ never used for selection:
 * `configs/peek_qwen3_5_4b_h200.yaml`: `model.head=linear` (Peek: shared `nn.Linear(hidden, 1)`, no set block) with the
   v2 H200 recipe minus the listwise softmax (BT only) — a one-variable-group comparison against
   `configs/scrm_qwen3_5_4b_h200.yaml` (v2).
+* `model.branching` (default `true`): shared-prefix branch encoding (one prompt prefill per set, custom attention /
+  Gated DeltaNet layout). `false` encodes every graded option as its own full sequence through the stock HF forward
+  (the reference path; batch/chunk token costs count the prompt once per graded option).
+  `configs/peek_qwen3_5_4b_3090.yaml` uses `false`.
 * Loss variants: `loss.w_listwise=1 loss.w_bt=0`, `loss.margin_alpha=0.5`, `loss.w_plackett_luce=...`.
 * Other: `model.d_set`, `model.lora.r`, `data.render.max_candidates`, MASSIVE cap/weights.

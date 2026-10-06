@@ -138,7 +138,9 @@ DEFAULT_RENDER = {"max_len": 8192, "max_candidates": 64,
                   # None = grade every shown option. Subsampling keeps tier-0 + one per other tier.
                   # min_graded (training only, needs max_graded): grade k ~ U{min_graded..max_graded} options per
                   # set instead of a fixed cap, so the set encoder sees varied set sizes.
-                  "max_graded": None, "min_graded": None, "eval_max_graded": None}
+                  "max_graded": None, "min_graded": None, "eval_max_graded": None,
+                  # mirror of model.branching (set by load_config): selects Item.n_tokens, the batching cost
+                  "branching": True}
 
 _SENTINEL = "@@SCRM_BODY@@"
 
@@ -182,6 +184,7 @@ class Item:
     tok: TokExample = field(repr=False, default=None)
     kept: list = field(default_factory=list)     # shown candidates (tokex indices, sorted)
     graded: list = field(default_factory=list)   # graded candidates (tokex indices, sorted)
+    branching: bool = True                       # model.branching: the prefix is encoded once per set
 
     @property
     def seqs(self) -> list:
@@ -190,8 +193,10 @@ class Item:
 
     @property
     def n_tokens(self) -> int:
-        """Packed token cost: the shared prefix is encoded ONCE and every graded option adds only its suffix branch."""
-        return len(self.prefix) + sum(len(x) for x in self.suffixes)
+        """Encoded token cost. Branching: the shared prefix is encoded ONCE and every graded option adds only its
+        suffix branch. Otherwise every graded option is a full sequence prefix + suffix."""
+        n_pre = 1 if self.branching else len(self.suffixes)
+        return n_pre * len(self.prefix) + sum(len(x) for x in self.suffixes)
 
 
 def subsample_indices(tiers: np.ndarray, max_n: int, rng: np.random.Generator) -> np.ndarray:
@@ -328,6 +333,7 @@ class Renderer:
                   t.ex.source_id, t.ex.decision_set_id, tok=t)
         it.kept = kept_final
         it.graded = sorted(graded)
+        it.branching = bool(c.get("branching", True))
         return it
 
     def reshuffle(self, item: Item, rng: np.random.Generator) -> Item:

@@ -56,6 +56,7 @@ class SCRM(nn.Module):
         self.cfg = cfg
         self.backbone_trainable = backbone_trainable
         self.d_hidden = hidden
+        self.branching = bool(cfg.get("branching", True))
         self.head_kind = cfg.get("head", "set")
         if self.head_kind == "linear":
             # Per-candidate reward from its own embedding only (no cross-candidate interaction in the head).
@@ -98,22 +99,51 @@ class SCRM(nn.Module):
             m.gradient_checkpointing = j not in keep
 
     def embed(self, pack: dict, max_tokens=None) -> torch.Tensor:
-        """Branch-encode the pack -> [M, d]: last-layer hidden state at the last token of every graded suffix, in pack
-        row order. Sets run in contiguous chunks of <= max_tokens tokens (a set costs len(prefix) + sum(suffix): its
-        prefix is encoded once and shared by all of its branches; a set bigger than the budget gets its own chunk)."""
+        """Encode the pack -> [M, d]: last-layer hidden state at the last token of every graded option, in pack row
+        order. Runs in contiguous chunks of <= max_tokens encoded tokens (see `row_chunks`: whole sets when
+        branching, single full sequences otherwise; a unit bigger than the budget gets its own chunk)."""
         ctx = contextlib.nullcontext() if self.backbone_trainable else torch.no_grad()
         with ctx:
-            return torch.cat([self._embed_rows(pack, rows) for rows in row_chunks(pack, max_tokens)], 0)
+            return torch.cat([self._embed_rows(pack, rows)
+                              for rows in row_chunks(pack, max_tokens, self.branching)], 0)
 
     def embed_indices(self, pack: dict, idx) -> torch.Tensor:
         """Hidden states at the last token of exactly the graded rows listed in `idx` (indices into pack row order).
-        Same layout as `embed`'s output rows: `[len(idx), d]` in the order of `idx` (idx is used as given). Every row
-        of a set is encoded together with that set's prefix (one branch layout per set)."""
+        Same layout as `embed`'s output rows: `[len(idx), d]` in the order of `idx` (idx is used as given). Branching:
+        every row of a set is encoded together with that set's prefix (one branch layout per set)."""
         return self._embed_rows(pack, [int(i) for i in idx])
 
     def _embed_rows(self, pack: dict, rows) -> torch.Tensor:
+        if not self.branching:
+            return self._encode_full(*_full_chunk(pack, rows))
         ids, pos, plan, read = _branch_chunk(pack, rows)
         return self._branch_encode(ids, pos, plan, read)
+
+    def _encode_full(self, ids: torch.Tensor, pos: torch.Tensor, lens: list) -> torch.Tensor:
+        """Stock HF forward over full sequences (concatenated in `ids`, positions restarting at 0) -> hidden state at
+        the last token of each. CUDA varlen kernels + flash_attention_2: one padding-free row (block-diagonal
+        attention + per-sequence Gated DeltaNet conv / scan via cu_seqlens / seq_idx; sdpa/eager would ignore the
+        boundaries). Otherwise: a right-padded batch."""
+        dev = ids.device
+        if _varlen_kernels(dev) and getattr(self.backbone.config, "_attn_implementation", None) == "flash_attention_2":
+            L = torch.tensor(lens, device=dev)
+            cu = torch.zeros(len(lens) + 1, dtype=torch.int32, device=dev)
+            cu[1:] = L.cumsum(0)
+            seq_idx = torch.repeat_interleave(torch.arange(len(lens), device=dev, dtype=torch.int32), L)[None]
+            h = self.backbone(input_ids=ids[None], position_ids=pos[None], cu_seq_lens_q=cu, cu_seq_lens_k=cu,
+                              max_length_q=max(lens), max_length_k=max(lens), seq_idx=seq_idx,
+                              use_cache=False).last_hidden_state[0]
+            return h[cu[1:].long() - 1]
+        S = max(lens)
+        x = ids.new_zeros(len(lens), S)
+        am = ids.new_zeros(len(lens), S)
+        t = 0
+        for k, n in enumerate(lens):
+            x[k, :n] = ids[t:t + n]
+            am[k, :n] = 1
+            t += n
+        h = self.backbone(input_ids=x, attention_mask=am, use_cache=False).last_hidden_state
+        return h[torch.arange(len(lens), device=dev), torch.tensor(lens, device=dev) - 1]
 
     def _branch_encode(self, ids: torch.Tensor, pos: torch.Tensor, plan: BranchPlan, read: torch.Tensor):
         """Run the decoder over one branch layout (prefix segments + their suffix branches) and gather the read-out
@@ -362,6 +392,22 @@ def _branch_chunk(pack: dict, rows) -> tuple[torch.Tensor, torch.Tensor, BranchP
     read = torch.as_tensor([plan.seg_start[segs.index(row_seg[r])] + seg_lens[row_seg[r]] - 1 for r in rows],
                            device=ids.device)
     return ids, pos, plan, read
+
+
+def _full_chunk(pack: dict, rows) -> tuple[torch.Tensor, torch.Tensor, list]:
+    """(input_ids, position_ids, lengths) of the full sequences `prefix + suffix` of `rows` (in the given order),
+    concatenated; positions restart at 0 per sequence (the pack's own position ids for both segments)."""
+    seg_prefix, row_seg = pack["seg_prefix"].tolist(), pack["row_seg"].tolist()
+    seg_lens = [int(x) for x in pack["seg_lens"]]
+    start, off = [], 0
+    for n in seg_lens:
+        start.append(off)
+        off += n
+    spans = [(start[s], start[s] + seg_lens[s]) for r in rows for s in (seg_prefix[row_seg[r]], row_seg[r])]
+    ids = torch.cat([pack["input_ids"][a:b] for a, b in spans])
+    pos = torch.cat([pack["position_ids"][a:b] for a, b in spans])
+    lens = [seg_lens[seg_prefix[row_seg[r]]] + seg_lens[row_seg[r]] for r in rows]
+    return ids, pos, lens
 
 
 def _branch_backend(device: torch.device) -> bool:

@@ -66,9 +66,10 @@ def balance_plan(lens, owner, world: int) -> list[list[int]]:
     return [sorted(x) for x in out]
 
 
-def _pool(packs, world: int, rank: int):
+def _pool(packs, world: int, rank: int, branching: bool = True):
     """All ranks' packs merged into one virtual branch pack (global order: pack, rank, set), the owner rank of every
-    pool set, and this rank's [start, end) graded-row range of each of its packs."""
+    pool unit (a set when branching, else a graded row; see collator.set_rows), and this rank's [start, end)
+    graded-row range of each of its packs."""
     ids, pos, reads, sets, pref, rseg, set_owner, own = [], [], [], [], [], [], [], []
     seg_off = tok_off = row_off = 0
     for pack, _ in packs:
@@ -86,7 +87,8 @@ def _pool(packs, world: int, rank: int):
             sets += sl.tolist()
             pref += (sp + seg_off).tolist()
             rseg += (rs + seg_off).tolist()
-            set_owner += [r] * int((sp == torch.arange(len(sp), device=dev)).sum())   # one prefix per set
+            set_owner += [r] * (int((sp == torch.arange(len(sp), device=dev)).sum()) if branching   # one prefix/set
+                                else len(rs))
             seg_off += len(sl)
             tok_off += int(sl.sum())
             row_off += len(rs)
@@ -109,9 +111,10 @@ def grad_cache_step(model, packs, chunk_tokens: int | None, *, amp_ctx, head_los
     """
     device = packs[0][0]["input_ids"].device
     world, rank = _world()
-    pool, set_owner, own = _pool(packs, world, rank)
-    sets, cost = set_rows(pool)
-    # a chunk is a group of whole sets (its prefix is shared by the set's branches), balanced across ranks
+    pool, set_owner, own = _pool(packs, world, rank, model.branching)
+    sets, cost = set_rows(pool, model.branching)
+    # a chunk is a group of whole units (branching: sets, whose prefix is shared by their branches; else single
+    # full sequences), balanced across ranks
     mine = balance_plan(cost, set_owner, world)[rank] if world > 1 else list(range(len(sets)))
     plan = [([mine[j] for j in c], [r for j in c for r in sets[mine[j]]])
             for c in chunk_plan([cost[i] for i in mine], chunk_tokens)] if mine else []

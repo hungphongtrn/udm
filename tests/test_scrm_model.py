@@ -128,6 +128,18 @@ def test_chunked_encoding_matches_single_chunk_forward_and_grad():
     _assert_same(_fwd_bwd(model, pack, cm, None), _fwd_bwd(model, pack, cm, 90))
 
 
+def test_no_branching_matches_full_sequence_oracle():
+    """model.branching=false: every graded option encoded as its own `prefix + suffix` sequence, in token-budgeted
+    chunks of whole sequences, gives the per-option oracle's rewards and grads."""
+    from scrm.collator import collate
+    model, _ = build_scrm(dict(TINY, set_dropout=0.0, branching=False), "cpu")
+    model.train()
+    items = _items([4, 2], P=37)
+    b = collate(items)
+    pack, cm = b["pack"], b["candidate_mask"]
+    _assert_same(_oracle_fwd_bwd(model, items, pack, cm), _fwd_bwd(model, pack, cm, 90), label="no-branching")
+
+
 def test_frozen_backbone_has_no_backbone_grads():
     cfg = dict(TINY, freeze_backbone=True)
     model, tok = build_scrm(cfg, "cpu")

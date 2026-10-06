@@ -9,10 +9,11 @@ def collate(items, pad_id: int = 0) -> dict:
     """Items (decision sets) -> one padding-free pack of branch segments.
 
     Each set contributes ONE shared prefix segment (state, instruction, all options, "Grade this choice: ") and one
-    suffix segment per graded option ("Option k: {text}" + end of user turn + assistant header). The prefix is encoded
-    once and every suffix branch continues it (see scrm.model): the pack is, in set order,
-    [prefix, suffix_0, ..., suffix_{n-1}], with position ids 0..P-1 for the prefix and P..P+s_k-1 for suffix k — the
-    exact positions the full sequence `prefix + suffix_k` would see. Token cost per set is P + sum(suffix lengths).
+    suffix segment per graded option ("Option k: {text}" + end of user turn + assistant header). The pack is, in set
+    order, [prefix, suffix_0, ..., suffix_{n-1}], with position ids 0..P-1 for the prefix and P..P+s_k-1 for suffix k
+    — the exact positions the full sequence `prefix + suffix_k` would see. With model.branching the prefix is encoded
+    once and every suffix branch continues it (see scrm.model); otherwise the model rebuilds each full sequence
+    `prefix + suffix_k` from the pack. `n_tokens` = sum of the items' encoded costs (Item.n_tokens).
 
     pack = {input_ids [T], position_ids [T], seg_lens (list[int], one per segment, prefix + suffixes),
             seg_prefix [S] (index of the set's prefix segment; a prefix segment points at itself),
@@ -65,18 +66,21 @@ def collate(items, pad_id: int = 0) -> dict:
         tiers[b, :n] = torch.from_numpy(it.tiers)
     from .losses import tier_pair_mask
     return {"pack": pack, "candidate_mask": cmask, "tiers": tiers, "pair_mask": tier_pair_mask(tiers),
-            "n_tokens": t, "pad_id": pad_id,
+            "n_tokens": sum(it.n_tokens for it in items), "pad_id": pad_id,
             "family": [i.family for i in items], "source_id": [i.source_id for i in items],
             "decision_set_id": [i.decision_set_id for i in items], "choice_ids": [i.choice_ids for i in items],
             "items": items}
 
 
-def set_rows(pack: dict) -> tuple[list[list[int]], list[int]]:
-    """(graded rows of each set, packed token cost of each set) in pack order. A set costs len(prefix) +
-    sum(len(suffix)) because the prefix is encoded once and shared by all of its branches."""
+def set_rows(pack: dict, branching: bool = True) -> tuple[list[list[int]], list[int]]:
+    """(graded rows of each encoding unit, encoded token cost of each unit) in pack order. Branching: a unit is a
+    whole set costing len(prefix) + sum(len(suffix)), because the prefix is encoded once and shared by all of its
+    branches. Otherwise every graded row is its own unit (a full sequence) costing len(prefix) + len(suffix)."""
     seg_prefix = pack["seg_prefix"].tolist()
     row_seg = pack["row_seg"].tolist()
     seg_lens = [int(x) for x in pack["seg_lens"]]
+    if not branching:
+        return [[r] for r in range(len(row_seg))], [seg_lens[seg_prefix[sg]] + seg_lens[sg] for sg in row_seg]
     order, rows, cost = [], {}, {}
     for r, sg in enumerate(row_seg):
         p = seg_prefix[sg]
@@ -88,12 +92,12 @@ def set_rows(pack: dict) -> tuple[list[list[int]], list[int]]:
     return [rows[p] for p in order], [cost[p] for p in order]
 
 
-def row_chunks(pack: dict, max_tokens: int | None = None) -> list[list[int]]:
-    """Graded rows of the pack grouped into chunks of whole sets whose packed cost sums to <= max_tokens (a set
-    bigger than the budget gets a chunk of its own). Chunks keep ascending row order, so a budget >= all tokens
-    yields exactly one chunk with every row in pack order (== `embed_indices` on all rows)."""
+def row_chunks(pack: dict, max_tokens: int | None = None, branching: bool = True) -> list[list[int]]:
+    """Graded rows of the pack grouped into chunks of whole units (see `set_rows`) whose encoded cost sums to
+    <= max_tokens (a unit bigger than the budget gets a chunk of its own). Chunks keep ascending row order, so a
+    budget >= all tokens yields exactly one chunk with every row in pack order (== `embed_indices` on all rows)."""
     from .packing import chunk_plan
-    rows, cost = set_rows(pack)
+    rows, cost = set_rows(pack, branching)
     return [[r for i in c for r in rows[i]] for c in chunk_plan(cost, max_tokens)]
 
 

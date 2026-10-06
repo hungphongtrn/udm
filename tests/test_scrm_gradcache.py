@@ -43,10 +43,12 @@ def _assert_grads_close(a, b, rtol=1e-4, atol=1e-6):
         assert torch.allclose(a[n], b[n], rtol=rtol, atol=atol), (n, (a[n] - b[n]).abs().max().item())
 
 
-def test_grad_cache_matches_standard_multichunk(synth):
-    """A chunk budget that splits sets across chunks gives the same loss and grads as the single-pack path."""
+@pytest.mark.parametrize("branching", [True, False])
+def test_grad_cache_matches_standard_multichunk(synth, branching):
+    """A chunk budget that splits the pack across chunks (whole sets when branching, single full sequences otherwise)
+    gives the same loss and grads as the single-pack path."""
     torch.manual_seed(0)
-    model, tok = build_scrm(dict(TINY, set_dropout=0.0), "cpu")
+    model, tok = build_scrm(dict(TINY, set_dropout=0.0, branching=branching), "cpu")
     model.train()
     r, b = _batch(synth, tok, 8)
     n_valid = max(1, int(b["pair_mask"].flatten(1).any(1).sum()))

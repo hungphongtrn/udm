@@ -39,6 +39,11 @@ DEFAULTS: dict[str, Any] = {
         "set_ffn_mult": 2,
         "set_dropout": 0.1,
         "head_hidden": None,               # default d_set // 2
+        # Option encoding. true = shared-prefix branching: each set's prompt is encoded once and every graded option
+        # continues it as a branch (custom attention / Gated DeltaNet layout, see scrm.model). false = every graded
+        # option is its own full sequence `prompt + option` through the stock HF forward (n_graded x the prompt
+        # tokens; the reference path). Mirrored into data.render.branching (batch token costs) by load_config.
+        "branching": True,
     },
     "loss": {
         "tau": 1.0, "margin_alpha": 0.0,
@@ -151,4 +156,6 @@ def load_config(path: str | None, overrides: list[str] | None = None) -> dict:
         deep_update(cfg, _load_yaml(path))
     if overrides:
         deep_update(cfg, parse_overrides(overrides))
+    # one switch: the renderer's per-set token cost (batching / chunking budgets) must match how the model encodes
+    cfg["data"]["render"]["branching"] = bool(cfg["model"]["branching"])
     return cfg
