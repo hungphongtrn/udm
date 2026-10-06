@@ -14,10 +14,13 @@ model:
   gradient_checkpointing: true
   branching: false
 data:
-  # no branching: a set costs n_graded * len(prompt) + sum(len(option)) (every graded option is a full sequence)
-  render: {max_len: 16384, max_candidates: 64, max_graded: 16, min_graded: 4}
+  # no branching: a set costs n_graded * len(prompt) + sum(len(option)) (every graded option is a full sequence).
+  # Variety over per-set signal: grade 4 options per set (tier-0 + one per other tier kept by subsampling), so more
+  # sets fit per step; in-set pairs share prompt/source and are correlated. Fixed k: the linear head needs no
+  # set-size variety. Eval still grades every option (eval_max_graded null).
+  render: {max_len: 16384, max_candidates: 64, max_graded: 4, min_graded: null}
   # one group = one optimizer step per rank: up to 32 whole sets (the diversity knob; memory-independent under
-  # grad cache), token cap only bounds step time
+  # grad cache), token cap only bounds step time. Steps well under 32 sets -> raise max_tokens_per_batch, not k.
   batch: {max_tokens_per_batch: 131072, max_batch_size: 32, bucket_size: 256}
 train:
   max_steps: 6000
