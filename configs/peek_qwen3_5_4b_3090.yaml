@@ -1,0 +1,32 @@
+# Peek on RTX 3090 (24 GB): shared-prefix branching + whole-set packing + gradient caching + linear reward head.
+# Same objective as configs/peek_qwen3_5_4b_h200.yaml (BT + 0.01 center, no listwise); sized for 24 GB.
+# Memory: no selective checkpointing (act_tokens null: full activations cost ~8.3 MB/token, 24 GB holds ~1k), so pass 3
+# keeps only per-layer boundaries (~0.17 MB/token) + one layer's recompute for the largest chunk. A set is one chunk
+# when it exceeds grad_cache_chunk_tokens, so peak memory tracks the largest set (~max_len + its graded options).
+# Watch `mem=` in the [train] line: OOM -> data.render.max_len=12288 (or 8192); lots of headroom -> raise it.
+# Launch: NPROC=1 (one 3090) or NPROC=4 (four 3090s, 4x the sets per step) scripts/train/train.sh <this file> ...
+base: scrm_qwen3_5_4b_24gb.yaml
+output_dir: outputs/peek_qwen3_5_4b_3090
+loss: {tau: 1.0, margin_alpha: 0.0, w_bt: 1.0, w_listwise: 0.0, w_plackett_luce: 0.0, w_center: 0.01}
+model:
+  head: linear
+  gradient_checkpointing: true
+data:
+  # branching: a set costs len(prefix) + sum(len(option)), so long states no longer multiply by the graded count
+  render: {max_len: 16384, max_candidates: 64, max_graded: 16, min_graded: 4}
+  # one group = one optimizer step per rank: up to 32 whole sets (the diversity knob; memory-independent under
+  # grad cache), token cap only bounds step time
+  batch: {max_tokens_per_batch: 131072, max_batch_size: 32, bucket_size: 256}
+train:
+  max_steps: 6000
+  warmup_steps: 300
+  best_metric: dindex
+  early_stop_patience: 3
+  grad_cache: true
+  grad_cache_chunk_tokens: 8192
+  grad_cache_act_tokens: null
+  grad_accum: 1
+benchmarks:
+  decision_index: {enabled: true, suite_dir: ../decision-index/suite-0.2, rows: ../decision-index/sample-1000.jsonl.gz,
+                   max_len: 16384, max_tokens: 16384, every: 1000}
+wandb: {enabled: true, project: scrm, tags: [qwen3.5-4b, 3090, peek]}
