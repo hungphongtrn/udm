@@ -1,6 +1,7 @@
 """Ranking metrics with per-family / per-source breakdown."""
 from __future__ import annotations
 
+import math
 from collections import defaultdict
 
 import numpy as np
@@ -27,6 +28,7 @@ def example_metrics(r: torch.Tensor, tiers: torch.Tensor) -> dict[str, np.ndarra
     tmin = tiers.masked_fill(~valid, 10**9).min(1, keepdim=True).values
     in0 = valid & (tiers == tmin)
     top1 = (tops & in0).sum(1).float() / tops.sum(1).clamp(min=1).float()
+    chance = in0.sum(1).float() / valid.sum(1).clamp(min=1).float()   # top-1 of a uniformly random pick
     # average-tie ranks
     gt = ((r.unsqueeze(1) > r.unsqueeze(2)) & valid.unsqueeze(1)).sum(2).float()     # #j with r_j > r_i
     eq = ((r.unsqueeze(1) == r.unsqueeze(2)) & valid.unsqueeze(1)).sum(2).float() - 1
@@ -62,6 +64,7 @@ def example_metrics(r: torch.Tensor, tiers: torch.Tensor) -> dict[str, np.ndarra
     conf = p.max(1).values
     p_best = (p * in0).sum(1)
     return {"pair_acc": pair_acc.numpy(), "correct": correct.numpy(), "npairs": npairs.numpy(), "top1": top1.numpy(),
+            "chance": chance.numpy(),
             "mrr": mrr.numpy(), "ndcg": ndcg.numpy(), "kendall_tau": tau.numpy(), "n_cands": n.numpy(),
             "conf": conf.numpy(), "brier_top1": ((conf - top1) ** 2).numpy(), "p_best": p_best.numpy(),
             "nll_best": (-torch.log(p_best.clamp(min=1e-12))).numpy()}
@@ -101,6 +104,9 @@ class MetricAccumulator:
             d["pair_acc_micro"] = float(np.sum(cols["correct"]) / tot) if tot else float("nan")
             d["ece_top1"] = ece(np.asarray(cols["conf"]), np.asarray(cols["top1"]))
             d["overconf"] = d["conf"] - d["top1"]     # > 0: top-1 probability exceeds top-1 accuracy
+            # Decision Index rule: chance-corrected top-1, clip((acc - chance) / (1 - chance))
+            c = d.get("chance", float("nan"))
+            d["skill"] = min(1.0, max(0.0, (d["top1"] - c) / (1 - c))) if c < 1 else float("nan")
             out[key] = d
         return out
 
@@ -111,6 +117,16 @@ def flatten(metrics: dict[str, dict[str, float]], prefix: str = "eval") -> dict[
         for k, v in d.items():
             flat[f"{prefix}/{g}/{k}"] = v
     return flat
+
+
+def val_index(metrics: dict[str, dict[str, float]]) -> tuple[float, float]:
+    """(index, raw_index) of an eval, scored like the Decision Index: every source counts equally (as its areas do);
+    index = 100 x mean per-source chance-corrected top-1 skill, raw_index = 100 x mean per-source top-1."""
+    src = [d for g, d in metrics.items() if g.startswith("source/")]
+    sk = [d["skill"] for d in src if math.isfinite(d.get("skill", float("nan")))]
+    if not sk:
+        return float("nan"), float("nan")
+    return 100 * float(np.mean(sk)), 100 * float(np.mean([d["top1"] for d in src]))
 
 
 @torch.no_grad()

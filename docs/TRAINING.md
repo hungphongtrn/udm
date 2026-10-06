@@ -281,11 +281,17 @@ log line `[eval] set:` shows sets per source and dropped draws. Canonical candid
   probability mass on the best tier, `nll_best` = `-log p_best`.
 * `loss`: BT loss. `eval/perm/*` (small subset, two shuffles): `score_std` / `abs_diff` (score change under reordering),
   `rank_agree` (pairwise order agreement), `top1_agree`. Should approach 0 / 1 as training progresses.
+* `skill` (per group) = `clip((top1 - chance) / (1 - chance), 0, 1)`, `chance` = mean fraction of options in the best
+  tier (top-1 of a random pick): the Decision Index's chance correction. `eval/index` = 100 x mean `skill` over sources
+  (every source weighted equally, like the Decision Index's areas), `eval/raw_index` = 100 x mean source `top1`.
 
-At save steps (and at the end) two more evaluations are logged; checkpoint selection (`best/`) stays on validation
-loss:
+Checkpoint selection (`best/`) and early stopping run on validation at every eval, `train.best_metric`: `val_index`
+(default, max `eval/index`) or `val_loss` (min `eval/loss`); `early_stop_patience` counts evals. A checkpoint resumes only
+under the `best_metric` it was trained with. At save steps (and at the end) two test-only evaluations are logged, never
+used for selection:
 
-* `test/*`: the same metrics on `benchmarks.test_split` (default `test`, same filters and row caps as validation).
+* `test/*`: the same metrics on `benchmarks.test_split` (default `test`, same filters and row caps as validation), incl.
+  `test/index`, `test/raw_index`.
 * `dindex/*`: [Decision Index](https://github.com/apolinario/decision-index) 0.2.1 on a fixed stratified sample of its
   suite (`benchmarks.decision_index`; enabled in the Qwen configs, off in the defaults): `index` (chance-corrected, the
   board's headline), `raw_index`, `answered_frac`, `area/*` and `bench/*` skill (x100), scored with the kit's own

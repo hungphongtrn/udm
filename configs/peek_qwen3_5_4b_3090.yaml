@@ -20,8 +20,8 @@ data:
 train:
   max_steps: 6000
   warmup_steps: 300
-  best_metric: dindex
-  early_stop_patience: 3
+  best_metric: val_index              # `best` = highest validation index; Decision Index is test-only
+  early_stop_patience: 3              # 3 evals (eval_every 1000) without improvement
   grad_cache: true
   grad_cache_chunk_tokens: 8192
   grad_cache_act_tokens: null

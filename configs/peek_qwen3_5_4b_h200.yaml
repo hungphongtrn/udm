@@ -24,8 +24,8 @@ data:
 train:
   max_steps: 6000                     # cosine decays to 0 at the end (v1: 20000, LR still 93% of peak at step 4000)
   warmup_steps: 300
-  best_metric: dindex                 # `best` = highest Decision Index sample score (v1: in-distribution val loss)
-  early_stop_patience: 3              # 3 Decision Index runs (3000 steps) without improvement
+  best_metric: val_index              # `best` = highest validation index; Decision Index is test-only
+  early_stop_patience: 3              # 3 evals (eval_every 1000) without improvement
   grad_cache: true
   grad_cache_chunk_tokens: 8192       # chunks <= act_tokens run with no recompute; longer sequences get own chunk
   grad_cache_act_tokens: 8192         # ~68 GB stored activations; a 64k sequence keeps 4 of 32 layers

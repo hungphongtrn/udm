@@ -116,7 +116,7 @@ NPROC=2 scripts/train/train.sh configs/scrm_qwen3_5_4b_h200.yaml data.local_dir=
 #    resume after an interruption
 scripts/train/train.sh configs/scrm_qwen3_5_4b_24gb.yaml --resume auto data.local_dir=data_cache/udm
 
-# 3) evaluate the best checkpoint (lowest validation loss) on test, and on the OOD slice
+# 3) evaluate the best checkpoint (highest validation index, train.best_metric) on test, and on the OOD slice
 scripts/train/eval.sh outputs/scrm_qwen3_5_4b_24gb/best --split test --out test.json data.local_dir=data_cache/udm
 scripts/train/eval.sh outputs/scrm_qwen3_5_4b_24gb/best --split test --filter source_split=ood --out ood.json data.local_dir=data_cache/udm
 #    or straight from the HF backup (any machine): hf://hungphongtrn/scrm-qwen3_5-4b/scrm_qwen3_5_4b_24gb/best

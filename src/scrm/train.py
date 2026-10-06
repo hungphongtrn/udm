@@ -23,7 +23,7 @@ from .data import TrainStream, build_groups, make_train_loader, EvalSet
 from .evaluate import run_eval, run_perm_eval, _amp
 from .gradcache import grad_cache_step
 from .losses import compute_loss, reduce_loss
-from .metrics import flatten
+from .metrics import flatten, val_index
 from .hub import HubSync, resolve_ckpt
 from .model import build_scrm
 from .render import Renderer
@@ -317,13 +317,12 @@ def train(cfg: dict, resume: str | None = None):
     opt = make_optimizer(model, tcfg)
     sched = make_scheduler(opt, warm, max_steps, tcfg["min_lr_ratio"])
 
-    # checkpoint selection + early stopping: train.best_metric = val_loss (lowest validation loss, at every eval) or
-    # dindex (highest Decision Index sample score, at every Decision Index run). bad_evals = evals since it improved.
-    metric = tcfg.get("best_metric") or "val_loss"
-    if metric not in ("val_loss", "dindex"):
-        raise ValueError(f"train.best_metric must be val_loss or dindex, got {metric!r}")
-    if metric == "dindex" and not (cfg["benchmarks"].get("decision_index") or {}).get("enabled"):
-        raise ValueError("train.best_metric=dindex needs benchmarks.decision_index.enabled")
+    # checkpoint selection + early stopping on validation, at every eval: train.best_metric = val_index (highest
+    # Decision-Index-style chance-corrected top-1, sources weighted equally) or val_loss (lowest validation loss).
+    # The Decision Index is a test benchmark only. bad_evals = evals since the metric improved.
+    metric = tcfg.get("best_metric") or "val_index"
+    if metric not in ("val_index", "val_loss"):
+        raise ValueError(f"train.best_metric must be val_index or val_loss, got {metric!r}")
     sign = 1.0 if metric == "val_loss" else -1.0   # internal score = sign * metric, lower is better
     step, best, bad_evals = 0, float("inf") if metric == "val_loss" else float("-inf"), 0
     meta = lambda: {"best": best, "best_metric": metric, "optim": tcfg["optim"], "bad_evals": bad_evals}
@@ -386,21 +385,23 @@ def train(cfg: dict, resume: str | None = None):
         flat = flatten(m)
         flat.update({f"eval/perm/{k}": v for k, v in pm.items()})
         flat["eval/loss"] = m.get("all", {}).get("loss", float("nan"))
+        vi, vraw = val_index(m)
+        flat["eval/index"], flat["eval/raw_index"] = vi, vraw
         log(flat, s)
         wb.log_group_table("eval/by_group", m, s)
         a = m.get("all", {})
-        print(f"[eval] step {s}: pair_acc={a.get('pair_acc', 0):.4f} top1={a.get('top1', 0):.4f} "
-              f"mrr={a.get('mrr', 0):.4f} ndcg={a.get('ndcg', 0):.4f} loss={a.get('loss', 0):.4f} "
-              f"ece={a.get('ece_top1', float('nan')):.3f} overconf={a.get('overconf', float('nan')):+.3f} "
+        print(f"[eval] step {s}: index={vi:.2f} raw={vraw:.2f} pair_acc={a.get('pair_acc', 0):.4f} "
+              f"top1={a.get('top1', 0):.4f} mrr={a.get('mrr', 0):.4f} ndcg={a.get('ndcg', 0):.4f} "
+              f"loss={a.get('loss', 0):.4f} ece={a.get('ece_top1', float('nan')):.3f} "
+              f"overconf={a.get('overconf', float('nan')):+.3f} "
               f"perm_agree={pm.get('rank_agree', float('nan')):.3f} ({time.time()-t0:.0f}s)", flush=True)
-        if metric == "val_loss":
-            consider_best(a.get("loss", float("inf")), s)
+        consider_best(a.get("loss", float("inf")) if metric == "val_loss" else vi, s)
         model.train()
 
     done_bench = {}   # benchmark -> last step it ran at
 
     def do_benchmarks(s, final=False):
-        """Test split + Decision Index sample (the Decision Index also selects `best` when train.best_metric=dindex).
+        """Test benchmarks (log only; `best` is selected on validation): test split + Decision Index sample.
         Decision Index runs at steps divisible by its `every` (null = every call) and always at the end."""
         nonlocal testset, dindex
         if bcfg.get("test_split") and done_bench.get("test") != s:
@@ -412,12 +413,15 @@ def train(cfg: dict, resume: str | None = None):
             m = run_eval(model, testset.batches(), lcfg, device, amp, max_tokens=d["batch"]["max_tokens_per_batch"])
             flat = flatten(m, "test")
             flat["test/loss"] = m.get("all", {}).get("loss", float("nan"))
+            ti, traw = val_index(m)
+            flat["test/index"], flat["test/raw_index"] = ti, traw
             log(flat, s)
             wb.log_group_table("test/by_group", m, s)
             a = m.get("all", {})
-            print(f"[test] step {s}: pair_acc={a.get('pair_acc', 0):.4f} top1={a.get('top1', 0):.4f} "
-                  f"mrr={a.get('mrr', 0):.4f} loss={a.get('loss', 0):.4f} ece={a.get('ece_top1', float('nan')):.3f} "
-                  f"overconf={a.get('overconf', float('nan')):+.3f} ({time.time()-t0:.0f}s)", flush=True)
+            print(f"[test] step {s}: index={ti:.2f} raw={traw:.2f} pair_acc={a.get('pair_acc', 0):.4f} "
+                  f"top1={a.get('top1', 0):.4f} mrr={a.get('mrr', 0):.4f} loss={a.get('loss', 0):.4f} "
+                  f"ece={a.get('ece_top1', float('nan')):.3f} overconf={a.get('overconf', float('nan')):+.3f} "
+                  f"({time.time()-t0:.0f}s)", flush=True)
         di = bcfg.get("decision_index") or {}
         if di.get("enabled") and done_bench.get("dindex") != s and (final or not di.get("every") or s % di["every"] == 0):
             done_bench["dindex"] = s
@@ -429,8 +433,6 @@ def train(cfg: dict, resume: str | None = None):
             log({f"dindex/{k}": v for k, v in m.items()}, s)
             print(f"[dindex] step {s}: index={m['index']:.2f} raw={m['raw_index']:.2f} "
                   f"answered={m['answered_frac']:.3f} ({m['seconds']:.0f}s)", flush=True)
-            if metric == "dindex":
-                consider_best(float(m["index"]), s)
         model.train()
 
     di0 = bcfg.get("decision_index") or {}
@@ -515,13 +517,12 @@ def train(cfg: dict, resume: str | None = None):
         stop = False
         if tcfg["eval_every"] and step % tcfg["eval_every"] == 0 and rank == 0:
             do_eval(step)
-            stop = metric == "val_loss" and stop_now()
+            stop = stop_now()
         saving = bool(tcfg["save_every"]) and step % tcfg["save_every"] == 0
         if saving and rank == 0:
             save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)   # before the log-only benchmarks: a benchmark crash must not lose the interval
             saved_at = step
             do_benchmarks(step)
-            stop = stop or (metric == "dindex" and stop_now())
         if world > 1 and ((tcfg["eval_every"] and step % tcfg["eval_every"] == 0) or saving):   # same steps on every rank
             stop = bool(reduce_ints(int(stop), device, dist.ReduceOp.MAX))
         if stop:

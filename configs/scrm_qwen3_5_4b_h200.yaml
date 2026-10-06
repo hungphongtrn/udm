@@ -5,7 +5,7 @@
 # Launch: scripts/train/restart_h200.sh (fresh run) or NPROC=2 scripts/train/train.sh <this file> ...
 # v2 (2026-10-06): v1 (outputs/scrm_qwen3_5_4b_h200, W&B 0d3l3ivx) graded every option of every set and averaged
 # 12 sets/step; v2 grades a random 4-16 options per set (prompt still shows all), trains BT + listwise + center,
-# decays the LR fully over 6000 steps, uses 64k contexts and keeps `best` by the Decision Index sample.
+# decays the LR fully over 6000 steps, uses 64k contexts and keeps `best` by the validation index (Decision Index: test).
 base: scrm_qwen3_5_4b_24gb.yaml
 output_dir: outputs/scrm_qwen3_5_4b_h200_v2
 loss: {tau: 1.0, margin_alpha: 0.0, w_bt: 1.0, w_listwise: 1.0, w_center: 0.01}
@@ -19,8 +19,8 @@ data:
 train:
   max_steps: 6000                     # cosine decays to 0 at the end (v1: 20000, LR still 93% of peak at step 4000)
   warmup_steps: 300
-  best_metric: dindex                 # `best` = highest Decision Index sample score (v1: in-distribution val loss)
-  early_stop_patience: 3              # 3 Decision Index runs (3000 steps) without improvement
+  best_metric: val_index              # `best` = highest validation index; Decision Index is test-only
+  early_stop_patience: 3              # 3 evals (eval_every 1000) without improvement
   grad_cache: true
   grad_cache_chunk_tokens: 8192       # chunks <= act_tokens run with no recompute; longer sequences get own chunk
   grad_cache_act_tokens: 8192         # ~68 GB stored activations; a 64k sequence keeps 4 of 32 layers
