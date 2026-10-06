@@ -92,7 +92,7 @@ def make_optimizer(model, tcfg: dict):
         groups.append({"params": lora, "lr": tcfg["lr_lora"], "weight_decay": 0.0, "name": "lora"})
     groups.append({"params": dec, "lr": tcfg["lr_head"], "weight_decay": tcfg["weight_decay"], "name": "head"})
     groups.append({"params": nodec, "lr": tcfg["lr_head"], "weight_decay": 0.0, "name": "head_nodecay"})
-    cuda = torch.cuda.is_available() and model.head_device().is_cuda
+    cuda = torch.cuda.is_available() and model.head_device().type == "cuda"
     if tcfg.get("optim", "adamw_8bit") == "adamw_8bit":
         if not cuda:
             print("[scrm] adamw_8bit needs CUDA; using torch AdamW on this device", flush=True)
