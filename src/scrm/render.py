@@ -190,8 +190,8 @@ class Item:
 
     @property
     def n_tokens(self) -> int:
-        """Packed token cost: every graded option is a full sequence prefix + suffix."""
-        return len(self.suffixes) * len(self.prefix) + sum(len(x) for x in self.suffixes)
+        """Packed token cost: the shared prefix is encoded ONCE and every graded option adds only its suffix branch."""
+        return len(self.prefix) + sum(len(x) for x in self.suffixes)
 
 
 def subsample_indices(tiers: np.ndarray, max_n: int, rng: np.random.Generator) -> np.ndarray:

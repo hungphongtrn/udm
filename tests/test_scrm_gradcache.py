@@ -93,7 +93,7 @@ def test_grad_cache_selective_checkpointing_matches_standard(synth):
     layers = model.ckpt_layers()
     assert len(layers) == 4
     r, b = _batch(synth, tok, 6)
-    n_tok = sum(int(x) for x in b["pack"]["seq_lens"])
+    n_tok = b["n_tokens"]
     n_valid = max(1, int(b["pair_mask"].flatten(1).any(1).sum()))
     kw = dict(lcfg={}, d_batch={"max_tokens_per_batch": 10 ** 9}, device=torch.device("cpu"), amp=False,
               n_valid=n_valid, renderer=r, seed=0, step=0, use_perm=False)
@@ -107,7 +107,9 @@ def test_grad_cache_selective_checkpointing_matches_standard(synth):
                                              enc(pool, idx))[1]
     torch.manual_seed(0)
     model.zero_grad(set_to_none=True)
-    gc = accumulate_step(model, [b], grad_cache=True, chunk_tokens=10 ** 9, act_tokens=n_tok // 2, **kw)
+    # ceil half: `keep_activations(L * act_tokens // T)` then keeps exactly L/2 layers for odd T too (T == act_tokens
+    # here, so the stored activation count is half the chunk's tokens either way)
+    gc = accumulate_step(model, [b], grad_cache=True, chunk_tokens=10 ** 9, act_tokens=-(-n_tok // 2), **kw)
     g_gc = _grads(model)
     assert stored == [0, 2]   # pass 1 fully checkpointed, pass 3 keeps 2 of 4 layers
     assert all(m.gradient_checkpointing for m in layers)

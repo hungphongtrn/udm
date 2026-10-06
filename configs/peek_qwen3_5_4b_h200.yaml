@@ -1,0 +1,36 @@
+# Peek on 2x H200 (141 GB each) with gradient caching + DDP — v2's recipe with a per-candidate linear reward head.
+# Identical to configs/scrm_qwen3_5_4b_h200.yaml (v2) except model.head=linear and the listwise/Plackett-Luce softmax
+# terms (cross-candidate training signal in the objective) set to 0: Peek scores each option from its own branch of the
+# shared prefix (`r_i = w^T h_i + b`), so Peek vs v2 is a one-variable-group comparison.
+# Speed knob = train.grad_cache_act_tokens (selective checkpointing): pass 3 stores full activations for ~that many
+# tokens (~8.3 MB/token for Qwen3.5-4B + LoRA all-linear) and recomputes the rest. Watch `mem=` in the [train] line /
+# sys/gpu_mem_alloc_gb: < ~110 GB -> raise act_tokens (10240, 12288); OOM -> lower it (6144).
+# Launch: scripts/train/restart_h200.sh (fresh run) or NPROC=2 scripts/train/train.sh <this file> ...
+base: scrm_qwen3_5_4b_24gb.yaml
+output_dir: outputs/peek_qwen3_5_4b_h200
+# v2 graded a random 4-16 options per set (prompt still shows all) and trained BT + listwise + center; Peek keeps the
+# BT pair loss and the set-mean center regulariser (0.01, as in v2) and drops the softmax-over-set terms.
+loss: {tau: 1.0, margin_alpha: 0.0, w_bt: 1.0, w_listwise: 0.0, w_plackett_luce: 0.0, w_center: 0.01}
+model:
+  head: linear                        # shared nn.Linear(hidden, 1) per option (no SetEncoder, no cross-candidate head)
+  gradient_checkpointing: true        # required: act_tokens toggles it per layer per chunk (off entirely OOMs >136 GB at 16k)
+data:
+  # A loader micro-batch ("group") is the gradient-cache group budget: whole sets are packed up to this many
+  # tokens and the backbone is run over the group in chunks of train.grad_cache_chunk_tokens (not per group).
+  # max_len 65536: v1 peaked at ~80 GB/GPU at 32k; a 64k sequence gets its own chunk (selective checkpointing keeps
+  # act_tokens worth of activations), so the extra cost is the per-layer boundaries (~11 GB at 64k).
+  render: {max_len: 65536, max_candidates: 64, max_graded: 16, min_graded: 4}   # eval / Decision Index grade all
+  batch: {max_tokens_per_batch: 262144, max_batch_size: 64, bucket_size: 512}
+train:
+  max_steps: 6000                     # cosine decays to 0 at the end (v1: 20000, LR still 93% of peak at step 4000)
+  warmup_steps: 300
+  best_metric: dindex                 # `best` = highest Decision Index sample score (v1: in-distribution val loss)
+  early_stop_patience: 3              # 3 Decision Index runs (3000 steps) without improvement
+  grad_cache: true
+  grad_cache_chunk_tokens: 8192       # chunks <= act_tokens run with no recompute; longer sequences get own chunk
+  grad_cache_act_tokens: 8192         # ~68 GB stored activations; a 64k sequence keeps 4 of 32 layers
+  grad_accum: 1                       # the group is already large
+benchmarks:
+  decision_index: {enabled: true, suite_dir: ../decision-index/suite-0.2, rows: ../decision-index/sample-1000.jsonl.gz,
+                   max_len: 65536, max_tokens: 65536, every: 1000}
+wandb: {enabled: true, project: scrm, tags: [qwen3.5-4b, h200, peek]}

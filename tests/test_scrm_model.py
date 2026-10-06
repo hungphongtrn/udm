@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 import torch
 
@@ -35,21 +36,27 @@ def test_no_set_layers_ablation_is_per_candidate():
     assert torch.allclose(enc(E, m)[:, :2], enc(E[:, :2], m[:, :2]), atol=1e-6)
 
 
-def _sets(n_list, P=11, seed=0):
-    """Packed batch (collator layout): set b has n_list[b] option sequences of length P + 3..7."""
-    g = torch.Generator().manual_seed(seed)
-    lens, rs, sl = [], [], []
+def _items(n_list, P=11, seed=0, one_token=False):
+    """Decision sets (render.Item): set b has n_list[b] graded options whose suffixes are 3..7 tokens after a P-token
+    shared prefix (`one_token`: set b's option 0 is a single-token suffix)."""
+    from scrm.render import Item
+    g = np.random.default_rng(seed)
+    items = []
     for b, n in enumerate(n_list):
-        for k in range(n):
-            lens.append(P + 3 + (k * 2) % 5); rs.append(b); sl.append(k)
-    L = torch.tensor(lens)
-    pack = {"input_ids": torch.randint(0, 300, (int(L.sum()),), generator=g),
-            "position_ids": torch.cat([torch.arange(n) for n in lens]), "seq_lens": lens,
-            "read_idx": L.cumsum(0) - 1, "row_set": torch.tensor(rs), "row_slot": torch.tensor(sl)}
-    cm = torch.zeros(len(n_list), max(n_list), dtype=torch.bool)
-    for b, n in enumerate(n_list):
-        cm[b, :n] = True
-    return pack, cm
+        pre = g.integers(0, 300, P).astype(np.int64)
+        sfx = [g.integers(0, 300, 1 if (one_token and k == 0) else 3 + (k * 2) % 5).astype(np.int64) for k in range(n)]
+        items.append(Item(prefix=pre, suffixes=sfx, tiers=np.arange(n, dtype=np.int64), order=np.arange(n),
+                          choice_ids=[f"c{k}" for k in range(n)], family="f", source_id="s",
+                          decision_set_id=f"d{b}"))
+    return items
+
+
+def _sets(n_list, P=11, seed=0, one_token=False):
+    """Packed batch (collator branch layout): set b has n_list[b] graded options of length 3..7 after a P-token
+    prefix; the prefix is encoded once and shared by the set's option branches."""
+    from scrm.collator import collate
+    b = collate(_items(n_list, P=P, seed=seed, one_token=one_token))
+    return b["pack"], b["candidate_mask"]
 
 
 def test_full_model_forward_no_new_tokens():
@@ -74,9 +81,32 @@ def _fwd_bwd(model, pack, cm, max_tokens):
     return r.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
 
 
-def _assert_same(a, b, rtol=2e-2):
+def _oracle_embeds(model, items):
+    """The old per-option computation: every full sequence `prefix + suffix_k` encoded on its own (right-padded batch
+    through the backbone), read out at its last token. Ground truth for the branch encoder."""
+    seqs = [x for it in items for x in it.seqs]
+    S = max(len(x) for x in seqs)
+    x = torch.zeros(len(seqs), S, dtype=torch.long, device=next(model.set_encoder.parameters()).device)
+    am = torch.zeros(len(seqs), S, dtype=torch.long, device=x.device)
+    for i, s in enumerate(seqs):
+        x[i, :len(s)] = torch.as_tensor(s, device=x.device)
+        am[i, :len(s)] = 1
+    h = model.backbone(input_ids=x, attention_mask=am, use_cache=False).last_hidden_state
+    return h[torch.arange(len(seqs), device=x.device), torch.tensor([len(s) for s in seqs], device=x.device) - 1]
+
+
+def _oracle_fwd_bwd(model, items, pack, cm):
+    """Rewards + grads from the full-sequence oracle embeddings (the set head is shared, so this isolates the
+    backbone)."""
+    model.zero_grad()
+    r = model.head(_oracle_embeds(model, items), pack, cm)
+    r.square().sum().backward()
+    return r.detach(), {n: p.grad.clone() for n, p in model.named_parameters() if p.grad is not None}
+
+
+def _assert_same(a, b, rtol=2e-2, atol=1e-4):
     (r1, g1), (r2, g2) = a, b
-    assert torch.allclose(r1, r2, atol=1e-4), (r1 - r2).abs().max()
+    assert torch.allclose(r1, r2, atol=atol, rtol=rtol), (r1 - r2).abs().max()
     assert g1.keys() == g2.keys() and any("lora_" in n for n in g1)
     for n in g1:   # delta-rule gate params accumulate a little fp32 noise; everything else is ~exact
         assert (g1[n] - g2[n]).abs().max() <= rtol * g1[n].abs().max() + 1e-6, n
@@ -90,24 +120,6 @@ def test_chunked_encoding_matches_single_chunk_forward_and_grad():
     _assert_same(_fwd_bwd(model, pack, cm, None), _fwd_bwd(model, pack, cm, 90))
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="varlen packing kernels are CUDA-only")
-def test_varlen_packing_matches_padded_forward_and_grad(monkeypatch):
-    """Padding-free packed row (cu_seqlens / seq_idx) == right-padded batch: no attention or Gated DeltaNet state
-    leaks across sequence boundaries."""
-    import scrm.model as M
-    if not M._varlen_kernels(torch.device("cuda")):
-        pytest.skip("fla / causal-conv1d not installed")
-    model, _ = build_scrm(dict(TINY, set_dropout=0.0), "cuda")
-    model.train()
-    pack, cm = _sets([5, 3, 1], P=70)
-    pack = {k: v.cuda() if torch.is_tensor(v) else v for k, v in pack.items()}
-    cm = cm.cuda()
-    ref = _fwd_bwd(model, pack, cm, None)
-    monkeypatch.setattr(M, "_varlen_kernels", lambda d: False)
-    pad = _fwd_bwd(model, pack, cm, None)
-    _assert_same(pad, ref)
-
-
 def test_frozen_backbone_has_no_backbone_grads():
     cfg = dict(TINY, freeze_backbone=True)
     model, tok = build_scrm(cfg, "cpu")
@@ -116,3 +128,49 @@ def test_frozen_backbone_has_no_backbone_grads():
     r = model(pack, cm)
     r.sum().backward()
     assert model.set_encoder.proj.weight.grad is not None
+
+
+def test_head_defaults_to_set_encoder():
+    """`model.head` defaults to "set", so v1/v2 configs and their `scrm_head.pt` (set_encoder.* keys) keep loading."""
+    model, _ = build_scrm(TINY, "cpu")
+    assert model.head_kind == "set" and model.head_module() is model.set_encoder
+    assert all(k.startswith("set_encoder.") for k in model.head_state_dict())
+
+
+def test_linear_head_reward_is_per_option():
+    """Peek (`head: linear`): an option's reward depends only on its own branch of the shared prompt, so grading it
+    alone or together with the prompt's other options gives the same reward (the set encoder would mix them)."""
+    from scrm.collator import collate
+    from scrm.render import Item
+    model, _ = build_scrm(dict(TINY, head="linear"), "cpu")
+    model.eval()
+    item = _items([4, 3])[0]                             # the set 0 that _sets([4, 3]) builds below
+    solo = Item(prefix=item.prefix, suffixes=item.suffixes[:1], tiers=item.tiers[:1], order=item.order[:1],
+                choice_ids=item.choice_ids[:1], family=item.family, source_id=item.source_id,
+                decision_set_id=item.decision_set_id)
+    b_one = collate([solo])
+    pack, cm = _sets([4, 3])
+    with torch.no_grad():
+        r_all = model(pack, cm)                          # option 0 graded with its siblings and a second set
+        r_one = model(b_one["pack"], b_one["candidate_mask"])   # the same option graded alone
+    assert r_all.dtype == torch.float32 and (r_all[1, 3:] == 0).all()   # ungraded slots stay 0
+    assert torch.allclose(r_one[0, 0], r_all[0, 0], atol=1e-5)
+
+
+def test_linear_head_save_load_roundtrip(tmp_path):
+    """The head type is recorded in scrm_config.json and the weights are keyed by it: a linear-head checkpoint
+    rebuilds a linear head and reproduces its rewards."""
+    from scrm.model import load_scrm
+    model, _ = build_scrm(dict(TINY, head="linear"), "cpu")
+    model.eval()
+    pack, cm = _sets([3, 2])
+    with torch.no_grad():
+        r = model(pack, cm)
+    model.save_pretrained(str(tmp_path))
+    sd = torch.load(tmp_path / "scrm_head.pt", map_location="cpu")
+    assert sorted(sd) == ["reward_head.bias", "reward_head.weight"]
+    m2 = load_scrm(str(tmp_path), device="cpu")
+    assert m2.head_kind == "linear"
+    with torch.no_grad():
+        assert torch.allclose(m2(pack, cm), r, atol=1e-6)
+

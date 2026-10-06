@@ -2,34 +2,24 @@
 
 A loader micro-batch is a "group" of whole sets; its backbone embeddings do not depend on the set head, so the group
 is encoded once without grad (pass 1), the set head + loss are computed on the cached embeddings (pass 2), and each
-sequence chunk is re-encoded with grad only to push the head's embedding gradients back into the backbone (pass 3).
+chunk of sets is re-encoded with grad only to push the head's embedding gradients back into the backbone (pass 3).
 That decouples the backbone activation memory from `data.batch.max_tokens_per_batch` (the group budget): pass 1/3 run
-on chunks of at most `train.grad_cache_chunk_tokens` tokens. Dropout masks are replayed by restoring the RNG state
-recorded per chunk before pass 1.
+on chunks of at most `train.grad_cache_chunk_tokens` tokens. A chunk is a group of WHOLE sets (the unit of branching:
+a set's prefix is encoded once and shared by its option suffixes, see scrm.model), and a set bigger than the chunk
+budget gets a chunk of its own. Dropout masks are replayed by restoring the RNG state recorded per chunk before pass 1.
 
-Under DDP the backbone work is balanced across ranks at sequence granularity: every rank's sequences are pooled,
-assigned to ranks by token count (LPT), encoded by their assignee, and the embeddings / embedding grads are exchanged
-with SUM all-reduces. The set head and loss stay on the rank that owns the set, and the backbone grads land on the
-encoding rank, so the step's SUM-all-reduced gradient is unchanged. See docs/TRAINING.md.
+Under DDP the backbone work is balanced across ranks at SET granularity (a set and its prefix stay on one rank): every
+rank's sets are pooled, assigned to ranks by token cost (LPT), encoded by their assignee, and the embeddings /
+embedding grads are exchanged with SUM all-reduces. The set head and loss stay on the rank that owns the set, and the
+backbone grads land on the encoding rank, so the step's SUM-all-reduced gradient is unchanged. See docs/TRAINING.md.
 """
 from __future__ import annotations
 
 import torch
 import torch.distributed as dist
 
-from .packing import pack_bfd
-
-
-def chunk_plan(seq_lens, chunk_tokens: int | None) -> list[list[int]]:
-    """Indices of the pack sequences grouped into backbone chunks of <= chunk_tokens tokens (a longer sequence gets
-    its own chunk). Sequences inside a chunk keep ascending original index order and chunks are ordered by their first
-    index, so a budget >= all tokens yields exactly one chunk in the original pack order (== the standard path)."""
-    lens = [max(int(x), 1) for x in seq_lens]
-    if not chunk_tokens or chunk_tokens <= 0:
-        return [list(range(len(lens)))]
-    chunks = [sorted(b) for b in pack_bfd(lens, int(chunk_tokens))]
-    chunks.sort(key=lambda c: c[0])
-    return chunks
+from .collator import set_rows
+from .packing import chunk_plan
 
 
 def _rng_state(device):
@@ -65,8 +55,8 @@ def _all_gather_var(t: torch.Tensor, world: int) -> list[torch.Tensor]:
 
 
 def balance_plan(lens, owner, world: int) -> list[list[int]]:
-    """Pool sequence indices per rank: longest-first onto the least-loaded rank (ties keep the owner, then lowest
-    rank). Deterministic, so every rank computes the same plan from the same gathered lengths."""
+    """Pool units (whole decision sets) per rank: longest-first onto the least-loaded rank (ties keep the owner, then
+    lowest rank). Deterministic, so every rank computes the same plan from the same gathered lengths."""
     load = [0] * world
     out: list[list[int]] = [[] for _ in range(world)]
     for i in sorted(range(len(lens)), key=lambda i: (-lens[i], i)):
@@ -77,23 +67,33 @@ def balance_plan(lens, owner, world: int) -> list[list[int]]:
 
 
 def _pool(packs, world: int, rank: int):
-    """All ranks' pack sequences as one virtual pack (global order: pack, rank, sequence), each sequence's owner rank,
-    and this rank's [start, end) rows of the pool for each of its packs."""
-    ids, pos, lens, owner, own = [], [], [], [], []
+    """All ranks' packs merged into one virtual branch pack (global order: pack, rank, set), the owner rank of every
+    pool set, and this rank's [start, end) graded-row range of each of its packs."""
+    ids, pos, reads, sets, pref, rseg, set_owner, own = [], [], [], [], [], [], [], []
+    seg_off = tok_off = row_off = 0
     for pack, _ in packs:
-        L = torch.as_tensor(pack["seq_lens"], dtype=torch.long, device=pack["input_ids"].device)
-        if world == 1:
-            parts = [(pack["input_ids"], pack["position_ids"], L)]
-        else:
-            parts = list(zip(_all_gather_var(pack["input_ids"], world), _all_gather_var(pack["position_ids"], world),
-                             _all_gather_var(L, world)))
-        for r, (i, p, l) in enumerate(parts):
+        dev = pack["input_ids"].device
+        fields = [pack["input_ids"], pack["position_ids"],
+                  torch.as_tensor(pack["seg_lens"], dtype=torch.long, device=dev),
+                  pack["seg_prefix"], pack["row_seg"], pack["read_idx"]]
+        parts = [fields] if world == 1 else [list(x) for x in zip(*[_all_gather_var(f, world) for f in fields])]
+        for r, (i, p, sl, sp, rs, rd) in enumerate(parts):
             if r == rank:
-                own.append((len(lens), len(lens) + l.numel()))
-            ids.append(i); pos.append(p)
-            lens += l.tolist()
-            owner += [r] * l.numel()
-    return {"input_ids": torch.cat(ids), "position_ids": torch.cat(pos), "seq_lens": lens}, owner, own
+                own.append((row_off, row_off + len(rs)))
+            ids.append(i)
+            pos.append(p)
+            reads.append(rd + tok_off)
+            sets += sl.tolist()
+            pref += (sp + seg_off).tolist()
+            rseg += (rs + seg_off).tolist()
+            set_owner += [r] * int((sp == torch.arange(len(sp), device=dev)).sum())   # one prefix per set
+            seg_off += len(sl)
+            tok_off += int(sl.sum())
+            row_off += len(rs)
+    pool = {"input_ids": torch.cat(ids), "position_ids": torch.cat(pos), "seg_lens": sets,
+            "seg_prefix": torch.as_tensor(pref, dtype=torch.long, device=dev),
+            "row_seg": torch.as_tensor(rseg, dtype=torch.long, device=dev), "read_idx": torch.cat(reads)}
+    return pool, set_owner, own
 
 
 def grad_cache_step(model, packs, chunk_tokens: int | None, *, amp_ctx, head_loss, act_tokens: int | None = None):
@@ -109,18 +109,20 @@ def grad_cache_step(model, packs, chunk_tokens: int | None, *, amp_ctx, head_los
     """
     device = packs[0][0]["input_ids"].device
     world, rank = _world()
-    pool, owner, own = _pool(packs, world, rank)
-    mine = balance_plan(pool["seq_lens"], owner, world)[rank] if world > 1 else list(range(len(owner)))
-    # chunk this rank's assigned sequences; chunk_plan indexes into `mine`
-    plan = [[mine[j] for j in c] for c in chunk_plan([pool["seq_lens"][i] for i in mine], chunk_tokens)] if mine else []
-    d = model.set_encoder.proj.in_features
+    pool, set_owner, own = _pool(packs, world, rank)
+    sets, cost = set_rows(pool)
+    # a chunk is a group of whole sets (its prefix is shared by the set's branches), balanced across ranks
+    mine = balance_plan(cost, set_owner, world)[rank] if world > 1 else list(range(len(sets)))
+    plan = [([mine[j] for j in c], [r for j in c for r in sets[mine[j]]])
+            for c in chunk_plan([cost[i] for i in mine], chunk_tokens)] if mine else []
+    d = model.d_hidden
     # fp32 exchange buffer: a rank may encode nothing, and SUM over zeros is exact
-    emb = torch.zeros(len(owner), d, dtype=torch.float32, device=device)
+    emb = torch.zeros(sum(len(r) for r in sets), d, dtype=torch.float32, device=device)
     states = []
     with torch.no_grad(), amp_ctx():
-        for idx in plan:
+        for _, rows in plan:
             states.append(_rng_state(device))
-            emb[torch.as_tensor(idx, device=device)] = model.embed_indices(pool, idx).float()
+            emb[torch.as_tensor(rows, device=device)] = model.embed_indices(pool, rows).float()
     if world > 1:
         dist.all_reduce(emb, op=dist.ReduceOp.SUM)
     leaves = [emb[a:b].clone().requires_grad_(True) for a, b in own]
@@ -138,16 +140,16 @@ def grad_cache_step(model, packs, chunk_tokens: int | None, *, amp_ctx, head_los
             dist.all_reduce(grad, op=dist.ReduceOp.SUM)
         n_layers = len(model.ckpt_layers()) if act_tokens else 0
         try:
-            for idx, s in zip(plan, states):
-                g = grad[torch.as_tensor(idx, device=device)]
+            for (sets_i, rows), s in zip(plan, states):
+                g = grad[torch.as_tensor(rows, device=device)]
                 if not g.any():
                     continue
                 if n_layers:
-                    n_tok = sum(max(int(pool["seq_lens"][i]), 1) for i in idx)
+                    n_tok = sum(cost[i] for i in sets_i)
                     model.keep_activations(n_layers * int(act_tokens) // n_tok)
                 _set_rng_state(s, device)
                 with amp_ctx():
-                    h = model.embed_indices(pool, idx)
+                    h = model.embed_indices(pool, rows)
                 torch.autograd.backward(h, g.to(h.dtype))
                 del h
         finally:

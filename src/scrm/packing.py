@@ -12,7 +12,8 @@ from typing import Sequence
 
 
 class SegmentTree:
-    """`SegmentTree(maxval)`: efficiently finds the smallest stored value >= a query in [1, maxval]."""
+    """`SegmentTree(maxval)`: efficiently finds the smallest stored value >= a query in [1, maxval]. Memory is
+    O(maxval) slots, so callers must pass a data-bounded maxval (see `pack_bfd`), never a bare token budget."""
 
     def __init__(self, maxval: int):
         self.maxval = maxval
@@ -48,18 +49,29 @@ class SegmentTree:
 def pack_bfd(lengths: Sequence[int], capacity: int, max_items: int | None = None) -> list[list[int]]:
     """Best-fit-decreasing: indices of `lengths` grouped into bins of total length <= capacity (and <= max_items
     members). Items longer than `capacity` are returned as singleton bins. Deterministic for a given input."""
-    order = sorted(range(len(lengths)), key=lambda i: -lengths[i])
+    n = len(lengths)
+    if n == 0:
+        return []
+    lens = [max(int(lengths[idx]), 1) for idx in range(n)]
+    order = sorted(range(n), key=lambda i: -lens[i])
+    total = sum(lens)
+    # A bin never holds more than `total` tokens, so the search tree can be sized to min(capacity, total): its memory
+    # then depends on the item sizes, not on the (possibly astronomically large) budget. `total <= capacity` (and all
+    # items in one bin) is handled directly - that is exactly the single bin the tree path would grow.
+    if total <= capacity and (max_items is None or n <= max_items):
+        return [list(order)]
+    cap = min(int(capacity), total)                      # <= capacity: every real bin has remaining space < cap
     bins: list[dict] = []
-    tree = SegmentTree(capacity)
-    tree.add(capacity)                                   # a fresh, empty bin is always available
+    tree = SegmentTree(cap)
+    tree.add(cap)                                        # a fresh, empty bin is always available
     space_to_bin: dict[int, deque] = defaultdict(deque)  # remaining space -> bins with exactly that space
     for idx in order:
-        length = max(int(lengths[idx]), 1)
+        length = lens[idx]
         if length > capacity:
             bins.append({"ids": [idx], "length": length})
             continue
         space = tree.search(length)
-        if space < capacity:
+        if space < cap:
             b = space_to_bin[space].popleft()            # existing bin with the tightest fit
             if not space_to_bin[space]:
                 tree.remove(space)
@@ -73,3 +85,15 @@ def pack_bfd(lengths: Sequence[int], capacity: int, max_items: int | None = None
             space_to_bin[space].append(b)
             tree.add(space)
     return [b["ids"] for b in bins]
+
+
+def chunk_plan(costs: Sequence[int], capacity: int | None) -> list[list[int]]:
+    """Indices of `costs` grouped into chunks of total cost <= capacity (a unit longer than the capacity gets its own
+    chunk); `capacity=None`/0 -> one chunk with everything. Units inside a chunk keep ascending index order and chunks
+    are ordered by their first index, so a capacity >= all costs yields exactly one chunk in the original order."""
+    lens = [max(int(x), 1) for x in costs]
+    if not capacity or capacity <= 0:
+        return [list(range(len(lens)))]
+    chunks = [sorted(b) for b in pack_bfd(lens, int(capacity))]
+    chunks.sort(key=lambda c: c[0])
+    return chunks

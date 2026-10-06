@@ -58,19 +58,26 @@ def test_parse_row_drops_untrainable():
     assert parse_row(row) is None
 
 
-def test_collator_packs_full_sequences_in_set_order(tok):
+def test_collator_packs_shared_prefix_with_option_branches(tok):
     r = Renderer(tok, {"max_len": 512})
     items = [r.assemble(r.tokenize(mk_example(n)), np.random.default_rng(i), True) for i, n in enumerate([5, 9, 3])]
     b = collate(items, r.pad_id)
     p = b["pack"]
-    seqs = [x for it in items for x in it.seqs]
-    assert p["seq_lens"] == [len(x) for x in seqs]
-    assert np.array_equal(p["input_ids"].numpy(), np.concatenate(seqs))           # padding-free, set order
+    # per set: the shared prefix segment, then one segment per graded option suffix (in pack order)
+    segs = [x for it in items for x in [it.prefix, *it.suffixes]]
+    assert p["seg_lens"] == [len(x) for x in segs]
+    assert np.array_equal(p["input_ids"].numpy(), np.concatenate(segs))          # padding-free, set order
+    assert p["seg_prefix"].tolist() == [0] + [0] * 5 + [6] + [6] * 9 + [16] + [16] * 3   # suffix -> its set's prefix
     t = 0
-    for x in seqs:                                                               # positions restart per sequence
-        assert p["position_ids"][t:t + len(x)].tolist() == list(range(len(x)))
-        t += len(x)
+    for it in items:                                                            # prefix positions 0..P-1, suffix P..
+        P = len(it.prefix)
+        assert p["position_ids"][t:t + P].tolist() == list(range(P))            # the prefix sees its own positions
+        t += P
+        for x in it.suffixes:                                                   # a suffix continues at len(prefix)
+            assert p["position_ids"][t:t + len(x)].tolist() == list(range(P, P + len(x)))
+            t += len(x)
     assert (p["input_ids"][p["read_idx"]] == r.chat_suffix[-1]).all()           # "\n" after "assistant"
+    assert p["row_seg"].tolist() == [1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19]
     assert p["row_set"].tolist() == [0] * 5 + [1] * 9 + [2] * 3
     assert p["row_slot"].tolist() == list(range(5)) + list(range(9)) + list(range(3))
     B, N = b["candidate_mask"].shape
@@ -78,7 +85,27 @@ def test_collator_packs_full_sequences_in_set_order(tok):
     assert (b["tiers"][~b["candidate_mask"]] == -1).all() and (b["tiers"][b["candidate_mask"]] >= 0).all()
     assert b["pair_mask"].shape == (3, N, N)
     assert (b["pair_mask"][~b["candidate_mask"]]).sum() == 0
+    # the shared prefix is encoded once: the pack costs len(prefix) + sum(suffix), not one full sequence per option
     assert b["n_tokens"] == len(p["input_ids"]) == sum(i.n_tokens for i in items)
+    assert b["n_tokens"] < sum(len(x) for it in items for x in it.seqs)
+
+
+def test_collator_chunk_plan_keeps_sets_whole(tok):
+    from scrm.collator import row_chunks, set_rows
+    r = Renderer(tok, {"max_len": 512})
+    items = [r.assemble(r.tokenize(mk_example(n)), np.random.default_rng(i), True) for i, n in enumerate([5, 9, 3])]
+    b = collate(items, r.pad_id)
+    p = b["pack"]
+    rows, cost = set_rows(p)
+    assert [len(x) for x in rows] == [5, 9, 3] and cost == [it.n_tokens for it in items]
+    assert row_chunks(p, None) == [list(range(17))]                             # no budget -> one chunk
+    assert row_chunks(p, 10 ** 9) == [list(range(17))]
+    chunks = row_chunks(p, cost[1])                                             # exactly fits set 1: prefix + its 9 suffixes
+    assert sorted(x for c in chunks for x in c) == list(range(17))
+    assert len(chunks) > 1                                                      # the budget forces several chunks
+    for c in chunks:                                                            # every chunk is a whole set (or a set
+        sets = {int(p["row_set"][x]) for x in c}                                 # too big for the budget: alone)
+        assert all(set(rows[s]) <= set(c) for s in sets)
 
 
 def test_overflow_drops_set_and_never_truncates(tok):
@@ -124,6 +151,63 @@ def test_bfd_packing_respects_budget_and_keeps_sets_whole():
         assert len(b) <= 3 and (sum(lens[i] for i in b) <= 1000 or len(b) == 1)
     assert [7] in bins                                                            # oversized set -> own bin
     assert len(bins) == 4                                                         # 3770 tokens, best fit -> 4 bins
+
+
+def _bfd_reference(lengths, capacity, max_items=None):
+    """The pre-fix algorithm as a naive linear scan (bins keyed by remaining space = capacity - used; among the bins
+    with the smallest sufficient space, the one that reached that space earliest wins - TRL's `space_to_bin`
+    deque). `pack_bfd` must reproduce its bins with a data-bounded search tree."""
+    lens = [max(int(x), 1) for x in lengths]
+    order = sorted(range(len(lens)), key=lambda i: -lens[i])
+    bins: list[list[int]] = []
+    used: list[int] = []
+    when: list[int | None] = []            # when each bin reached its current remaining space (None: not searchable)
+    clock = 0
+    for idx in order:
+        L = lens[idx]
+        best = best_space = None
+        if L <= capacity:
+            for b in range(len(bins)):
+                if when[b] is None:
+                    continue
+                sp = capacity - used[b]
+                if sp >= L and (best is None or sp < best_space or (sp == best_space and when[b] < when[best])):
+                    best, best_space = b, sp
+        if best is None:
+            bins.append([idx]); used.append(L); when.append(None)
+            best = len(bins) - 1
+        else:
+            bins[best].append(idx); used[best] += L
+        when[best] = None                   # the bin was popped from space_to_bin[its old space]
+        if capacity - used[best] > 0 and (max_items is None or len(bins[best]) < max_items):
+            clock += 1
+            when[best] = clock              # appended to space_to_bin[new space]: newest entry for that space
+    return bins
+
+
+def test_bfd_packing_large_budget_is_data_bounded():
+    """Regression: SegmentTree sized itself to `capacity`, so an 'unlimited' budget (10**9) allocated ~17 GB and
+    OOM-killed the suite. The tree must be bounded by the item sizes instead."""
+    from scrm.packing import chunk_plan, pack_bfd
+    assert pack_bfd([700, 50, 300], 10 ** 9) == [[0, 2, 1]]                      # descending order, one bin
+    assert chunk_plan([700, 50, 300], 10 ** 9) == [[0, 1, 2]]
+    big = [1] * 20000                                                            # would have needed a 2**31-slot tree
+    assert pack_bfd(big, 10 ** 9) == [list(range(20000))]
+    assert chunk_plan(big, 10 ** 9) == [list(range(20000))]
+    assert pack_bfd(big, 10 ** 9, max_items=8) == [list(range(i, i + 8)) for i in range(0, 20000, 8)]
+
+
+def test_bfd_packing_matches_naive_reference():
+    """The memory fix must not change the bins: identical to a naive best-fit-decreasing scan on moderate inputs
+    (including budgets above the total length and the max_items cap)."""
+    from scrm.packing import pack_bfd
+    rng = np.random.default_rng(0)
+    for _ in range(40):
+        lens = [int(x) for x in rng.integers(1, 900, size=int(rng.integers(1, 40)))]
+        for capacity, max_items in ((1000, None), (1000, 3), (500, 2), (10 ** 9, None), (10 ** 9, 3),
+                                    (sum(lens), None), (sum(lens), 2), (max(lens), None)):
+            assert pack_bfd(lens, capacity, max_items) == _bfd_reference(lens, capacity, max_items), \
+                (lens, capacity, max_items)
 
 
 def test_pred_router_and_mixing(synth):

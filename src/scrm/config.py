@@ -28,6 +28,11 @@ DEFAULTS: dict[str, Any] = {
         "lora": {"enabled": True, "r": 64, "alpha": 16, "dropout": 0.05, "use_rslora": True,
                  "target_modules": "all-linear"},
         "input_norm": True,                # LayerNorm(d) before the d->d_set projection
+        # reward head: "set" = SetEncoder over the set's candidate embeddings (v1/v2 checkpoints, cross-candidate
+        # interaction); "linear" = one nn.Linear(hidden, 1) applied per candidate ("Peek": r_i = w^T h_i + b, no
+        # cross-candidate interaction). scrm_head.pt keys are prefixed with the module name (`set_encoder.` /
+        # `reward_head.`) so loading a checkpoint into the other head fails loudly.
+        "head": "set",
         "d_set": 768,
         "set_layers": 2,                   # 0 = no-interaction ablation
         "set_heads": 8,

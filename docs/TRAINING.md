@@ -30,7 +30,10 @@ option), `eval_max_graded` (default all; `rank()` always grades all).
 The per-option embeddings of a set are projected (d -> 768), passed through a 2-layer bidirectional
 pre-LN transformer encoder **without positional embeddings** (so scores do not depend on candidate order), and an MLP head
 returns one unbounded scalar reward per candidate. Training uses Bradley-Terry over tier pairs
-(`tier_i < tier_j`, never same-tier). Data contract: `docs/CONTRACT.md`.
+(`tier_i < tier_j`, never same-tier). `model.head: linear` (configs/peek_qwen3_5_4b_h200.yaml) replaces the set encoder
+with a single shared `nn.Linear(hidden, 1)` applied per candidate (`r_i = w^T h_i + b`, raw rewards, no
+cross-candidate interaction in the head); head weights in `scrm_head.pt` are keyed by module name (`set_encoder.` /
+`reward_head.`) and the head type is rebuilt from the saved `scrm_config.json`. Data contract: `docs/CONTRACT.md`.
 
 Code: `src/scrm/` (`model.py`, `losses.py`, `render.py`, `collator.py`, `data.py`, `gradcache.py`, `metrics.py`, `train.py`,
 `evaluate.py`, `export.py`, `wandb_utils.py`). Everything is plain PyTorch; single GPU by default, multi-GPU via
@@ -300,5 +303,8 @@ loss:
 
 * `configs/ablation_frozen.yaml`: frozen Qwen3.5 (no LoRA); only set block + head learn.
 * `configs/ablation_no_set.yaml`: `model.set_layers=0` -> per-candidate scoring, no interaction.
+* `configs/peek_qwen3_5_4b_h200.yaml`: `model.head=linear` (Peek: shared `nn.Linear(hidden, 1)`, no set block) with the
+  v2 H200 recipe minus the listwise softmax (BT only) — a one-variable-group comparison against
+  `configs/scrm_qwen3_5_4b_h200.yaml` (v2).
 * Loss variants: `loss.w_listwise=1 loss.w_bt=0`, `loss.margin_alpha=0.5`, `loss.w_plackett_luce=...`.
 * Other: `model.d_set`, `model.lora.r`, `data.render.max_candidates`, MASSIVE cap/weights.
