@@ -136,7 +136,9 @@ DEFAULT_RENDER = {"max_len": 8192, "max_candidates": 64,
                   "grade_prompt": "\nGrade this choice: ",
                   # max options graded per set (one sequence each; the prompt still shows all kept options).
                   # None = grade every shown option. Subsampling keeps tier-0 + one per other tier.
-                  "max_graded": None, "eval_max_graded": None}
+                  # min_graded (training only, needs max_graded): grade k ~ U{min_graded..max_graded} options per
+                  # set instead of a fixed cap, so the set encoder sees varied set sizes.
+                  "max_graded": None, "min_graded": None, "eval_max_graded": None}
 
 _SENTINEL = "@@SCRM_BODY@@"
 
@@ -287,6 +289,8 @@ class Renderer:
         kept_final = sorted(idxs)
         if graded is None:
             mg = c.get("max_graded")
+            if mg and c.get("min_graded") and rng is not None:   # rng=None: inference / canonical assembly
+                mg = int(sub_rng.integers(min(c["min_graded"], mg), mg + 1))
             if mg and len(kept_final) > mg:
                 sel = subsample_indices(tiers[kept_final], mg, sub_rng)
                 graded = sorted(kept_final[j] for j in sel)

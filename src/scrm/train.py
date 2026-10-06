@@ -139,7 +139,8 @@ def save_ckpt(model, opt, sched, step, cfg, out_dir, state_extra: dict, name=Non
         shutil.rmtree(path)
     os.rename(tmp, path)
     if hub is not None:
-        hub.push(path, name or "last", f"step {step}, best val loss {state_extra.get('best', float('nan')):.4f}")
+        hub.push(path, name or "last", f"step {step}, best {state_extra.get('best_metric', 'val_loss')} "
+                                       f"{state_extra.get('best', float('nan')):.4f}")
     if name is None:
         for old in list_ckpts(out_dir)[:-keep_last]:
             shutil.rmtree(old, ignore_errors=True)
@@ -316,8 +317,16 @@ def train(cfg: dict, resume: str | None = None):
     opt = make_optimizer(model, tcfg)
     sched = make_scheduler(opt, warm, max_steps, tcfg["min_lr_ratio"])
 
-    step, best, bad_evals = 0, float("inf"), 0   # best = lowest validation loss; bad_evals = evals since it improved
-    meta = lambda: {"best": best, "best_metric": "val_loss", "optim": tcfg["optim"], "bad_evals": bad_evals}
+    # checkpoint selection + early stopping: train.best_metric = val_loss (lowest validation loss, at every eval) or
+    # dindex (highest Decision Index sample score, at every Decision Index run). bad_evals = evals since it improved.
+    metric = tcfg.get("best_metric") or "val_loss"
+    if metric not in ("val_loss", "dindex"):
+        raise ValueError(f"train.best_metric must be val_loss or dindex, got {metric!r}")
+    if metric == "dindex" and not (cfg["benchmarks"].get("decision_index") or {}).get("enabled"):
+        raise ValueError("train.best_metric=dindex needs benchmarks.decision_index.enabled")
+    sign = 1.0 if metric == "val_loss" else -1.0   # internal score = sign * metric, lower is better
+    step, best, bad_evals = 0, float("inf") if metric == "val_loss" else float("-inf"), 0
+    meta = lambda: {"best": best, "best_metric": metric, "optim": tcfg["optim"], "bad_evals": bad_evals}
     if resume:
         if resume == "auto":
             cks = list_ckpts(out_dir)
@@ -325,9 +334,9 @@ def train(cfg: dict, resume: str | None = None):
         if resume:
             resume = resolve_ckpt(resume)   # hf://... works when the run uploaded with hub.include_optimizer
             st = load_ckpt(model, opt, sched, resume)
-            if st.get("best_metric") != "val_loss" or st.get("optim") != tcfg["optim"]:
+            if st.get("best_metric", "val_loss") != metric or st.get("optim") != tcfg["optim"]:
                 raise ValueError(f"cannot resume {resume}: checkpoint has best_metric={st.get('best_metric')!r}, "
-                                 f"optim={st.get('optim')!r}; this run uses best_metric='val_loss', optim={tcfg['optim']!r}")
+                                 f"optim={st.get('optim')!r}; this run uses best_metric={metric!r}, optim={tcfg['optim']!r}")
             step, best, bad_evals = st["step"], st["best"], st.get("bad_evals", 0)
             broadcast_params(model)
             if rank == 0:
@@ -349,8 +358,25 @@ def train(cfg: dict, resume: str | None = None):
         mlog.write(json.dumps({"step": s, **data}) + "\n"); mlog.flush()
         wb.log({k: v for k, v in data.items() if v is not None}, s)
 
+    def consider_best(value, s):
+        """Save `best` when `value` (of train.best_metric) improves on it; else count a bad eval."""
+        nonlocal best, bad_evals
+        if math.isfinite(value) and sign * value < sign * best - tcfg["early_stop_min_delta"]:
+            best, bad_evals = value, 0
+            save_ckpt(model, opt, sched, s, cfg, out_dir, meta(), name="best", hub=hub)   # with optimizer: `best` is resumable
+        else:
+            bad_evals += 1
+
+    def stop_now() -> bool:
+        pat = tcfg["early_stop_patience"]
+        if pat and bad_evals >= pat:
+            print(f"[scrm] early stop at step {step}: {metric} did not improve for {bad_evals} evals "
+                  f"(best {best:.4f})", flush=True)
+            return True
+        return False
+
     def do_eval(s):
-        nonlocal evalset, best, bad_evals
+        nonlocal evalset
         if evalset is None:
             evalset = EvalSet.from_config(cfg, renderer)
             print(f"[eval] set: {evalset.describe()}", flush=True)
@@ -367,18 +393,14 @@ def train(cfg: dict, resume: str | None = None):
               f"mrr={a.get('mrr', 0):.4f} ndcg={a.get('ndcg', 0):.4f} loss={a.get('loss', 0):.4f} "
               f"ece={a.get('ece_top1', float('nan')):.3f} overconf={a.get('overconf', float('nan')):+.3f} "
               f"perm_agree={pm.get('rank_agree', float('nan')):.3f} ({time.time()-t0:.0f}s)", flush=True)
-        vloss = a.get("loss", float("inf"))
-        if math.isfinite(vloss) and vloss < best - tcfg["early_stop_min_delta"]:
-            best, bad_evals = vloss, 0
-            save_ckpt(model, opt, sched, s, cfg, out_dir, meta(), name="best", hub=hub)   # with optimizer: `best` is resumable
-        else:
-            bad_evals += 1
+        if metric == "val_loss":
+            consider_best(a.get("loss", float("inf")), s)
         model.train()
 
     done_bench = {}   # benchmark -> last step it ran at
 
     def do_benchmarks(s, final=False):
-        """Test split + Decision Index sample, logged only (checkpoint selection stays on validation loss).
+        """Test split + Decision Index sample (the Decision Index also selects `best` when train.best_metric=dindex).
         Decision Index runs at steps divisible by its `every` (null = every call) and always at the end."""
         nonlocal testset, dindex
         if bcfg.get("test_split") and done_bench.get("test") != s:
@@ -407,6 +429,8 @@ def train(cfg: dict, resume: str | None = None):
             log({f"dindex/{k}": v for k, v in m.items()}, s)
             print(f"[dindex] step {s}: index={m['index']:.2f} raw={m['raw_index']:.2f} "
                   f"answered={m['answered_frac']:.3f} ({m['seconds']:.0f}s)", flush=True)
+            if metric == "dindex":
+                consider_best(float(m["index"]), s)
         model.train()
 
     di0 = bcfg.get("decision_index") or {}
@@ -488,23 +512,20 @@ def train(cfg: dict, resume: str | None = None):
             win_tok, win_time, win_steps = 0, 0.0, 0
         if tcfg["hist_every"] and step % tcfg["hist_every"] == 0 and wb.enabled:
             wb.log_hist("train/reward_hist", last_r[last_b["candidate_mask"]].cpu().numpy(), step)
-        if tcfg["eval_every"] and step % tcfg["eval_every"] == 0:
-            stop = False
-            if rank == 0:
-                do_eval(step)
-                pat = tcfg["early_stop_patience"]
-                stop = bool(pat and bad_evals >= pat)
-                if stop:
-                    print(f"[scrm] early stop at step {step}: val loss did not improve for {bad_evals} evals "
-                          f"(best {best:.4f})", flush=True)
-            if world > 1:
-                stop = bool(reduce_ints(int(stop), device, dist.ReduceOp.MAX))
-            if stop:
-                break
-        if tcfg["save_every"] and step % tcfg["save_every"] == 0 and rank == 0:
+        stop = False
+        if tcfg["eval_every"] and step % tcfg["eval_every"] == 0 and rank == 0:
+            do_eval(step)
+            stop = metric == "val_loss" and stop_now()
+        saving = bool(tcfg["save_every"]) and step % tcfg["save_every"] == 0
+        if saving and rank == 0:
             save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)   # before the log-only benchmarks: a benchmark crash must not lose the interval
             saved_at = step
             do_benchmarks(step)
+            stop = stop or (metric == "dindex" and stop_now())
+        if world > 1 and ((tcfg["eval_every"] and step % tcfg["eval_every"] == 0) or saving):   # same steps on every rank
+            stop = bool(reduce_ints(int(stop), device, dist.ReduceOp.MAX))
+        if stop:
+            break
 
     path = None
     if rank == 0:
@@ -516,7 +537,7 @@ def train(cfg: dict, resume: str | None = None):
             path = os.path.join(out_dir, f"step_{step:07d}")
         else:
             path = save_ckpt(model, opt, sched, step, cfg, out_dir, meta(), keep_last=tcfg["keep_last"], hub=hub)
-        print(f"[scrm] done. final checkpoint: {path}; best val loss={best:.4f}", flush=True)
+        print(f"[scrm] done. final checkpoint: {path}; best {metric}={best:.4f}", flush=True)
         hub.wait()
         wb.finish()
         mlog.close()
