@@ -6,6 +6,7 @@ segment per option (see scrm.collator / scrm.model), so these tests pin the equi
 states), the rewards and the gradients (LoRA + set head) — including the chunked, gradient-cached and single-token
 suffix paths.
 """
+import copy
 import importlib
 
 import pytest
@@ -13,6 +14,11 @@ import torch
 
 from scrm.model import build_scrm
 from test_scrm_model import TINY, _assert_same, _fwd_bwd, _items, _oracle_embeds, _oracle_fwd_bwd, _sets
+
+
+def _rel_err(x, ref):
+    x, ref = x.detach().float().cpu().flatten(), ref.detach().float().cpu().flatten()
+    return ((x - ref).norm() / ref.norm().clamp(min=1e-12)).item()
 
 
 def _model(**kw):
@@ -135,7 +141,13 @@ def test_branch_grad_cache_chunks_are_whole_sets_and_match_standard():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="branch varlen kernels are CUDA-only")
 def test_branch_gpu_varlen_matches_torch_path_and_oracle(monkeypatch):
-    """GPU: flash-attn varlen + fla/causal-conv1d branch path == torch branch path == full-sequence oracle.
+    """GPU: the flash-attn varlen + fla/causal-conv1d branch path is as accurate as the bf16 full-sequence oracle.
+
+    bf16 autocast (flash-attn needs half precision) puts ~1e-2 relative noise on gradients, and the branch path and the
+    per-option oracle round differently, so they cannot be compared elementwise. Ground truth is the fp32 oracle on
+    CPU (exact; the CPU tests pin it to the branch encoder at 1e-5). Every bf16 path (cuda branch, torch branch, oracle)
+    is scored by its norm-relative error to that truth per tensor; a branch path may not be worse than
+    2x the bf16 oracle's own error (the precision floor), with an absolute floor of 1e-2.
 
     Run on the training box: `.venv/bin/python -m pytest tests/test_scrm_branching.py -q`.
     """
@@ -146,24 +158,28 @@ def test_branch_gpu_varlen_matches_torch_path_and_oracle(monkeypatch):
     model.train()
     _perturb_lora(model)
     items = _items([5, 3, 1], P=70, seed=3, one_token=True)
-    pack, cm = _sets([5, 3, 1], P=70, seed=3, one_token=True)
-    pack = {k: v.cuda() if torch.is_tensor(v) else v for k, v in pack.items()}
-    cm = cm.cuda()
-    amp = torch.autocast("cuda", dtype=torch.bfloat16)   # the tiny model is fp32; flash-attn needs half precision
+    pack_cpu, cm_cpu = _sets([5, 3, 1], P=70, seed=3, one_token=True)
+    truth = _oracle_fwd_bwd(copy.deepcopy(model).cpu(), items, pack_cpu, cm_cpu)   # fp32, no kernels
+    pack = {k: v.cuda() if torch.is_tensor(v) else v for k, v in pack_cpu.items()}
+    cm = cm_cpu.cuda()
+    amp = torch.autocast("cuda", dtype=torch.bfloat16)
     with amp:
-        ref = _fwd_bwd(model, pack, cm, None)
+        runs = {"cuda-branch": _fwd_bwd(model, pack, cm, None)}
+    with amp:
+        runs["oracle-bf16"] = _oracle_fwd_bwd(model, items, pack, cm)
     monkeypatch.setattr(M, "_varlen_kernels", lambda d: False)
     with amp:
-        pad = _fwd_bwd(model, pack, cm, None)
-    with amp:
-        orc = _oracle_fwd_bwd(model, items, pack, cm)
-    # report every comparison before failing: oracle vs kernels tells a real branch bug from bf16 kernel noise
-    errs = []
-    for args, kw in (((pad, ref), {"label": "torch-branch vs cuda-branch"}),
-                     ((orc, ref), {"label": "oracle vs cuda-branch", "atol": 5e-3}),
-                     ((orc, pad), {"label": "oracle vs torch-branch", "atol": 5e-3})):
-        try:
-            _assert_same(*args, **kw)
-        except AssertionError as e:
-            errs.append(str(e))
-    assert not errs, "\n".join(errs)
+        runs["torch-branch"] = _fwd_bwd(model, pack, cm, None)
+
+    (r_t, g_t) = truth
+    assert all(g.keys() == g_t.keys() for _, g in runs.values()) and any("lora_" in n for n in g_t)
+    names = ["rewards"] + list(g_t)
+    err = {k: [_rel_err(r, r_t)] + [_rel_err(g[n], g_t[n]) for n in g_t] for k, (r, g) in runs.items()}
+    floor = [max(2 * e, 1e-2) for e in err["oracle-bf16"]]
+    bad = [(k, i) for k in ("cuda-branch", "torch-branch") for i, e in enumerate(err[k]) if e > floor[i]]
+    rows = sorted(range(len(names)), key=lambda i: -max(err["cuda-branch"][i], err["torch-branch"][i]) / floor[i])
+    table = "\n".join(f"  oracle-bf16 {err['oracle-bf16'][i]:.2e}  cuda-branch {err['cuda-branch'][i]:.2e}  "
+                      f"torch-branch {err['torch-branch'][i]:.2e}  {names[i]}" for i in rows[:12])
+    print("norm-relative error vs fp32 oracle (worst first):\n" + table)
+    assert not bad, (f"{len(bad)} tensors exceed 2x bf16 oracle error: "
+                     f"{sorted({names[i] for _, i in bad})[:6]}\n{table}")
