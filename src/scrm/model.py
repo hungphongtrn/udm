@@ -570,6 +570,24 @@ def _fix_conv_edges(gdn, conv, x, plan) -> torch.Tensor:
     return torch.cat(pieces, dim=2)
 
 
+def _channel_last(x: torch.Tensor) -> torch.Tensor:
+    """[B, C, T] with stride 1 over C (memory laid out as [B, T, C])."""
+    return x if x.stride(1) == 1 else x.transpose(1, 2).contiguous().transpose(1, 2)
+
+
+class _ChannelLastGrad(torch.autograd.Function):
+    """Identity whose backward hands a channel-last gradient to the op before it (the seq_idx conv kernel rejects the
+    contiguous [B, C, T] gradients that slicing/concatenation produce)."""
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, g):
+        return _channel_last(g)
+
+
 def _branch_conv(gdn, mixed, plan, varlen) -> torch.Tensor:
     """Short causal conv over the branch layout ([1, C, T] in, same out). Each segment is convolved as its own
     sequence (CUDA: the `seq_idx` kernel; CPU: the torch reference over the whole layout) and the first kernel-1
@@ -578,9 +596,11 @@ def _branch_conv(gdn, mixed, plan, varlen) -> torch.Tensor:
     from transformers.models.qwen3_5 import modeling_qwen3_5 as mq
     w, bias = gdn.conv1d.weight.squeeze(1), gdn.conv1d.bias
     if varlen:
-        seg = torch.repeat_interleave(torch.arange(len(plan.seg_len), device=mixed.device),
+        # causal-conv1d's seq_idx kernel needs int32 segment ids and channel-last x / dout (stride 1 over C)
+        seg = torch.repeat_interleave(torch.arange(len(plan.seg_len), device=mixed.device, dtype=torch.int32),
                                       torch.as_tensor(plan.seg_len, device=mixed.device))
-        conv = mq.causal_conv1d_fn(mixed, w, bias, activation=gdn.activation, seq_idx=seg[None])
+        conv = _ChannelLastGrad.apply(mq.causal_conv1d_fn(_channel_last(mixed), w, bias, activation=gdn.activation,
+                                                          seq_idx=seg[None]))
     else:
         conv = mq.causal_conv1d_fn(mixed, w, bias, activation=gdn.activation)
     if gdn.conv_kernel_size <= 1:
