@@ -58,7 +58,7 @@ def init_wandb(wcfg: dict, config: dict, out_dir: str | None = None, resume_id: 
     except Exception:
         print("[wandb] not installed; logging disabled")
         return NullRun()
-    tags = wcfg.get("tags") or []
+    tags = [str(t) for t in wcfg.get("tags") or []]   # YAML parses bare numbers (e.g. 3090) as int; wandb wants str
     if os.environ.get("WANDB_TAGS"):
         tags = tags + os.environ["WANDB_TAGS"].split(",")
     try:
