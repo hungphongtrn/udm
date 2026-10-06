@@ -6,7 +6,6 @@ segment per option (see scrm.collator / scrm.model), so these tests pin the equi
 states), the rewards and the gradients (LoRA + set head) — including the chunked, gradient-cached and single-token
 suffix paths.
 """
-import copy
 import importlib
 
 import pytest
@@ -159,7 +158,9 @@ def test_branch_gpu_varlen_matches_torch_path_and_oracle(monkeypatch):
     _perturb_lora(model)
     items = _items([5, 3, 1], P=70, seed=3, one_token=True)
     pack_cpu, cm_cpu = _sets([5, 3, 1], P=70, seed=3, one_token=True)
-    truth = _oracle_fwd_bwd(copy.deepcopy(model).cpu(), items, pack_cpu, cm_cpu)   # fp32, no kernels
+    cpu_model = _model().train()          # own CPU build: deepcopy().cpu() misses non-module tensors
+    cpu_model.load_state_dict(model.state_dict())
+    truth = _oracle_fwd_bwd(cpu_model, items, pack_cpu, cm_cpu)   # fp32, no kernels
     pack = {k: v.cuda() if torch.is_tensor(v) else v for k, v in pack_cpu.items()}
     cm = cm_cpu.cuda()
     amp = torch.autocast("cuda", dtype=torch.bfloat16)
