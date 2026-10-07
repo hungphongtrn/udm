@@ -573,9 +573,13 @@ def _run_locked(cfg: dict, device, out_dir: str, ctrl: _StopController) -> dict:
                                  "new features.out_dir")
             print(f"[features] resuming legacy HF cache {out_dir} (opt-in; its selection was not recorded)", flush=True)
         else:
+            old_ident = old.get("identity") or {k: old.get(k) for k in base}
+            changed = sorted(k for k in set(old_ident) | set(full)
+                             if json.dumps(old_ident.get(k), sort_keys=True, default=str)
+                             != json.dumps(full.get(k), sort_keys=True, default=str))
+            detail = "; ".join(f"{k}: {old_ident.get(k)!r} -> {full.get(k)!r}" for k in changed) or "fingerprint only"
             raise SystemExit(f"{path} was made with a different features/render/model/data-selection config "
-                             f"(backend {old.get('backend', 'hf')!r} vs {backend!r}); use a new features.out_dir or "
-                             "features.overwrite=true")
+                             f"({detail}); use a new features.out_dir or features.overwrite=true")
         man = old
         man["format"] = max(int(man.get("format", 1)), MANIFEST_FORMAT)
         man["fingerprint"] = fp
