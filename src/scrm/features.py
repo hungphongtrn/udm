@@ -150,8 +150,8 @@ def _set_jobs(renderer: Renderer, row: dict, variants: int, seed: int):
 @torch.no_grad()
 def extract_rows(model, renderer: Renderer, rows: list[dict], fcfg: dict, split: str, device) -> tuple[dict, list, int]:
     """Featurize rows -> ({layer: [M, d] bf16 tensors}, parquet records, number of dropped rows)."""
-    from .collator import collate, to_device
-    from .data import make_batches
+    from .collator import collate
+    from .packing import pack_bfd
     layers, K = [int(l) for l in fcfg["layers"]], int(fcfg["variants"])
     jobs, dropped = [], 0
     for row in rows:
@@ -174,12 +174,26 @@ def extract_rows(model, renderer: Renderer, rows: list[dict], fcfg: dict, split:
                             "family": meta["family"], "source_id": meta["source_id"], "split": split,
                             "truncated": bool(meta["truncated"])})
             off += meta["n_options"]
-    items = [it for _, its, _ in jobs for it in its]
+    buckets = {}
+    for _, its, _ in jobs:
+        for it in its:
+            buckets.setdefault(len(it.prefix), []).append(it)
     amp = device.type == "cuda"
-    for batch_items in make_batches(items, int(fcfg["max_tokens"]), int(fcfg["max_batch_size"])):
-        b = to_device(collate(batch_items, pad_id=renderer.pad_id), device)
+    batches = (
+        [items[i] for i in indices]
+        for P, items in buckets.items()
+        for indices in pack_bfd([P + sum(len(s) for s in it.suffixes) for it in items],
+                                int(fcfg["max_tokens"]), int(fcfg["max_batch_size"]))
+    )
+    for batch_items in batches:
+        b = collate(batch_items, pad_id=renderer.pad_id)
+        # Scheduling metadata stays on CPU: embed_prefix_cached reads it as Python lists.
+        # Moving it to CUDA only to call .tolist() forces an avoidable GPU synchronization.
+        for key in ("input_ids", "position_ids"):
+            b["pack"][key] = b["pack"][key].to(device, non_blocking=True)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-            e = model.embed_prefix_cached(b["pack"], layers=layers, cache_tokens=int(fcfg["cache_tokens"]))
+            e = model.embed_prefix_cached(b["pack"], layers=layers, cache_tokens=int(fcfg["cache_tokens"]),
+                                          prefill_tokens=int(fcfg["max_tokens"]))
         e = {l: x.to(torch.bfloat16).cpu() for l, x in e.items()}
         s = 0
         for it in batch_items:

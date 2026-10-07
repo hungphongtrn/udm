@@ -114,20 +114,24 @@ def test_embed_layers_api(synth):
 
 @pytest.mark.parametrize("one_token", [False, True])
 @pytest.mark.parametrize("cache_tokens", [10 ** 6, 1])
-def test_prefix_cached_matches_full_sequences(synth, one_token, cache_tokens):
-    """Prefix caching (prompt prefilled once, options continue from a copied cache) gives every layer's features of
-    the plain full-sequence prefill, in pack row order: multi-token and single-token (decode-path) suffixes, all
-    suffixes of a set in one forward or one per forward, and the prompt cache is not corrupted between them."""
+@pytest.mark.parametrize("prefill_tokens", [10 ** 6, 1])
+def test_prefix_cached_matches_full_sequences(synth, one_token, cache_tokens, prefill_tokens):
+    """Batched prompts and suffixes preserve cache ownership and pack row order, including mixed prompt lengths,
+    single-token continuation, chunk boundaries and intermediate-layer readouts."""
     model, _ = _model(_cfg(synth, "unused"))
-    from test_scrm_model import _sets
-    pack, _ = _sets([3, 1, 4], P=11, seed=4, one_token=one_token)
+    from test_scrm_model import _items
+    items = _items([3, 1, 4], P=11, seed=4, one_token=one_token)
+    items[1].prefix = items[1].prefix[:-2]
+    pack = collate(items)["pack"]
     with torch.no_grad():
         a = model.embed(pack, layers=[1, 2, 3, -1])
-    b = model.embed_prefix_cached(pack, layers=[1, 2, 3, -1], cache_tokens=cache_tokens)
+    b = model.embed_prefix_cached(pack, layers=[1, 2, 3, -1], cache_tokens=cache_tokens,
+                                  prefill_tokens=prefill_tokens)
     assert list(b) == [1, 2, 3, -1]
     for l in a:
         assert torch.allclose(a[l], b[l], atol=2e-5), (l, (a[l] - b[l]).abs().max().item())
-    assert torch.allclose(model.embed_prefix_cached(pack, cache_tokens=cache_tokens), a[-1], atol=2e-5)
+    assert torch.allclose(model.embed_prefix_cached(pack, cache_tokens=cache_tokens, prefill_tokens=prefill_tokens),
+                          a[-1], atol=2e-5)
 
 
 def test_resume_skips_completed_shards(synth, tmp_path, monkeypatch):
@@ -153,6 +157,7 @@ def test_resume_skips_completed_shards(synth, tmp_path, monkeypatch):
     assert all(new[f] == stamp[f] for f in files if not f.startswith("shard_00002"))
     assert not [f for f in os.listdir(d) if f.endswith(".tmp")]
     calls.clear()
+    cfg["features"].update(max_tokens=32768, max_batch_size=64, cache_tokens=65536)
     F.run(cfg)
     assert calls == []                                              # everything complete: nothing to do
 

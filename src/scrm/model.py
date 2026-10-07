@@ -200,14 +200,13 @@ class SCRM(nn.Module):
         return {l: (last if l == -1 else out[l]) for l in want}
 
     @torch.no_grad()
-    def embed_prefix_cached(self, pack: dict, layers=None, cache_tokens: int = 131072):
-        """Inference-only `embed` with HF prefix caching (frozen backbone, feature extraction): per set, the shared
-        prompt is prefilled ONCE with `use_cache=True`; the options' suffixes then continue from a copy of that cache
-        (attention KV + Gated DeltaNet conv / recurrent state), batched by suffix length (no padding), at most
-        `cache_tokens // (len(prompt) + len(suffix))` suffixes per forward (the copied KV grows with the batch).
-        Returns the hidden state at the last token of every graded option, pack row order, as `embed`.
-        `layers=None` -> last layer [M, d]; else {layer: [M, d]}: -1 = last layer, l in 1..num_hidden_layers =
-        residual stream after decoder layer l, passed through the final norm."""
+    def embed_prefix_cached(self, pack: dict, layers=None, cache_tokens: int = 131072, prefill_tokens: int = 16384):
+        """Inference-only features using stock HF prefix caching. Equal-length prompts are prefilled together
+        (no padding), once per set; suffixes of equal length continue from copies of their corresponding cache rows.
+        `prefill_tokens` bounds prompt batch tokens; `cache_tokens` bounds (prompt + suffix) * suffix batch size.
+        Returns last-token features in pack row order. `layers=None` -> last layer [M, d]; otherwise {layer: [M, d]}:
+        -1 = last layer, l in 1..num_hidden_layers = residual after decoder layer l, passed through the final norm.
+        Batching changes kernel rounding, not the rendered inputs or feature-cache identity."""
         import copy
         tm = _inner_text(self.backbone)
         want = _check_layers(tm, layers)
@@ -222,36 +221,52 @@ class SCRM(nn.Module):
         groups = {}                                       # prefix segment -> {suffix length: [rows]}
         for r, s in enumerate(row_seg):
             groups.setdefault(seg_prefix[s], {}).setdefault(seg_lens[s], []).append(r)
-        grabbed, hooks = {}, []
+        prefixes = {}
+        for p in groups:
+            prefixes.setdefault(seg_lens[p], []).append(p)
+        grabbed, hooks, capture = {}, [], False
         for l in want or []:
             if l in (-1, n_layers):
                 continue                                  # = last_hidden_state (residual after the last layer + norm)
 
             def grab(mod, args, res, l=l):
-                h = res[0] if isinstance(res, tuple) else res
-                grabbed[l] = tm.norm(h[:, -1])
+                if capture:
+                    h = res[0] if isinstance(res, tuple) else res
+                    grabbed[l] = tm.norm(h[:, -1])
 
             hooks.append(tm.layers[l - 1].register_forward_hook(grab))
         keys = want if want is not None else [-1]
         out = {l: [None] * len(row_seg) for l in keys}
         try:
-            for p, by_len in groups.items():
-                P = seg_lens[p]
-                prompt = tm(input_ids=ids[span(p)][None], position_ids=pos[span(p)][None], use_cache=True)
-                cache = prompt.past_key_values
-                for S, rows in by_len.items():
-                    k_max = max(1, int(cache_tokens) // (P + S))
-                    for i in range(0, len(rows), k_max):
-                        part = rows[i:i + k_max]
-                        c = copy.deepcopy(cache)
-                        c.reorder_cache(torch.zeros(len(part), dtype=torch.long, device=ids.device))
-                        x = torch.stack([ids[span(row_seg[r])] for r in part])
-                        px = torch.stack([pos[span(row_seg[r])] for r in part])
-                        last = tm(input_ids=x, position_ids=px, past_key_values=c, use_cache=True).last_hidden_state[:, -1]
-                        for l in keys:
-                            e = last if l in (-1, n_layers) else grabbed[l]
-                            for j, r in enumerate(part):
-                                out[l][r] = e[j]
+            for P, prefix_rows in prefixes.items():
+                p_max = max(1, int(prefill_tokens) // P)
+                for pi in range(0, len(prefix_rows), p_max):
+                    ps = prefix_rows[pi:pi + p_max]
+                    x = torch.stack([ids[span(p)] for p in ps])
+                    px = torch.stack([pos[span(p)] for p in ps])
+                    capture = False
+                    cache = tm(input_ids=x, position_ids=px, use_cache=True).past_key_values
+                    by_len, owner = {}, {}
+                    for j, p in enumerate(ps):
+                        for S, rows in groups[p].items():
+                            by_len.setdefault(S, []).extend(rows)
+                            owner.update((r, j) for r in rows)
+                    capture = True
+                    for S, rows in by_len.items():
+                        k_max = max(1, int(cache_tokens) // (P + S))
+                        for i in range(0, len(rows), k_max):
+                            part = rows[i:i + k_max]
+                            c = copy.deepcopy(cache)
+                            c.reorder_cache(torch.tensor([owner[r] for r in part], dtype=torch.long, device=ids.device))
+                            x = torch.stack([ids[span(row_seg[r])] for r in part])
+                            px = torch.stack([pos[span(row_seg[r])] for r in part])
+                            last = tm(input_ids=x, position_ids=px, past_key_values=c, use_cache=True).last_hidden_state[:, -1].clone()
+                            for l in keys:
+                                e = last if l in (-1, n_layers) else grabbed[l]
+                                for j, r in enumerate(part):
+                                    out[l][r] = e[j]
+                            del c
+                    del cache
         finally:
             for hk in hooks:
                 hk.remove()
