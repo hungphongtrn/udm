@@ -2,12 +2,18 @@
 # scripts/train/extract_features.sh <config.yaml> [key.sub=value ...]
 # Frozen-backbone feature cache (Experiment 2), e.g.
 #   scripts/train/extract_features.sh configs/features_qwen3_5_4b.yaml features.max_sets.train=2000
-# Resumable: finished shards (listed in <features.out_dir>/manifest.json) are skipped on re-run.
-# Prompt batches use equal lengths, no padding. max_batch_size caps both prompt and suffix forward rows.
-# max_tokens/max_batch_size/cache_tokens affect only unfinished shards; lower these after OOM, never overwrite the cache.
-# Keep out_dir and inputs/render/layers/variants/seed/shard_size/max_sets unchanged; never set overwrite=true to resume.
+# First Ctrl-C/SIGTERM finishes and commits the current shard; repeat the command to resume.
+# A second signal exits immediately; unfinished files are ignored and that shard is recomputed.
+# Keep cache identity unchanged; batching caps may change. Never overwrite to resume.
+# vLLM uses its isolated environment; FEATURES_PYTHON can select the HF reference environment.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 CFG="${1:?usage: extract_features.sh <config.yaml> [overrides]}"; shift
 cd "$REPO_ROOT"
-py -m scrm.features --config "$CFG" "$@"
+FEATURES_PYTHON="${FEATURES_PYTHON:-$REPO_ROOT/.venv-vllm/bin/python}"
+if [[ ! -x "$FEATURES_PYTHON" ]]; then
+  printf 'Missing feature interpreter: %s\nSee docs/TRAINING.md, Frozen feature extraction, for setup.\n' "$FEATURES_PYTHON" >&2
+  exit 1
+fi
+# No uv/shell process between the caller and Python: stop signals reach the checkpoint handler.
+exec "$FEATURES_PYTHON" -m scrm.features --config "$CFG" "$@"

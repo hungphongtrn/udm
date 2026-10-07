@@ -99,13 +99,17 @@ DEFAULTS: dict[str, Any] = {
     # layers: 1..num_hidden_layers = residual stream after that decoder layer (then the final norm), -1 = last layer.
     # max_sets: rows drawn per split (sources interleaved; rows that do not render are dropped), null = every row.
     "features": {
-        "out_dir": "outputs/features", "layers": [-1], "variants": 2, "seed": 0, "shard_size": 512,
+        "out_dir": "outputs/features", "backend": "hf", "layers": [-1], "variants": 2, "seed": 0, "shard_size": 512,
         "splits": ["train", "validation", "test"],
         "max_sets": {"train": None, "validation": None, "test": None},
         # max_tokens: sum(prompt + all suffix lengths), prompt counted once per set; equal-length prompts batch together.
         # max_batch_size: rows in BOTH prompt and suffix forwards (recurrent state grows per row, even for short prompts).
         # cache_tokens: (prompt + suffix length) * suffix batch size; these caps are not a VRAM admission controller.
         "max_tokens": 8192, "max_batch_size": 8, "cache_tokens": 32768, "overwrite": False,
+        "resume_legacy_hf": False,       # old manifests lack data identity; explicit trust required for one-time upgrade
+        # vLLM pooling: packed prefill-only requests; HF batching knobs above do not apply.
+        "vllm": {"gpu_memory_utilization": 0.9, "max_num_batched_tokens": 16384, "max_num_seqs": 32,
+                 "request_batch_size": 256, "enable_prefix_caching": True, "enable_chunked_prefill": True},
     },
     # test-only evaluations at every save step (and at the end); never used for checkpoint selection
     "benchmarks": {

@@ -65,6 +65,81 @@ m.pairwise_probability(r_i, r_j, tau=1.0)         # sigmoid((r_i - r_j)/tau)
 ```
 `uv run python -m scrm.export --ckpt DIR|hf://... --out OUT [--merge]` copies the checkpoint (or merges LoRA into a bf16 backbone) for serving.
 
+## Frozen feature extraction
+
+`configs/features_qwen3_5_4b.yaml` uses **prefill-only vLLM pooling**, not generation: each option is an independent
+causal sequence, and vLLM packs variable-length requests and caches reusable prefix blocks. Layers **16, 24 and last**
+are read at the **last input token**, passed through the checkpoint final RMSNorm, and saved as bf16. No extra L2
+normalization, sampled token, decode step, or custom branching encoder. Metadata and canonical option ordering are
+unchanged. Different HF/vLLM kernels need not be bit-identical; the two caches and loss-grid outputs are separate.
+
+### Isolated engine environment (GPU machine)
+
+Do not install vLLM into the training environment: the pinned engine requires a different Torch version. Keep the
+existing `.venv`/training stack intact. From the repository root:
+
+```bash
+uv venv --python 3.12 .venv-vllm
+uv pip install --python .venv-vllm/bin/python -e . \
+  'vllm==0.22.1' 'pandas>=2.0' 'datasets>=3.0' 'fsspec>=2023.1'
+scripts/train/extract_features.sh configs/features_qwen3_5_4b.yaml data.local_dir=data_cache/udm
+```
+
+The launcher directly `exec`s this interpreter, so SIGINT/SIGTERM reach Python. `FEATURES_PYTHON=/path/to/python`
+selects another environment. vLLM, its CUDA kernels and driver compatibility must be checked on the actual GPU;
+the engine version is pinned because the multi-layer pooler uses its native model/pooling interfaces.
+
+### Stop and resume
+
+* **Ctrl-C once**, or `kill -TERM <python-pid>`: finish the current shard, durably write its tensors and metadata,
+  commit the manifest, then stop. Wait for the `stopped cleanly`/`stop:` message; a large shard can take time.
+* **Repeat the identical extraction command** to resume. Committed shards are skipped; a completed cache does not
+  load the backbone again. There is no `--resume` switch, and `features.overwrite=true` is not a resume command.
+* A second signal or forced kill abandons the in-flight shard. The manifest is the commit boundary: unfinished
+  shards are recomputed on restart, not appended as duplicate rows.
+* Only one writer may own an output directory. A second extraction fails immediately rather than racing files.
+  The persistent `.lock` file is an advisory lock, not a stale-PID marker; do not delete it to bypass another writer.
+* Keep model/backend, data selection, rendering, layers, variants, seed, shard size and row caps unchanged. Use a
+  **new output directory** for a different cache identity. Missing/corrupt committed shards are errors, not silently
+  replaced features. Do not edit the manifest to bypass identity checks.
+* Scheduling knobs may change on resume: `features.vllm.max_num_seqs`, `request_batch_size`,
+  `gpu_memory_utilization`, `max_num_batched_tokens`, prefix caching and chunked prefill. Qwen3.5 aligned prefix caching
+  requires chunked prefill (the default enables both). To disable chunking, also disable prefix caching and keep
+  `max_num_batched_tokens >= data.render.max_len`. For the HF path, batching knobs remain
+  `features.max_tokens`, `max_batch_size` and `cache_tokens`. Kernel rounding can vary with batching.
+* Manifest format 2 records the backend/feature identity and a per-split selected-files/rows digest. A split is ready
+  for head training only when its `complete` flag is true; consumers use the manifest shard list, not stray files.
+
+The vLLM cache defaults to `outputs/features_qwen3_5_4b_vllm`; the existing HF cache at
+`outputs/features_qwen3_5_4b` is not overwritten or silently reused. To use the HF reference path, select the
+existing training interpreter and explicitly retain the old directory/backend. Pre-format-2 HF caches lack data
+identity: only if you know the dataset/model/rendering are unchanged, opt in to a one-time upgrade with
+`features.resume_legacy_hf=true` (this cannot retrospectively prove their original input identity):
+
+```bash
+FEATURES_PYTHON="$PWD/.venv/bin/python" \
+  scripts/train/extract_features.sh configs/features_qwen3_5_4b.yaml \
+  features.backend=hf features.out_dir=outputs/features_qwen3_5_4b \
+  features.resume_legacy_hf=true data.local_dir=data_cache/udm
+```
+
+### Remote smoke before the loss grid
+
+Use a **separate** small cache to check engine startup and all three feature outputs on the GPU; row caps/shard size
+for this smoke must not be applied to an existing cache:
+
+```bash
+scripts/train/extract_features.sh configs/features_qwen3_5_4b.yaml \
+  features.out_dir=outputs/features_vllm_smoke data.local_dir=data_cache/udm \
+  features.max_sets.train=8 features.max_sets.validation=8 features.max_sets.test=8 features.shard_size=4
+```
+
+Interrupt once during extraction, wait for a committed-shard stop, then repeat that same command and check the
+resume/skip messages. Inspect `manifest.json` for `backend: vllm`, all three keys (`feat_L16`, `feat_L24`,
+`feat_Llast`) and completed splits. This is a correctness/startup check, not a throughput or VRAM guarantee.
+Run the full extraction to completion before training heads. `configs/lossgrid_qwen3_5_4b.yaml` now points at the
+vLLM cache and `outputs/lossgrid/qwen3_5_4b_vllm_set`; prior HF pilot results remain untouched.
+
 ## Design choices
 
 * **Backbone = Qwen3.5-4B text decoder.** `Qwen/Qwen3.5-4B` is a vision-language checkpoint (`Qwen3_5Model` = `visual` +

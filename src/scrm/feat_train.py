@@ -9,7 +9,6 @@ Heads: linear | mlp | set (SetEncoder). Readouts: ce, brier, bt, sigmoid (scrm.l
 init depend only on (seed, config), never on which loss terms are active, so arms are directly comparable."""
 from __future__ import annotations
 
-import glob
 import json
 import math
 import os
@@ -90,7 +89,15 @@ class FeatSplit:
 def load_split(cache_dir: str, split: str, layer, max_options: int | None = None, drop_truncated: bool = False) -> FeatSplit:
     from safetensors import safe_open
     key = f"feat_L{layer}"
-    pq = sorted(glob.glob(os.path.join(cache_dir, split, "shard_*.parquet")))
+    with open(os.path.join(cache_dir, "manifest.json")) as f:
+        manifest = json.load(f)
+    state = manifest.get("splits", {}).get(split)
+    if not state or not state.get("complete"):
+        raise ValueError(f"Feature split {split!r} is incomplete; resume extraction before training heads")
+    # The manifest, not a directory glob, defines committed data. Ignore any uncommitted crash leftovers.
+    pq = [os.path.join(cache_dir, split, rec["name"] + ".parquet")
+          for rec in sorted(state["shards"], key=lambda s: s["name"])
+          if rec.get("files", rec.get("n_records", 0) > 0)]
     if not pq:
         raise FileNotFoundError(f"no shards under {os.path.join(cache_dir, split)}")
     chunks, base, rows, meta = [], 0, {}, {}

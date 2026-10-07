@@ -200,3 +200,132 @@ def test_absolute_labels_rules():
     assert _abs("ordinal_score_distance_tiers", [0, 1, 2]) == [None] * 3
     assert _abs("soft_choice_distribution", [0, 1]) == [None] * 2
     assert _abs("something_new", [0, 1]) == [None] * 2
+
+
+def test_stop_commits_shard_then_resumes(synth, tmp_path, monkeypatch):
+    """The first stop request finishes and durably commits the shard in flight; a rerun resumes it, never recomputing
+    a committed shard and never marking the untouched split complete."""
+    out = str(tmp_path / "f")
+    cfg = _cfg(synth, out, "features.shard_size=2")
+    ctrl = F._StopController()
+    real, calls = F.extract_rows, []
+
+    def stopping(*a, **k):
+        res = real(*a, **k)
+        calls.append(1)
+        if len(calls) == 1:                        # first shard's features are ready: request the stop
+            ctrl.request()
+        return res
+
+    monkeypatch.setattr(F, "extract_rows", stopping)
+    man = F.run(cfg, stop=ctrl)
+    assert man["stopped"] and calls == [1]
+    assert not man["splits"]["train"]["complete"] and man["splits"]["train"]["n_shards"] == 3
+    assert [s["name"] for s in man["splits"]["train"]["shards"]] == ["shard_00000"]
+    assert "validation" not in man["splits"]            # never reached: not marked complete
+    d = os.path.join(out, "train")
+    assert sorted(os.listdir(d)) == ["shard_00000.parquet", "shard_00000.safetensors"]
+    assert not [f for f in os.listdir(d) if f.endswith(".tmp")]
+    stamp = os.stat(os.path.join(d, "shard_00000.safetensors")).st_mtime_ns
+    monkeypatch.setattr(F, "extract_rows", lambda *a, **k: calls.append(1) or real(*a, **k))
+    calls.clear()
+    man2 = F.run(cfg)                                   # resume without a stop
+    assert man2["splits"]["train"]["complete"] and man2["splits"]["validation"]["complete"]
+    assert len(calls) == 4                              # 2 missing train + 2 validation shards recomputed
+    assert os.stat(os.path.join(d, "shard_00000.safetensors")).st_mtime_ns == stamp
+    assert not [f for f in os.listdir(d) if f.endswith(".tmp")]
+
+
+def test_changed_data_selection_needs_new_out_dir(synth, tmp_path):
+    out = str(tmp_path / "f")
+    F.run(_cfg(synth, out, "features.splits=[train]"))
+    with pytest.raises(SystemExit):
+        F.run(_cfg(synth, out, "features.splits=[train]", "data.repo=someone/other-dataset"))
+
+
+def test_manifest_selection_count_mismatch_errors(synth, tmp_path):
+    out = str(tmp_path / "f")
+    F.run(_cfg(synth, out, "features.splits=[train]"))
+    p = os.path.join(out, "manifest.json")
+    man = json.load(open(p))
+    man["splits"]["train"]["n_selected"] += 1          # selection changed behind the (matching) fingerprint
+    json.dump(man, open(p, "w"))
+    with pytest.raises(SystemExit, match="input selection changed"):
+        F.run(_cfg(synth, out, "features.splits=[train]"))
+
+
+def test_legacy_hf_manifest_resumes_and_upgrades(synth, tmp_path, monkeypatch):
+    out = str(tmp_path / "f")
+    cfg = _cfg(synth, out, "features.shard_size=2", "features.splits=[train]")
+    F.run(cfg)
+    p = os.path.join(out, "manifest.json")
+    cur = json.load(open(p))
+    key_keep = ("model", "layers", "variants", "seed", "render", "shard_size", "max_sets")
+    splits = {k: {kk: vv for kk, vv in v.items() if kk != "selection"} for k, v in cur["splits"].items()}
+    legacy = {"format": 1, "fingerprint": cur["legacy_fingerprint"], "hidden_size": cur["hidden_size"],
+              "dtype": cur["dtype"], "keys": cur["keys"], "splits": splits, **{k: cur[k] for k in key_keep}}
+    json.dump(legacy, open(p, "w"))                    # rewrite in the pre-selection-fingerprint layout
+    with pytest.raises(SystemExit, match="legacy HF manifest"):   # opt-in: its selection was never recorded
+        F.run(cfg)
+    calls, real = [], F.extract_rows
+    monkeypatch.setattr(F, "extract_rows", lambda *a, **k: calls.append(1) or real(*a, **k))
+    man = F.run(_cfg(synth, out, "features.shard_size=2", "features.splits=[train]",
+                     "features.resume_legacy_hf=true"))
+    assert calls == [] and man["splits"]["train"]["complete"]
+    assert json.load(open(p))["backend"] == "hf"       # upgraded in place, still resumable next time
+
+
+def test_changed_source_files_rejected(synth, tmp_path):
+    import glob
+    out = str(tmp_path / "f")
+    cfg = _cfg(synth, out, "features.shard_size=2", "features.splits=[train]")
+    F.run(cfg)
+    src = sorted(glob.glob(os.path.join(synth, "data", "train-*.parquet")))[0]
+    st = os.stat(src)
+    os.utime(src, (st.st_atime, st.st_mtime + 10))     # same rows, new file revision: not the same selection
+    with pytest.raises(SystemExit, match="selected files/rows changed"):
+        F.run(cfg)
+
+
+def test_vllm_backend_identity_and_hf_manifest_rejected(synth, tmp_path):
+    out = str(tmp_path / "f")
+    F.run(_cfg(synth, out, "features.splits=[train]"))           # HF cache
+    with pytest.raises(SystemExit):                              # an HF manifest cannot be resumed as vLLM
+        F.run(_cfg(synth, out, "features.splits=[train]", "features.backend=vllm"))
+
+
+def test_missing_committed_shard_is_a_hard_error(synth, tmp_path):
+    out = str(tmp_path / "f")
+    cfg = _cfg(synth, out, "features.shard_size=2", "features.splits=[train]")
+    F.run(cfg)
+    os.unlink(os.path.join(out, "train", "shard_00000.safetensors"))
+    with pytest.raises(SystemExit, match="missing or unreadable"):
+        F.run(cfg)
+
+
+def test_lock_blocks_concurrent_writers(synth, tmp_path):
+    import fcntl
+    out = str(tmp_path / "f")
+    os.makedirs(out)
+    fh = open(os.path.join(out, F.LOCK_FILE), "a+")
+    fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        with pytest.raises(SystemExit, match="locked by another"):
+            F.run(_cfg(synth, out, "features.splits=[train]"))
+    finally:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+        fh.close()
+    assert not os.path.exists(os.path.join(out, "manifest.json"))   # the blocked writer never touched the cache
+    man = F.run(_cfg(synth, out, "features.splits=[train]"))
+    assert man["splits"]["train"]["complete"] and F.LOCK_FILE in os.listdir(out)
+
+
+def test_overwrite_drops_stale_shards(synth, tmp_path):
+    out = str(tmp_path / "f")
+    F.run(_cfg(synth, out, "features.shard_size=2", "features.splits=[train]"))
+    d = os.path.join(out, "train")
+    assert sorted(os.listdir(d)) == [f"shard_{i:05d}.{e}" for i in range(3) for e in ("parquet", "safetensors")]
+    man = F.run(_cfg(synth, out, "features.shard_size=2", "features.splits=[train]",
+                     "features.max_sets={train: 2}", "features.overwrite=true"))
+    assert man["splits"]["train"]["complete"] and man["splits"]["train"]["n_shards"] == 1
+    assert sorted(os.listdir(d)) == [f"shard_00000.{e}" for e in ("parquet", "safetensors")]

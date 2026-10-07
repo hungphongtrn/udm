@@ -1,7 +1,6 @@
 """Frozen-backbone feature cache: run the backbone once over the data (same "Grade this choice: Option k" prompt as
-training; stock HF forward with prefix caching: each set's prompt is prefilled once, every option continues from that
-cache, see `SCRM.embed_prefix_cached`) and store one feature vector per (set, variant, option), so heads / losses can
-be trained on the cached features.
+training; prefill-only vLLM pooling or the HF prefix-cache reference path) and store one feature vector per
+(set, variant, option), so heads / losses can be trained on the cached features.
 
 Cache layout, `<out_dir>/<split>/`:
   shard_00000.safetensors   `feat_L{layer}` per requested layer (`feat_Llast` for -1), [M, d] bfloat16, one row per
@@ -28,6 +27,12 @@ from .render import Renderer, parse_row
 EXTRA_COLS = ("probabilities_json", "source_label_or_null")
 SHARD_COLS = ("decision_set_id", "variant", "perm_json", "n_options", "row_offset", "tiers_json", "probabilities_json",
               "abs_label_json", "label_kind", "family", "source_id", "split", "truncated")
+
+MANIFEST_FORMAT = 2
+LOCK_FILE = ".lock"                                # per-out_dir flock file (created on first run, never deleted)
+# identity of the vLLM backend: pinned engine + the exact feature contract; both go into the resume fingerprint.
+VLLM_ENGINE_VERSION = "0.22.1"
+VLLM_FEATURE_CONTRACT = "last-input-final-norm-v1"
 
 
 # ----------------------------------------------------------------------------- absolute labels
@@ -174,6 +179,19 @@ def extract_rows(model, renderer: Renderer, rows: list[dict], fcfg: dict, split:
                             "family": meta["family"], "source_id": meta["source_id"], "split": split,
                             "truncated": bool(meta["truncated"])})
             off += meta["n_options"]
+    if fcfg.get("backend", "hf") == "vllm":
+        # The engine schedules variable lengths; requests remain independent causal sequences.
+        items = [it for _, its, _ in jobs for it in its]
+        e = model.embed_items(items)
+        s = 0
+        for it in items:
+            o, perm = where[id(it)]
+            n = len(perm)
+            dest = o + torch.as_tensor(perm)
+            for l in layers:
+                feats[l][dest] = e[l][s:s + n]
+            s += n
+        return feats, records, dropped
     buckets = {}
     for _, its, _ in jobs:
         for it in its:
@@ -211,10 +229,51 @@ def layer_key(l: int) -> str:
     return "feat_Llast" if int(l) == -1 else f"feat_L{int(l)}"
 
 
+def _fsync_file(path: str) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_dir(path: str) -> None:
+    import errno
+    try:
+        fd = os.open(path or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return                                             # directory missing / not openable: nothing to flush
+    try:
+        os.fsync(fd)
+    except OSError as e:                                   # EINVAL/ENOTSUP/EROFS/ENOSYS: dir fsync unsupported
+        if e.errno not in (errno.EINVAL, errno.ENOTSUP, errno.EROFS, errno.ENOSYS):
+            raise
+    finally:
+        os.close(fd)
+
+
+def _write_bytes(path: str, data: bytes) -> None:
+    with open(path, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+
+
 def _atomic(path: str, write) -> None:
+    """Write `path` through a `.tmp` sibling and commit with rename: fsync the file, rename, fsync the directory.
+    A crash (SIGKILL/OOM) leaves either the old file or the new one, never a torn write; a failed write drops the tmp."""
     tmp = path + ".tmp"
-    write(tmp)
-    os.replace(tmp, path)
+    try:
+        write(tmp)
+        _fsync_file(tmp)
+        os.replace(tmp, path)
+        _fsync_dir(os.path.dirname(path))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def write_shard(split_dir: str, idx: int, feats: dict, records: list) -> None:
@@ -240,76 +299,369 @@ def load_shard(split_dir: str, idx: int):
     return load_file(base + ".safetensors"), pq.read_table(base + ".parquet")
 
 
+_SAFETENSORS_DTYPE = {"bfloat16": "BF16", "float16": "F16", "float32": "F32", "float64": "F64"}
+
+
+def _file_identities(files: list[str]) -> list:
+    """Local file revisions and immutable Hub blob IDs, not mutable remote path names alone."""
+    out, fs = [], None
+    for f in files:
+        if f.startswith("hf://"):
+            if fs is None:
+                import fsspec
+                fs = fsspec.filesystem("hf")
+            info = fs.info(f[len("hf://"):], refresh=True, expand_info=True)
+            blob = info.get("blob_id")
+            if not blob:
+                raise RuntimeError(f"Cannot establish immutable source identity for {f}; use a local data snapshot")
+            out.append([f, info["size"], blob])
+        else:
+            st = os.stat(f)
+            out.append([f, st.st_size, st.st_mtime_ns])
+    return out
+
+
+def _selection_digest(files: list[str], locs: np.ndarray) -> str:
+    """Digest of WHICH rows a split featurizes: source file identities + the exact (file_idx, row_idx) locations. Two
+    runs share it only when they select the same rows of the same file revisions, so a changed selection (even one
+    with the same row/shard counts) cannot silently resume the previous shards."""
+    h = hashlib.sha256()
+    h.update(json.dumps(_file_identities(files), sort_keys=True).encode())
+    h.update(np.ascontiguousarray(locs, dtype=np.int64).tobytes())
+    return h.hexdigest()[:32]
+
+
+def _purge_shards(split_dir: str, kept: set[str] | None = None) -> list[str]:
+    """Remove shard files whose stem is not in `kept` (all when `kept` is None) plus stray `.tmp` siblings; returns
+    the removed names. Committed shards are protected by passing `kept`; uncommitted leftovers from a crash and a
+    stale cache being overwritten are discarded here so they cannot be read as current."""
+    if not os.path.isdir(split_dir):
+        return []
+    removed = []
+    for name in sorted(os.listdir(split_dir)):
+        stem, ext = os.path.splitext(name)
+        stale = ext in (".safetensors", ".parquet") and stem.startswith("shard_") and (kept is None or stem not in kept)
+        if name.endswith(".tmp") or stale:
+            path = os.path.join(split_dir, name)
+            if os.path.isfile(path):
+                os.unlink(path)
+                removed.append(name)
+    return removed
+
+
+def _verify_shard(split_dir: str, rec: dict, keys: list[str], hidden, dtype: str) -> None:
+    """A shard listed as committed must still match the manifest: silently recomputing it would shift the row offsets
+    of later shards, so a missing or corrupt file is a hard error rather than a re-read."""
+    if not rec.get("files", rec.get("n_records", 0) > 0):
+        return                                              # zero-record shard: nothing was ever written
+    name = rec["name"]
+    n_rows, n_records = int(rec["n_rows"]), int(rec["n_records"])
+
+    def bad(reason: str):
+        raise SystemExit(f"committed feature shard {name} {reason}; restore it, remove {name!r} from the manifest's "
+                         "shards list to recompute it, or rerun with features.overwrite=true")
+
+    st_path = os.path.join(split_dir, name + ".safetensors")
+    pq_path = os.path.join(split_dir, name + ".parquet")
+    for p in (st_path, pq_path):
+        if not os.path.isfile(p) or os.path.getsize(p) <= 0:
+            bad(f"{os.path.basename(p)} is missing or unreadable")
+    expected = _SAFETENSORS_DTYPE.get(dtype)
+    from safetensors import safe_open
+    try:
+        with safe_open(st_path, framework="pt") as f:
+            got = list(f.keys())
+            if sorted(got) != sorted(keys):
+                bad(f"safetensors keys {got} != {keys}")
+            for k in keys:
+                sl = f.get_slice(k)
+                if hidden is not None and tuple(sl.get_shape()) != (n_rows, int(hidden)):
+                    bad(f"{k} has shape {tuple(sl.get_shape())}, expected {(n_rows, int(hidden))}")
+                if expected is not None and sl.get_dtype() != expected:
+                    bad(f"{k} has dtype {sl.get_dtype()}, expected {expected}")
+    except SystemExit:
+        raise
+    except Exception as e:
+        bad(f"has an unreadable safetensors file ({e!r})")
+    import pyarrow.parquet as pq
+    try:
+        pf = pq.ParquetFile(pq_path)
+        if pf.metadata.num_rows != n_records:
+            bad(f"parquet has {pf.metadata.num_rows} rows, manifest says {n_records}")
+        if n_records:
+            t = pq.read_table(pq_path, columns=["row_offset", "n_options"])
+            off = t.column("row_offset").to_numpy(zero_copy_only=False).astype(np.int64)
+            nopt = t.column("n_options").to_numpy(zero_copy_only=False).astype(np.int64)
+            if (nopt <= 0).any() or off[0] != 0 or not np.array_equal(off[1:], np.cumsum(nopt)[:-1]) \
+                    or int(off[-1] + nopt[-1]) != n_rows:
+                bad("row_offset/n_options do not contiguously cover the feature rows")
+    except SystemExit:
+        raise
+    except Exception as e:
+        bad(f"has an unreadable parquet file ({e!r})")
+
+
 # ----------------------------------------------------------------------------- driver
+def build_feature_extractor(cfg: dict, device):
+    backend = cfg["features"].get("backend", "hf")
+    if backend == "vllm":
+        from .vllm_features import VLLMFeatureExtractor
+        model = VLLMFeatureExtractor(cfg, device)
+        return model, model.tokenizer
+    if backend != "hf":
+        raise ValueError(f"features.backend must be 'hf' or 'vllm', got {backend!r}")
+    from .model import build_scrm
+    mcfg = {**cfg["model"], "freeze_backbone": True, "gradient_checkpointing": False, "head": "linear",
+            "branching": False, "lora": {**cfg["model"]["lora"], "enabled": False}}
+    model, tok = build_scrm(mcfg, device, seed=cfg["seed"])
+    return model.eval(), tok
+
+
 def _write_manifest(out_dir: str, man: dict) -> None:
-    _atomic(os.path.join(out_dir, "manifest.json"), lambda p: open(p, "w").write(json.dumps(man, indent=2)))
+    _atomic(os.path.join(out_dir, "manifest.json"), lambda p: _write_bytes(p, json.dumps(man, indent=2).encode()))
 
 
-def run(cfg: dict, device=None) -> dict:
-    from .data import _read_rows
+def _fingerprint(ident: dict) -> str:
+    return hashlib.sha256(json.dumps(ident, sort_keys=True, default=str).encode()).hexdigest()[:16]
+
+
+def _identities(cfg: dict, backend: str) -> tuple[dict, dict, dict]:
+    """(base, full, render) identity. `base` is the pre-selection-fingerprint identity that legacy HF manifests were
+    written with (compared on resume); `full` adds the backend, the vLLM engine/feature contract, the model numerics
+    (dtype / quantization / attention / liger) and the data-selection fields that decide which rows a shard holds, so a
+    changed input selection or backbone precision cannot silently resume wrong shards.
+    Batch-only knobs (max_tokens / max_batch_size / cache_tokens) are in neither: they can be retuned without
+    invalidating committed shards."""
+    fcfg = cfg["features"]
+    mcfg = {**cfg["model"], "freeze_backbone": True, "gradient_checkpointing": False, "head": "linear",
+            "branching": False, "lora": {**cfg["model"]["lora"], "enabled": False}}
+    render_cfg = {**cfg["data"]["render"], "max_graded": None, "min_graded": None, "eval_max_graded": None,
+                  "branching": False}
+    base = {"model": mcfg["name_or_path"], "layers": [int(l) for l in fcfg["layers"]], "variants": int(fcfg["variants"]),
+            "seed": int(fcfg["seed"]), "render": render_cfg, "shard_size": int(fcfg["shard_size"]),
+            "max_sets": fcfg["max_sets"]}
+    d = cfg["data"]
+    mo = cfg["model"]
+    full = {**base, "backend": backend,
+            "model_opts": {"dtype": mo.get("dtype"), "quantize_4bit": bool(mo.get("quantize_4bit")),
+                           "attn_implementation": mo.get("attn_implementation"),
+                           "liger_kernel": bool(mo.get("liger_kernel"))},
+            "data": {k: d.get(k) for k in ("local_dir", "repo", "train_split", "eval_split", "filters", "eval_filters")}}
+    if backend == "vllm":
+        full["engine_version"] = VLLM_ENGINE_VERSION
+        full["feature_contract"] = VLLM_FEATURE_CONTRACT
+    return base, full, render_cfg
+
+
+class _OutputLock:
+    """Exclusive advisory lock on the output directory: one writer per out_dir, held for the whole run. A second
+    process fails fast instead of racing the manifest and shard files."""
+
+    def __init__(self, out_dir: str):
+        self.path = os.path.join(out_dir, LOCK_FILE)
+        self._fh = None
+
+    def __enter__(self):
+        import fcntl
+        self._fh = open(self.path, "a+")
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            self._fh.close()
+            self._fh = None
+            raise SystemExit(f"{self.path} is locked by another features run; wait for it to finish or use a new "
+                             "features.out_dir") from None
+        self._fh.seek(0)
+        self._fh.truncate()
+        self._fh.write(str(os.getpid()))
+        self._fh.flush()
+        return self
+
+    def __exit__(self, *exc):
+        if self._fh is not None:
+            import fcntl
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+            self._fh.close()
+            self._fh = None
+        return False
+
+
+class _StopController:
+    """Cooperative stop: the first SIGINT/SIGTERM asks the driver to commit the current shard and stop cleanly; a
+    repeated signal aborts immediately (only uncommitted shards are lost, they are recomputed on the next run)."""
+
+    def __init__(self):
+        self.count = 0
+        self.requested = False
+        self.forced = False
+
+    def request(self):
+        self.count += 1
+        if self.count > 1:
+            self.forced = True
+            raise KeyboardInterrupt
+        self.requested = True
+        print("[features] stop requested: committing the current shard, then stopping (rerun the same command to "
+              "resume; a second signal aborts immediately)", flush=True)
+
+    def handle(self, signum, frame):
+        self.request()
+
+
+def _install_signal_handlers(ctrl: _StopController) -> list:
+    import signal
+    prev = []
+    for name in ("SIGINT", "SIGTERM"):
+        sig = getattr(signal, name, None)
+        if sig is None:
+            continue
+        try:
+            old = signal.getsignal(sig)
+            signal.signal(sig, ctrl.handle)
+        except ValueError:                                  # not the main thread
+            continue
+        prev.append((sig, old))
+    return prev
+
+
+def run(cfg: dict, device=None, *, stop=None) -> dict:
+    """Drive the feature cache. `stop` is a test seam: pass a `_StopController` to exercise the cooperative stop
+    without signals (a real run installs SIGINT/SIGTERM handlers and uses its own controller)."""
     fcfg = cfg["features"]
     out_dir = fcfg["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
+    ctrl = stop if stop is not None else _StopController()
+    prev = [] if stop is not None else _install_signal_handlers(ctrl)
+    try:
+        with _OutputLock(out_dir):
+            return _run_locked(cfg, device, out_dir, ctrl)
+    finally:
+        if prev:
+            import signal
+            for sig, handler in prev:
+                signal.signal(sig, handler)
+
+
+def _run_locked(cfg: dict, device, out_dir: str, ctrl: _StopController) -> dict:
+    from .data import _read_rows
+    fcfg = cfg["features"]
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    # stock HF forward + prefix caching (`embed_prefix_cached`)
-    mcfg = {**cfg["model"], "freeze_backbone": True, "gradient_checkpointing": False, "head": "linear", "branching": False,
-            "lora": {**cfg["model"]["lora"], "enabled": False}}
-    render_cfg = {**cfg["data"]["render"], "max_graded": None, "min_graded": None, "eval_max_graded": None,
-                  "branching": False}
-    ident = {"model": mcfg["name_or_path"], "layers": [int(l) for l in fcfg["layers"]], "variants": int(fcfg["variants"]),
-             "seed": int(fcfg["seed"]), "render": render_cfg, "shard_size": int(fcfg["shard_size"]),
-             "max_sets": fcfg["max_sets"]}
-    fp = hashlib.sha256(json.dumps(ident, sort_keys=True, default=str).encode()).hexdigest()[:16]
+    backend = str(fcfg.get("backend") or "hf")
+    base, full, render_cfg = _identities(cfg, backend)
+    fp, fp_legacy = _fingerprint(full), _fingerprint(base)
+    overwrite = bool(fcfg.get("overwrite"))
     path = os.path.join(out_dir, "manifest.json")
-    man = None
-    if os.path.exists(path) and not fcfg.get("overwrite"):
-        man = json.load(open(path))
-        if man.get("fingerprint") != fp:
-            raise SystemExit(f"{path} was made with a different features/render/model config; use a new "
-                             "features.out_dir or features.overwrite=true")
-    if man is None:
-        man = {"format": 1, "fingerprint": fp, **ident, "hidden_size": None, "dtype": "bfloat16",
-               "keys": [layer_key(l) for l in ident["layers"]], "splits": {}}
-    model = renderer = None
+    old = json.load(open(path)) if os.path.exists(path) else None
+    man, fresh = None, old is None or overwrite
+    if fresh:
+        man = {"format": MANIFEST_FORMAT, "fingerprint": fp, "legacy_fingerprint": fp_legacy, "backend": backend,
+               "identity": full, **base, "hidden_size": None, "dtype": "bfloat16",
+               "keys": [layer_key(l) for l in base["layers"]], "splits": {}}
+        if old is not None:
+            for split in sorted(set(old.get("splits") or {}) - set(fcfg["splits"])):
+                gone = _purge_shards(os.path.join(out_dir, split))     # dropped split: stale cache cutover
+                if gone:
+                    print(f"[features] overwrite: removed {len(gone)} stale shard file(s) of dropped split "
+                          f"{split!r}", flush=True)
+    else:
+        if old.get("fingerprint") == fp:
+            print(f"[features] resuming {out_dir} (backend={backend})", flush=True)
+        elif backend == "hf" and old.get("backend", "hf") == "hf" and old.get("fingerprint") == fp_legacy:
+            if not fcfg.get("resume_legacy_hf"):
+                raise SystemExit(f"{path} is a legacy HF manifest that did not record the input selection (no "
+                                 "files/rows digest); set features.resume_legacy_hf=true to resume it as-is, or use a "
+                                 "new features.out_dir")
+            print(f"[features] resuming legacy HF cache {out_dir} (opt-in; its selection was not recorded)", flush=True)
+        else:
+            raise SystemExit(f"{path} was made with a different features/render/model/data-selection config "
+                             f"(backend {old.get('backend', 'hf')!r} vs {backend!r}); use a new features.out_dir or "
+                             "features.overwrite=true")
+        man = old
+        man["format"] = max(int(man.get("format", 1)), MANIFEST_FORMAT)
+        man["fingerprint"] = fp
+        man["legacy_fingerprint"] = fp_legacy
+        man["backend"] = backend
+        man["identity"] = full
+        man["keys"] = [layer_key(l) for l in base["layers"]]
+        man["splits"] = man.get("splits") or {}
+    # Commit the manifest before the first shard: an interruption right after startup still pins the config, so a
+    # later run with a changed selection cannot silently resume this (empty) cache.
+    _write_manifest(out_dir, man)
+    renderer = model = None
     d = cfg["data"]
     for split in fcfg["splits"]:
+        if ctrl.requested:
+            break
         filters = d["filters"] if split == d["train_split"] else d["eval_filters"]
-        sp = man["splits"].setdefault(split, {"shards": [], "complete": False})
-        done = {s["name"] for s in sp["shards"]}
         files, locs = select_locations(d, split, filters, (fcfg["max_sets"] or {}).get(split), int(fcfg["seed"]))
         S = int(fcfg["shard_size"])
         n_shards = -(-len(locs) // S)
+        sp = man["splits"].setdefault(split, {"shards": [], "complete": False})
+        if sp.get("n_selected") is not None and int(sp["n_selected"]) != len(locs):
+            raise SystemExit(f"{split}: manifest recorded {sp['n_selected']} selected rows but the current data "
+                             f"config selects {len(locs)}; the input selection changed — use a new features.out_dir")
+        if sp.get("n_shards") is not None and int(sp["n_shards"]) != n_shards:
+            raise SystemExit(f"{split}: manifest recorded {sp['n_shards']} shards but the current config makes "
+                             f"{n_shards}; the input selection changed — use a new features.out_dir")
         sp.update(n_selected=int(len(locs)), n_shards=n_shards)
         split_dir = os.path.join(out_dir, split)
         os.makedirs(split_dir, exist_ok=True)
+        sel = _selection_digest(files, locs)
+        if sp.get("selection") is not None and sp["selection"] != sel:
+            raise SystemExit(f"{split}: the selected files/rows changed since the manifest was written "
+                             f"({sp['selection'][:12]} != {sel[:12]}); use a new features.out_dir")
+        sp["selection"] = sel
+        # Record the per-split selection identity and discard crash leftovers before producing any shard, so a stop
+        # right after startup still pins what this split must contain.
+        done = {s["name"] for s in sp["shards"]}
+        _purge_shards(split_dir, kept=done)                     # uncommitted pairs are recomputed, never reused
+        for rec in sp["shards"]:
+            _verify_shard(split_dir, rec, man["keys"], man.get("hidden_size"), man.get("dtype") or "bfloat16")
+        _write_manifest(out_dir, man)
         for i in range(n_shards):
+            if ctrl.requested:
+                break
             name = f"shard_{i:05d}"
             if name in done:
                 print(f"[features] {split} {name} done, skipping", flush=True)
                 continue
             if model is None:
-                from .model import build_scrm
-                model, tok = build_scrm(mcfg, device, seed=cfg["seed"])
-                model.eval()
+                model, tok = build_feature_extractor(cfg, device)
+                if hasattr(model, "eval"):
+                    model.eval()
                 renderer = Renderer(tok, render_cfg)
-                man["hidden_size"] = model.d_hidden
+                man["hidden_size"] = getattr(model, "d_hidden", None)
+                _write_manifest(out_dir, man)
             t0 = time.time()
             rows = _read_rows(files, [tuple(x) for x in locs[i * S:(i + 1) * S]], EXTRA_COLS)
             feats, records, dropped = extract_rows(model, renderer, rows, fcfg, split, device)
             if records:
-                write_shard(split_dir, i, feats, records)
+                write_shard(split_dir, i, feats, records)       # fsynced before it is listed as committed
             sp["shards"].append({"name": name, "n_rows": int(next(iter(feats.values())).shape[0]) if records else 0,
                                  "n_sets": len({r["decision_set_id"] for r in records}), "n_records": len(records),
                                  "n_dropped": dropped, "files": bool(records)})
+            done.add(name)
             _write_manifest(out_dir, man)
             print(f"[features] {split} {name}: {len(rows)} rows read, {dropped} dropped, {len(records)} (set, variant) "
                   f"records in {time.time() - t0:.1f}s", flush=True)
+            if ctrl.requested:
+                print(f"[features] stopped cleanly after committing {split}/{name}; rerun the same command to resume",
+                      flush=True)
+                break
         sp["complete"] = {s["name"] for s in sp["shards"]} >= {f"shard_{i:05d}" for i in range(n_shards)}
         sp["shards"].sort(key=lambda s: s["name"])
         sp["n_sets"] = sum(s["n_sets"] for s in sp["shards"])
         sp["n_rows"] = sum(s["n_rows"] for s in sp["shards"])
         sp["n_dropped"] = sum(s["n_dropped"] for s in sp["shards"])
         _write_manifest(out_dir, man)
+        if ctrl.requested:
+            break
+    man["stopped"] = bool(ctrl.requested)
+    if ctrl.requested:
+        n_done = sum(len(s.get("shards", [])) for s in man["splits"].values())
+        print(f"[features] stop: {n_done} shard(s) committed, unfinished splits have complete=false; rerun the same "
+              "command to resume", flush=True)
+    _write_manifest(out_dir, man)
     return man
 
 

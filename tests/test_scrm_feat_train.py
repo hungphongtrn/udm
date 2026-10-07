@@ -22,8 +22,10 @@ def write_cache(root, sizes=None, d=D, seed=0, strength=2.0, variants=3, shard=4
     rng = np.random.default_rng(seed)
     direction = np.random.default_rng(123).normal(size=d)
     direction /= np.linalg.norm(direction)
+    manifest = {"format": 2, "layers": [16], "hidden_size": d, "splits": {}}
     for split, n_sets in sizes.items():
         os.makedirs(os.path.join(root, split), exist_ok=True)
+        state = manifest["splits"][split] = {"complete": True, "shards": []}
         rows, feats, meta = [], [], []
         for s in range(n_sets):
             n = int(rng.integers(3, 6))
@@ -46,8 +48,9 @@ def write_cache(root, sizes=None, d=D, seed=0, strength=2.0, variants=3, shard=4
             tag = os.path.join(root, split, f"shard_{k // shard:05d}")
             save_file({"feat_L16": torch.tensor(x, dtype=torch.bfloat16)}, tag + ".safetensors")
             pd.DataFrame([{**r, "row_offset": int(o)} for r, o in zip(m, off)]).to_parquet(tag + ".parquet")
+            state["shards"].append({"name": f"shard_{k // shard:05d}", "n_records": len(m)})
     with open(os.path.join(root, "manifest.json"), "w") as f:
-        json.dump({"layers": [16], "hidden_size": d}, f)
+        json.dump(manifest, f)
     return root
 
 
@@ -69,6 +72,26 @@ def test_load_split(cache):
     assert sp.sets[0].probs is not None and sp.sets[1].probs is None
     with pytest.raises(KeyError):
         load_split(cache, "validation", 99)
+
+
+def test_incomplete_cache_cannot_train(tmp_path):
+    root = write_cache(str(tmp_path / "cache"), sizes={"train": 4})
+    path = os.path.join(root, "manifest.json")
+    with open(path) as f:
+        manifest = json.load(f)
+    manifest["splits"]["train"]["complete"] = False
+    with open(path, "w") as f:
+        json.dump(manifest, f)
+    with pytest.raises(ValueError, match="incomplete"):
+        load_split(root, "train", 16)
+
+
+def test_uncommitted_cache_files_are_ignored(tmp_path):
+    root = write_cache(str(tmp_path / "cache"), sizes={"train": 4})
+    # A forced stop may leave files after their rename but before manifest commit.
+    with open(os.path.join(root, "train", "shard_99999.parquet"), "wb") as f:
+        f.write(b"unfinished")
+    assert len(load_split(root, "train", 16)) == 4
 
 
 @pytest.mark.parametrize("head,terms", [("linear", ["ce"]), ("mlp", ["brier", "bt"]), ("set", ["sigmoid", "ce"])])
