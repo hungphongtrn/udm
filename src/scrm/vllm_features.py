@@ -43,7 +43,10 @@ class VLLMFeatureExtractor:
         from vllm import LLM, ModelRegistry, PoolingParams
         from vllm.config import PoolerConfig
 
-        ModelRegistry.register_model(ARCHITECTURE, f"scrm.vllm_features_model:{ARCHITECTURE}")
+        # Register the class object, not a lazy "module:Class" string: vLLM inspects lazy entries in a child Python
+        # process that hides the real import error. The engine runs in this process anyway (no CUDA-fork concern).
+        from .vllm_features_model import Qwen3_5ForSCRMFeatures
+        ModelRegistry.register_model(ARCHITECTURE, Qwen3_5ForSCRMFeatures)
         self.engine = LLM(
             model=mcfg["name_or_path"], runner="pooling", convert="none", model_impl="vllm",
             hf_overrides={"architectures": [ARCHITECTURE], "scrm_feature_layers": self.layers},
