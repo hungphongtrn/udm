@@ -193,7 +193,8 @@ def extract_rows(model, renderer: Renderer, rows: list[dict], fcfg: dict, split:
             b["pack"][key] = b["pack"][key].to(device, non_blocking=True)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
             e = model.embed_prefix_cached(b["pack"], layers=layers, cache_tokens=int(fcfg["cache_tokens"]),
-                                          prefill_tokens=int(fcfg["max_tokens"]))
+                                          prefill_tokens=int(fcfg["max_tokens"]),
+                                          max_batch_size=int(fcfg["max_batch_size"]))
         e = {l: x.to(torch.bfloat16).cpu() for l, x in e.items()}
         s = 0
         for it in batch_items:

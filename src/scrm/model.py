@@ -200,10 +200,12 @@ class SCRM(nn.Module):
         return {l: (last if l == -1 else out[l]) for l in want}
 
     @torch.no_grad()
-    def embed_prefix_cached(self, pack: dict, layers=None, cache_tokens: int = 131072, prefill_tokens: int = 16384):
+    def embed_prefix_cached(self, pack: dict, layers=None, cache_tokens: int = 32768, prefill_tokens: int = 8192,
+                            max_batch_size: int = 8):
         """Inference-only features using stock HF prefix caching. Equal-length prompts are prefilled together
         (no padding), once per set; suffixes of equal length continue from copies of their corresponding cache rows.
         `prefill_tokens` bounds prompt batch tokens; `cache_tokens` bounds (prompt + suffix) * suffix batch size.
+        `max_batch_size` caps BOTH prompt and suffix forward rows, including the per-row recurrent state.
         Returns last-token features in pack row order. `layers=None` -> last layer [M, d]; otherwise {layer: [M, d]}:
         -1 = last layer, l in 1..num_hidden_layers = residual after decoder layer l, passed through the final norm.
         Batching changes kernel rounding, not the rendered inputs or feature-cache identity."""
@@ -239,7 +241,7 @@ class SCRM(nn.Module):
         out = {l: [None] * len(row_seg) for l in keys}
         try:
             for P, prefix_rows in prefixes.items():
-                p_max = max(1, int(prefill_tokens) // P)
+                p_max = max(1, min(int(max_batch_size), int(prefill_tokens) // P))
                 for pi in range(0, len(prefix_rows), p_max):
                     ps = prefix_rows[pi:pi + p_max]
                     x = torch.stack([ids[span(p)] for p in ps])
@@ -253,10 +255,18 @@ class SCRM(nn.Module):
                             owner.update((r, j) for r in rows)
                     capture = True
                     for S, rows in by_len.items():
-                        k_max = max(1, int(cache_tokens) // (P + S))
+                        k_max = max(1, min(int(max_batch_size), int(cache_tokens) // (P + S)))
                         for i in range(0, len(rows), k_max):
                             part = rows[i:i + k_max]
-                            c = copy.deepcopy(cache)
+                            # HF dynamic attention/recurrent layers replace tensors in reorder_cache.
+                            # Copy containers, then select rows directly: never clone the entire prompt pool first.
+                            c = copy.copy(cache)
+                            c.layers = [copy.copy(layer) for layer in cache.layers]
+                            for layer in c.layers:
+                                for name, value in vars(layer).items():
+                                    if isinstance(value, dict):
+                                        setattr(layer, name, value.copy())
+                            del layer
                             c.reorder_cache(torch.tensor([owner[r] for r in part], dtype=torch.long, device=ids.device))
                             x = torch.stack([ids[span(row_seg[r])] for r in part])
                             px = torch.stack([pos[span(row_seg[r])] for r in part])

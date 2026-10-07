@@ -23,7 +23,7 @@ features:
   shard_size: 512                   # rows (sets) per shard
   splits: [train, validation, test]
   max_sets: {train: 50000, validation: null, test: null}   # rows drawn per split, sources interleaved; null = all
-  max_tokens: 16384                 # prompt batch budget: sum(prompt + all suffix lengths), prompt counted once per set
-  cache_tokens: 131072              # per suffix forward: (len(prompt) + len(suffix)) * n_suffixes (prompt KV copied per suffix)
-  max_batch_size: 32                # sets per equal-length prompt batch
+  max_tokens: 8192                  # prompt batch budget: sum(prompt + all suffix lengths), prompt counted once per set
+  cache_tokens: 32768               # suffix budget: (prompt + suffix length) * batch rows; not a byte-based VRAM limit
+  max_batch_size: 8                 # cap BOTH prompt and suffix rows; Qwen3.5 recurrent state also grows per row
 wandb: {enabled: false}

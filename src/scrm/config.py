@@ -103,8 +103,9 @@ DEFAULTS: dict[str, Any] = {
         "splits": ["train", "validation", "test"],
         "max_sets": {"train": None, "validation": None, "test": None},
         # max_tokens: sum(prompt + all suffix lengths), prompt counted once per set; equal-length prompts batch together.
-        # max_batch_size: sets per prompt batch; cache_tokens: (prompt + suffix length) * suffix batch size.
-        "max_tokens": 16384, "max_batch_size": 32, "cache_tokens": 131072, "overwrite": False,
+        # max_batch_size: rows in BOTH prompt and suffix forwards (recurrent state grows per row, even for short prompts).
+        # cache_tokens: (prompt + suffix length) * suffix batch size; these caps are not a VRAM admission controller.
+        "max_tokens": 8192, "max_batch_size": 8, "cache_tokens": 32768, "overwrite": False,
     },
     # test-only evaluations at every save step (and at the end); never used for checkpoint selection
     "benchmarks": {

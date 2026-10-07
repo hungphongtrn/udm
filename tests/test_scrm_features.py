@@ -115,9 +115,10 @@ def test_embed_layers_api(synth):
 @pytest.mark.parametrize("one_token", [False, True])
 @pytest.mark.parametrize("cache_tokens", [10 ** 6, 1])
 @pytest.mark.parametrize("prefill_tokens", [10 ** 6, 1])
-def test_prefix_cached_matches_full_sequences(synth, one_token, cache_tokens, prefill_tokens):
-    """Batched prompts and suffixes preserve cache ownership and pack row order, including mixed prompt lengths,
-    single-token continuation, chunk boundaries and intermediate-layer readouts."""
+@pytest.mark.parametrize("max_batch_size", [1, 2])
+def test_prefix_cached_matches_full_sequences(synth, one_token, cache_tokens, prefill_tokens, max_batch_size):
+    """Selected cache rows stay independent across suffix forwards and preserve pack order, including mixed
+    prompt lengths, row/token chunk boundaries, single-token continuation and intermediate-layer readouts."""
     model, _ = _model(_cfg(synth, "unused"))
     from test_scrm_model import _items
     items = _items([3, 1, 4], P=11, seed=4, one_token=one_token)
@@ -126,12 +127,12 @@ def test_prefix_cached_matches_full_sequences(synth, one_token, cache_tokens, pr
     with torch.no_grad():
         a = model.embed(pack, layers=[1, 2, 3, -1])
     b = model.embed_prefix_cached(pack, layers=[1, 2, 3, -1], cache_tokens=cache_tokens,
-                                  prefill_tokens=prefill_tokens)
+                                  prefill_tokens=prefill_tokens, max_batch_size=max_batch_size)
     assert list(b) == [1, 2, 3, -1]
     for l in a:
         assert torch.allclose(a[l], b[l], atol=2e-5), (l, (a[l] - b[l]).abs().max().item())
-    assert torch.allclose(model.embed_prefix_cached(pack, cache_tokens=cache_tokens, prefill_tokens=prefill_tokens),
-                          a[-1], atol=2e-5)
+    assert torch.allclose(model.embed_prefix_cached(pack, cache_tokens=cache_tokens, prefill_tokens=prefill_tokens,
+                                                   max_batch_size=max_batch_size), a[-1], atol=2e-5)
 
 
 def test_resume_skips_completed_shards(synth, tmp_path, monkeypatch):
