@@ -40,7 +40,7 @@ from vllm.model_executor.layers.pooler.seqwise import (
 )
 from vllm.model_executor.models.adapters import as_embedding_model
 from vllm.model_executor.models.config import Qwen3_5ForConditionalGenerationConfig
-from vllm.model_executor.models.interfaces import IsHybrid
+from vllm.model_executor.models.interfaces import IsHybrid, SupportsMRoPE
 from vllm.model_executor.models.qwen3_5 import Qwen3_5ForCausalLM
 from vllm.model_executor.models.utils import AutoWeightsLoader, WeightsMapper
 
@@ -111,7 +111,7 @@ class _NormalizeFeatures(torch.nn.Module):
 _EmbeddingBackbone = as_embedding_model(Qwen3_5ForCausalLM)
 
 
-class Qwen3_5ForSCRMFeatures(_EmbeddingBackbone, IsHybrid):
+class Qwen3_5ForSCRMFeatures(_EmbeddingBackbone, IsHybrid, SupportsMRoPE):
     """Text-only Qwen3.5 backbone with a last-token, multi-layer pooling head (see module docstring).
 
     Only the prefill path is used, but the class keeps the native hybrid declarations (`IsHybrid` plus
@@ -158,6 +158,15 @@ class Qwen3_5ForSCRMFeatures(_EmbeddingBackbone, IsHybrid):
             hidden_states, aux_hidden_states = out, ()
         pieces = [hidden_states if source < 0 else aux_hidden_states[source] for source in self.feature_plan.sources]
         return pieces[0] if len(pieces) == 1 else torch.cat(pieces, dim=-1)
+
+    def get_mrope_input_positions(self, input_tokens: list[int], mm_features: list) -> tuple[torch.Tensor, int]:
+        """The checkpoint's rope config is M-RoPE; for text-only prompts every axis is the plain token index.
+
+        Same positions native ``Qwen3VLForConditionalGeneration`` assigns to text with no media items.
+        """
+        if mm_features:
+            raise ValueError("Feature extraction is text-only; multimodal inputs are not supported")
+        return torch.arange(len(input_tokens), dtype=torch.int64).expand(3, -1).clone(), 0
 
     def _init_pooler(self, vllm_config: VllmConfig, prefix: str = "") -> DispatchPooler:
         """Last-token pooling, no activation, no sentence-transformers projector.
