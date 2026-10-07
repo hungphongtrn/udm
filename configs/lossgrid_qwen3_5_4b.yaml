@@ -1,6 +1,6 @@
 # Experiment 2: loss-function grid on a FROZEN Qwen3.5-4B backbone, using cached per-option features.
 # python -m scrm.lossgrid --config configs/lossgrid_qwen3_5_4b.yaml   (or scripts/train/lossgrid.sh <config>)
-cache_dir: outputs/feat_cache/qwen3_5_4b          # <cache_dir>/{train,validation,test[,extra]}/shard_*.{safetensors,parquet}
+cache_dir: outputs/features_qwen3_5_4b           # = features.out_dir of configs/features_qwen3_5_4b.yaml; <cache_dir>/{train,validation,test}/shard_*
 output_dir: outputs/lossgrid/qwen3_5_4b_set
 workers: 1                                        # parallel runs (spawn); each run holds its own cached features in RAM
 
