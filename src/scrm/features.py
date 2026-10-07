@@ -1,6 +1,7 @@
 """Frozen-backbone feature cache: run the backbone once over the data (same "Grade this choice: Option k" prompt as
-training; every option prefilled as its own full sequence `prompt + option`, stock HF forward) and store one feature
-vector per (set, variant, option), so heads / losses can be trained on the cached features.
+training; stock HF forward with prefix caching: each set's prompt is prefilled once, every option continues from that
+cache, see `SCRM.embed_prefix_cached`) and store one feature vector per (set, variant, option), so heads / losses can
+be trained on the cached features.
 
 Cache layout, `<out_dir>/<split>/`:
   shard_00000.safetensors   `feat_L{layer}` per requested layer (`feat_Llast` for -1), [M, d] bfloat16, one row per
@@ -178,7 +179,7 @@ def extract_rows(model, renderer: Renderer, rows: list[dict], fcfg: dict, split:
     for batch_items in make_batches(items, int(fcfg["max_tokens"]), int(fcfg["max_batch_size"])):
         b = to_device(collate(batch_items, pad_id=renderer.pad_id), device)
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-            e = model.embed(b["pack"], max_tokens=int(fcfg["max_tokens"]), layers=layers)
+            e = model.embed_prefix_cached(b["pack"], layers=layers, cache_tokens=int(fcfg["cache_tokens"]))
         e = {l: x.to(torch.bfloat16).cpu() for l, x in e.items()}
         s = 0
         for it in batch_items:
@@ -235,12 +236,11 @@ def run(cfg: dict, device=None) -> dict:
     out_dir = fcfg["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    # `branching: False`: every option is prefilled as its own full sequence through the stock HF forward, whatever
-    # model.branching says in the config
+    # stock HF forward + prefix caching (`embed_prefix_cached`)
     mcfg = {**cfg["model"], "freeze_backbone": True, "gradient_checkpointing": False, "head": "linear", "branching": False,
             "lora": {**cfg["model"]["lora"], "enabled": False}}
     render_cfg = {**cfg["data"]["render"], "max_graded": None, "min_graded": None, "eval_max_graded": None,
-                  "branching": False}                    # batch/chunk costs count the prompt once per option
+                  "branching": False}
     ident = {"model": mcfg["name_or_path"], "layers": [int(l) for l in fcfg["layers"]], "variants": int(fcfg["variants"]),
              "seed": int(fcfg["seed"]), "render": render_cfg, "shard_size": int(fcfg["shard_size"]),
              "max_sets": fcfg["max_sets"]}

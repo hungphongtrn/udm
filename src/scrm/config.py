@@ -102,7 +102,9 @@ DEFAULTS: dict[str, Any] = {
         "out_dir": "outputs/features", "layers": [-1], "variants": 2, "seed": 0, "shard_size": 512,
         "splits": ["train", "validation", "test"],
         "max_sets": {"train": None, "validation": None, "test": None},
-        "max_tokens": 16384, "max_batch_size": 32, "overwrite": False,
+        # max_tokens / max_batch_size: sets per collated group; cache_tokens: prefix-cache budget per suffix forward,
+        # (len(prompt) + len(suffix)) * n_suffixes (the prompt KV is copied per suffix)
+        "max_tokens": 16384, "max_batch_size": 32, "cache_tokens": 131072, "overwrite": False,
     },
     # test-only evaluations at every save step (and at the end); never used for checkpoint selection
     "benchmarks": {

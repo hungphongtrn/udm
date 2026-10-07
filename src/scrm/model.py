@@ -199,6 +199,65 @@ class SCRM(nn.Module):
         last = tm.norm(h[0].index_select(0, read))
         return {l: (last if l == -1 else out[l]) for l in want}
 
+    @torch.no_grad()
+    def embed_prefix_cached(self, pack: dict, layers=None, cache_tokens: int = 131072):
+        """Inference-only `embed` with HF prefix caching (frozen backbone, feature extraction): per set, the shared
+        prompt is prefilled ONCE with `use_cache=True`; the options' suffixes then continue from a copy of that cache
+        (attention KV + Gated DeltaNet conv / recurrent state), batched by suffix length (no padding), at most
+        `cache_tokens // (len(prompt) + len(suffix))` suffixes per forward (the copied KV grows with the batch).
+        Returns the hidden state at the last token of every graded option, pack row order, as `embed`.
+        `layers=None` -> last layer [M, d]; else {layer: [M, d]}: -1 = last layer, l in 1..num_hidden_layers =
+        residual stream after decoder layer l, passed through the final norm."""
+        import copy
+        tm = _inner_text(self.backbone)
+        want = _check_layers(tm, layers)
+        n_layers = tm.config.num_hidden_layers
+        seg_prefix, row_seg = pack["seg_prefix"].tolist(), pack["row_seg"].tolist()
+        seg_lens = [int(x) for x in pack["seg_lens"]]
+        start = [0]
+        for n in seg_lens[:-1]:
+            start.append(start[-1] + n)
+        ids, pos = pack["input_ids"], pack["position_ids"]
+        span = lambda s: slice(start[s], start[s] + seg_lens[s])
+        groups = {}                                       # prefix segment -> {suffix length: [rows]}
+        for r, s in enumerate(row_seg):
+            groups.setdefault(seg_prefix[s], {}).setdefault(seg_lens[s], []).append(r)
+        grabbed, hooks = {}, []
+        for l in want or []:
+            if l in (-1, n_layers):
+                continue                                  # = last_hidden_state (residual after the last layer + norm)
+
+            def grab(mod, args, res, l=l):
+                h = res[0] if isinstance(res, tuple) else res
+                grabbed[l] = tm.norm(h[:, -1])
+
+            hooks.append(tm.layers[l - 1].register_forward_hook(grab))
+        keys = want if want is not None else [-1]
+        out = {l: [None] * len(row_seg) for l in keys}
+        try:
+            for p, by_len in groups.items():
+                P = seg_lens[p]
+                prompt = tm(input_ids=ids[span(p)][None], position_ids=pos[span(p)][None], use_cache=True)
+                cache = prompt.past_key_values
+                for S, rows in by_len.items():
+                    k_max = max(1, int(cache_tokens) // (P + S))
+                    for i in range(0, len(rows), k_max):
+                        part = rows[i:i + k_max]
+                        c = copy.deepcopy(cache)
+                        c.reorder_cache(torch.zeros(len(part), dtype=torch.long, device=ids.device))
+                        x = torch.stack([ids[span(row_seg[r])] for r in part])
+                        px = torch.stack([pos[span(row_seg[r])] for r in part])
+                        last = tm(input_ids=x, position_ids=px, past_key_values=c, use_cache=True).last_hidden_state[:, -1]
+                        for l in keys:
+                            e = last if l in (-1, n_layers) else grabbed[l]
+                            for j, r in enumerate(part):
+                                out[l][r] = e[j]
+        finally:
+            for hk in hooks:
+                hk.remove()
+        res = {l: torch.stack(v) for l, v in out.items()}
+        return res if want is not None else res[-1]
+
     def head(self, e: torch.Tensor, pack: dict, candidate_mask: torch.Tensor) -> torch.Tensor:
         """Per-row embeddings [M, d] (graded options, in pack row order) -> rewards [B, N] (0 at padded slots).
         The embedding of a row is its hidden state at the assistant header (see `embed`). `head: set` scores the
