@@ -12,6 +12,37 @@ VLLM_VERSION = "0.19.1"
 ARCHITECTURE = "Qwen3_5ForSCRMFeatures"
 
 
+def _numeric_visible_devices() -> None:
+    """vLLM's NVML helpers `int()` each CUDA_VISIBLE_DEVICES entry; schedulers often export GPU UUIDs instead.
+
+    Rewrite UUIDs (or unique UUID prefixes) to NVML indices, which follow PCI bus order, and pin CUDA to the
+    same order. The selected physical GPUs are unchanged.
+    """
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    entries = [e.strip() for e in visible.split(",") if e.strip()]
+    if all(e.isdigit() for e in entries):
+        return
+    from vllm.utils.import_utils import import_pynvml
+    nvml = import_pynvml()
+    nvml.nvmlInit()
+    try:
+        uuids = [nvml.nvmlDeviceGetUUID(nvml.nvmlDeviceGetHandleByIndex(i)) for i in range(nvml.nvmlDeviceGetCount())]
+    finally:
+        nvml.nvmlShutdown()
+    uuids = [u.decode() if isinstance(u, bytes) else u for u in uuids]
+    indices = []
+    for e in entries:
+        if e.isdigit():
+            indices.append(e)
+            continue
+        match = [i for i, u in enumerate(uuids) if u.startswith(e if e.startswith("GPU-") else f"GPU-{e}")]
+        if len(match) != 1:
+            raise ValueError(f"CUDA_VISIBLE_DEVICES entry {e!r} does not identify exactly one GPU (MIG unsupported)")
+        indices.append(str(match[0]))
+    os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(indices)
+    os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+
+
 class VLLMFeatureExtractor:
     """Submit independent prompt+option sequences; let vLLM pack and schedule them."""
 
@@ -40,6 +71,7 @@ class VLLMFeatureExtractor:
         # A foreground Ctrl-C must not kill a separate EngineCore before the shard can commit.
         # Single GPU / TP=1 uses the same native scheduler and kernels in the calling process.
         os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
+        _numeric_visible_devices()
         from vllm import LLM, ModelRegistry, PoolingParams
         from vllm.config import PoolerConfig
 
