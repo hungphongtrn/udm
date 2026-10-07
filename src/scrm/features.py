@@ -1,6 +1,6 @@
-"""Frozen-backbone feature cache: run the backbone once over the data (same "Grade this choice: Option k" prompt and
-exact shared-prefix branch encoder as training) and store one feature vector per (set, variant, option), so heads /
-losses can be trained on the cached features.
+"""Frozen-backbone feature cache: run the backbone once over the data (same "Grade this choice: Option k" prompt as
+training; every option prefilled as its own full sequence `prompt + option`, stock HF forward) and store one feature
+vector per (set, variant, option), so heads / losses can be trained on the cached features.
 
 Cache layout, `<out_dir>/<split>/`:
   shard_00000.safetensors   `feat_L{layer}` per requested layer (`feat_Llast` for -1), [M, d] bfloat16, one row per
@@ -235,11 +235,12 @@ def run(cfg: dict, device=None) -> dict:
     out_dir = fcfg["out_dir"]
     os.makedirs(out_dir, exist_ok=True)
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
-    # `branching: True` pins the exact shared-prefix branch encoder (the only path that returns `layers`), whatever
+    # `branching: False`: every option is prefilled as its own full sequence through the stock HF forward, whatever
     # model.branching says in the config
-    mcfg = {**cfg["model"], "freeze_backbone": True, "gradient_checkpointing": False, "head": "linear", "branching": True,
+    mcfg = {**cfg["model"], "freeze_backbone": True, "gradient_checkpointing": False, "head": "linear", "branching": False,
             "lora": {**cfg["model"]["lora"], "enabled": False}}
-    render_cfg = {**cfg["data"]["render"], "max_graded": None, "min_graded": None, "eval_max_graded": None}
+    render_cfg = {**cfg["data"]["render"], "max_graded": None, "min_graded": None, "eval_max_graded": None,
+                  "branching": False}                    # batch/chunk costs count the prompt once per option
     ident = {"model": mcfg["name_or_path"], "layers": [int(l) for l in fcfg["layers"]], "variants": int(fcfg["variants"]),
              "seed": int(fcfg["seed"]), "render": render_cfg, "shard_size": int(fcfg["shard_size"]),
              "max_sets": fcfg["max_sets"]}

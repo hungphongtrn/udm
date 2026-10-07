@@ -102,8 +102,8 @@ class SCRM(nn.Module):
         """Encode the pack -> [M, d]: last-layer hidden state at the last token of every graded option, in pack row
         order. Runs in contiguous chunks of <= max_tokens encoded tokens (see `row_chunks`: whole sets when
         branching, single full sequences otherwise; a unit bigger than the budget gets its own chunk).
-        `layers` (feature extraction, branching only): list of layer indices -> {layer: [M, d]} instead of one
-        tensor, see `_branch_encode`."""
+        `layers` (feature extraction): list of layer indices -> {layer: [M, d]} instead of one tensor, see
+        `_branch_encode` (both encoders support it)."""
         ctx = contextlib.nullcontext() if self.backbone_trainable else torch.no_grad()
         with ctx:
             parts = [self._embed_rows(pack, rows, layers) for rows in row_chunks(pack, max_tokens, self.branching)]
@@ -119,37 +119,58 @@ class SCRM(nn.Module):
 
     def _embed_rows(self, pack: dict, rows, layers=None):
         if not self.branching:
-            if layers is not None:
-                raise ValueError("layers= needs the branch encoder (model.branching: true)")
-            return self._encode_full(*_full_chunk(pack, rows))
+            return self._encode_full(*_full_chunk(pack, rows), layers=layers)
         ids, pos, plan, read = _branch_chunk(pack, rows)
         return self._branch_encode(ids, pos, plan, read, layers)
 
-    def _encode_full(self, ids: torch.Tensor, pos: torch.Tensor, lens: list) -> torch.Tensor:
+    def _encode_full(self, ids: torch.Tensor, pos: torch.Tensor, lens: list, layers=None):
         """Stock HF forward over full sequences (concatenated in `ids`, positions restarting at 0) -> hidden state at
         the last token of each. CUDA varlen kernels + flash_attention_2: one padding-free row (block-diagonal
         attention + per-sequence Gated DeltaNet conv / scan via cu_seqlens / seq_idx; sdpa/eager would ignore the
-        boundaries). Otherwise: a right-padded batch."""
+        boundaries). Otherwise: a right-padded batch.
+        `layers`: as in `_branch_encode` -> {layer: [len(lens), d]}; intermediate layers are read with forward hooks
+        on the decoder layers (only the read-out tokens are kept), then passed through the final norm."""
         dev = ids.device
+        tm = _inner_text(self.backbone)
+        want = _check_layers(tm, layers)
+        L = torch.tensor(lens, device=dev)
         if _varlen_kernels(dev) and getattr(self.backbone.config, "_attn_implementation", None) == "flash_attention_2":
-            L = torch.tensor(lens, device=dev)
             cu = torch.zeros(len(lens) + 1, dtype=torch.int32, device=dev)
             cu[1:] = L.cumsum(0)
             seq_idx = torch.repeat_interleave(torch.arange(len(lens), device=dev, dtype=torch.int32), L)[None]
-            h = self.backbone(input_ids=ids[None], position_ids=pos[None], cu_seq_lens_q=cu, cu_seq_lens_k=cu,
-                              max_length_q=max(lens), max_length_k=max(lens), seq_idx=seq_idx,
-                              use_cache=False).last_hidden_state[0]
-            return h[cu[1:].long() - 1]
-        S = max(lens)
-        x = ids.new_zeros(len(lens), S)
-        am = ids.new_zeros(len(lens), S)
-        t = 0
-        for k, n in enumerate(lens):
-            x[k, :n] = ids[t:t + n]
-            am[k, :n] = 1
-            t += n
-        h = self.backbone(input_ids=x, attention_mask=am, use_cache=False).last_hidden_state
-        return h[torch.arange(len(lens), device=dev), torch.tensor(lens, device=dev) - 1]
+            read = (torch.zeros_like(L), cu[1:].long() - 1)
+            kw = dict(input_ids=ids[None], position_ids=pos[None], cu_seq_lens_q=cu, cu_seq_lens_k=cu,
+                      max_length_q=max(lens), max_length_k=max(lens), seq_idx=seq_idx)
+        else:
+            S = max(lens)
+            x = ids.new_zeros(len(lens), S)
+            am = ids.new_zeros(len(lens), S)
+            t = 0
+            for k, n in enumerate(lens):
+                x[k, :n] = ids[t:t + n]
+                am[k, :n] = 1
+                t += n
+            read = (torch.arange(len(lens), device=dev), L - 1)
+            kw = dict(input_ids=x, attention_mask=am)
+        out, hooks = {}, []
+        n_layers = tm.config.num_hidden_layers
+        for l in want or []:
+            if l in (-1, n_layers):
+                continue                                  # = last_hidden_state (residual after the last layer + norm)
+
+            def grab(mod, args, res, l=l):
+                h = res[0] if isinstance(res, tuple) else res
+                out[l] = tm.norm(h[read])
+
+            hooks.append(tm.layers[l - 1].register_forward_hook(grab))
+        try:
+            last = self.backbone(**kw, use_cache=False).last_hidden_state[read]
+        finally:
+            for hk in hooks:
+                hk.remove()
+        if want is None:
+            return last
+        return {l: (last if l in (-1, n_layers) else out[l]) for l in want}
 
     def _branch_encode(self, ids: torch.Tensor, pos: torch.Tensor, plan: BranchPlan, read: torch.Tensor, layers=None):
         """Run the decoder over one branch layout (prefix segments + their suffix branches) and gather the read-out
@@ -162,12 +183,7 @@ class SCRM(nn.Module):
         gathering first is the same), which keeps their scale comparable across layers."""
         tm = _inner_text(self.backbone)
         n_layers = tm.config.num_hidden_layers
-        want = None
-        if layers is not None:
-            want = [int(l) for l in layers]
-            bad = [l for l in want if l != -1 and not 1 <= l <= n_layers]
-            if bad:
-                raise ValueError(f"layers must be -1 or in 1..{n_layers}, got {bad}")
+        want = _check_layers(tm, layers)
         h = tm.embed_tokens(ids)[None]
         pid = pos[None]
         pe = tm.rotary_emb(h, pid[None].expand(3, 1, -1))
@@ -349,6 +365,18 @@ class BranchCtx:
     """Per-forward branching context, handed to the patched decoder layers as the `branch_ctx` kwarg."""
     plan: BranchPlan
     varlen: bool
+
+
+def _check_layers(tm: nn.Module, layers) -> list | None:
+    """`layers` as ints (None passes through); each must be -1 or in 1..num_hidden_layers."""
+    if layers is None:
+        return None
+    n_layers = tm.config.num_hidden_layers
+    want = [int(l) for l in layers]
+    bad = [l for l in want if l != -1 and not 1 <= l <= n_layers]
+    if bad:
+        raise ValueError(f"layers must be -1 or in 1..{n_layers}, got {bad}")
+    return want
 
 
 def _inner_text(backbone: nn.Module) -> nn.Module:

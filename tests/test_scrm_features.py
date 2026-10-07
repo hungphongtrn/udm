@@ -26,9 +26,9 @@ def _cfg(synth, out, *extra):
                               "features.max_sets={train: 6, validation: 3}", *extra])
 
 
-def _model(cfg):
+def _model(cfg, branching=False):
     mcfg = {**cfg["model"], "freeze_backbone": True, "gradient_checkpointing": False, "head": "linear",
-            "lora": {**cfg["model"]["lora"], "enabled": False}}
+            "branching": branching, "lora": {**cfg["model"]["lora"], "enabled": False}}
     model, tok = build_scrm(mcfg, "cpu")
     return model.eval(), Renderer(tok, {**cfg["data"]["render"], "max_graded": None, "min_graded": None})
 
@@ -93,14 +93,15 @@ def test_rows_match_embed_through_perm(synth, tmp_path):
     assert any(json.loads(r["perm_json"]) != sorted(json.loads(r["perm_json"])) for r in tab.to_pylist() if r["variant"] > 0)
 
 
-def test_embed_layers_api(synth):
-    model, renderer = _model(_cfg(synth, "unused"))
+@pytest.mark.parametrize("branching", [False, True])
+def test_embed_layers_api(synth, branching):
+    model, renderer = _model(_cfg(synth, "unused"), branching)
     from test_scrm_model import _sets
     pack, _ = _sets([3, 2], P=9, seed=2)
     with torch.no_grad():
         base = model.embed(pack)
         d = model.embed(pack, layers=[2, 4, -1])
-        d2 = model.embed(pack, max_tokens=1, layers=[-1])      # chunked per set
+        d2 = model.embed(pack, max_tokens=1, layers=[-1])      # one chunk per unit (set / full sequence)
     n_layers = model.backbone.config.num_hidden_layers
     assert n_layers == 4 and list(d) == [2, 4, -1]
     assert torch.equal(d[-1], base) and torch.equal(d[4], base)   # layer 4 + final norm == last layer
@@ -110,6 +111,20 @@ def test_embed_layers_api(synth):
         model.embed(pack, layers=[0])
     with pytest.raises(ValueError):
         model.embed(pack, layers=[n_layers + 1])
+
+
+def test_full_sequence_layers_match_branch_encoder(synth):
+    """Intermediate-layer features from the full-sequence prefill (forward hooks) equal the branch encoder's."""
+    cfg = _cfg(synth, "unused")
+    full, _ = _model(cfg, branching=False)
+    br, _ = _model(cfg, branching=True)
+    br.load_state_dict(full.state_dict())
+    from test_scrm_model import _sets
+    pack, _ = _sets([3, 1, 2], P=11, seed=4)
+    with torch.no_grad():
+        a, b = full.embed(pack, layers=[1, 2, 3, -1]), br.embed(pack, layers=[1, 2, 3, -1])
+    for l in a:
+        assert torch.allclose(a[l], b[l], atol=2e-5), (l, (a[l] - b[l]).abs().max().item())
 
 
 def test_resume_skips_completed_shards(synth, tmp_path, monkeypatch):

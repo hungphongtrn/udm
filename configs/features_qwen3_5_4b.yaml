@@ -1,6 +1,6 @@
 # Experiment 2: frozen Qwen3.5-4B feature cache for head / loss experiments (scrm.features; no LoRA, no gradients).
-# One backbone pass per (set, variant): every shown option is graded ("Grade this choice: Option k"), exact shared-prefix
-# branch encoding, the hidden state at the end of each option's suffix is stored for layers 16, 24 and the last (-1).
+# One backbone prefill per (set, variant, option): every shown option is graded ("Grade this choice: Option k") as its own
+# full sequence `prompt + option` (stock HF forward); the hidden state at its last token is stored for layers 16, 24, -1.
 # Layer l = residual stream after the l-th decoder layer, passed through the final norm; -1 = last layer.
 # Launch: scripts/train/extract_features.sh configs/features_qwen3_5_4b.yaml [features.max_sets.train=2000 ...]
 # Resumable: re-running skips shards listed in <out_dir>/manifest.json. Changing layers/render/variants/seed needs a new out_dir.
@@ -21,6 +21,6 @@ features:
   shard_size: 512                   # rows (sets) per shard
   splits: [train, validation, test]
   max_sets: {train: 50000, validation: null, test: null}   # rows drawn per split, sources interleaved; null = all
-  max_tokens: 16384                 # backbone chunk budget (a set costs len(prefix) + sum(suffixes))
+  max_tokens: 16384                 # backbone chunk budget in full-sequence tokens (a set costs n_options * len(prompt) + sum(options))
   max_batch_size: 32
 wandb: {enabled: false}
