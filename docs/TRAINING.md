@@ -73,21 +73,19 @@ are read at the **last input token**, passed through the checkpoint final RMSNor
 normalization, sampled token, decode step, or custom branching encoder. Metadata and canonical option ordering are
 unchanged. Different HF/vLLM kernels need not be bit-identical; the two caches and loss-grid outputs are separate.
 
-### Isolated engine environment (GPU machine)
+### Engine environment (GPU machine)
 
-Do not install vLLM into the training environment: the pinned engine requires a different Torch version. Keep the
-existing `.venv`/training stack intact. From the repository root:
+vLLM 0.19.1 is part of the default `cu128` dependency group (it is the last release built for torch 2.10, the
+training torch), so the normal training environment runs extraction. From the repository root:
 
 ```bash
-uv venv --python 3.12 .venv-vllm
-uv pip install --python .venv-vllm/bin/python -e . \
-  'vllm==0.22.1' 'pandas>=2.0' 'datasets>=3.0' 'fsspec>=2023.1'
+uv sync
 scripts/train/extract_features.sh configs/features_qwen3_5_4b.yaml data.local_dir=data_cache/udm
 ```
 
-The launcher directly `exec`s this interpreter, so SIGINT/SIGTERM reach Python. `FEATURES_PYTHON=/path/to/python`
-selects another environment. vLLM, its CUDA kernels and driver compatibility must be checked on the actual GPU;
-the engine version is pinned because the multi-layer pooler uses its native model/pooling interfaces.
+The launcher directly `exec`s `.venv/bin/python` (or `$UV_PROJECT_ENVIRONMENT/bin/python`), so SIGINT/SIGTERM reach
+Python. `FEATURES_PYTHON=/path/to/python` selects another interpreter. The engine version is pinned because the
+multi-layer pooler uses its native model/pooling interfaces; `cu130`/`cpu` environments do not include vLLM.
 
 ### Stop and resume
 
@@ -117,8 +115,7 @@ identity: only if you know the dataset/model/rendering are unchanged, opt in to 
 `features.resume_legacy_hf=true` (this cannot retrospectively prove their original input identity):
 
 ```bash
-FEATURES_PYTHON="$PWD/.venv/bin/python" \
-  scripts/train/extract_features.sh configs/features_qwen3_5_4b.yaml \
+scripts/train/extract_features.sh configs/features_qwen3_5_4b.yaml \
   features.backend=hf features.out_dir=outputs/features_qwen3_5_4b \
   features.resume_legacy_hf=true data.local_dir=data_cache/udm
 ```

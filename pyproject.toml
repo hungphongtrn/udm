@@ -45,8 +45,10 @@ train = [
 # (without it HF sdpa builds a dense [T, T] block-diagonal mask per chunk: O(T^2) memory and compute; prebuilt wheels
 # from mjun0812/flash-attention-prebuild-wheels). liger-kernel = RMSNorm/SwiGLU
 # for qwen3_5 (model.liger_kernel); bitsandbytes = train.optim=adamw_8bit (default) and model.quantize_4bit.
+# vllm = frozen-feature extraction engine (scripts/train/extract_features.sh); 0.19.1 is the last release built for
+# torch 2.10 (its default wheel targets the public cu128 torch build).
 cu128 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention[tilelang]", "flash-attn==2.8.3",
-         "liger-kernel>=0.8.4", "bitsandbytes>=0.43"]   # CUDA 12.8, driver >= 570 (default)
+         "liger-kernel>=0.8.4", "bitsandbytes>=0.43", "vllm==0.19.1"]   # CUDA 12.8, driver >= 570 (default)
 # nvcc wheels pinned to 13.0 = torch cu130's nvidia-cuda-runtime: all share nvidia/cu13/include, and cccl refuses an
 # nvcc newer than the runtime headers ("CUDA compiler and CUDA toolkit headers are incompatible")
 cu130 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention[tilelang]", "tilelang[nvcc]", "flash-attn==2.8.3",

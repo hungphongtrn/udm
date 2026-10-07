@@ -1,4 +1,4 @@
-"""vLLM 0.22.1 model exposing the frozen multi-layer feature contract for Qwen3.5 text.
+"""vLLM 0.19.1 model exposing the frozen multi-layer feature contract for Qwen3.5 text.
 
 `scrm.vllm_features` registers this class under the architecture name ``Qwen3_5ForSCRMFeatures`` and
 drives it with ``runner="pooling"`` + ``convert="none"``. The workload is prefill-only: vLLM's own

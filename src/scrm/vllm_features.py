@@ -8,7 +8,7 @@ import torch
 
 from .tokens import prepare_tokenizer
 
-VLLM_VERSION = "0.22.1"
+VLLM_VERSION = "0.19.1"
 ARCHITECTURE = "Qwen3_5ForSCRMFeatures"
 
 
@@ -19,7 +19,7 @@ class VLLMFeatureExtractor:
         if device.type != "cuda":
             raise ValueError("features.backend=vllm requires a CUDA device")
         if version("vllm") != VLLM_VERSION:
-            raise RuntimeError(f"Feature pooling requires vllm=={VLLM_VERSION}; use the isolated .venv-vllm environment")
+            raise RuntimeError(f"Feature pooling requires vllm=={VLLM_VERSION}; run `uv sync` (cu128 group)")
         mcfg, fcfg = cfg["model"], cfg["features"]
         if mcfg["dtype"] != "bfloat16" or mcfg.get("quantize_4bit", False):
             raise ValueError("The vLLM feature contract requires an unquantized bfloat16 checkpoint")

@@ -31,7 +31,7 @@ SHARD_COLS = ("decision_set_id", "variant", "perm_json", "n_options", "row_offse
 MANIFEST_FORMAT = 2
 LOCK_FILE = ".lock"                                # per-out_dir flock file (created on first run, never deleted)
 # identity of the vLLM backend: pinned engine + the exact feature contract; both go into the resume fingerprint.
-VLLM_ENGINE_VERSION = "0.22.1"
+VLLM_ENGINE_VERSION = "0.19.1"
 VLLM_FEATURE_CONTRACT = "last-input-final-norm-v1"
 
 
