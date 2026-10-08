@@ -126,7 +126,7 @@ def test_perm_and_augment_flags_run(cache):
 def test_grid_enumerates_15_arms_and_summarises(cache, tmp_path):
     assert len(arms()) == 15 and arms()[0] == ("ce",) and arms()[-1] == ("ce", "brier", "bt", "sigmoid")
     cfg = load_grid_config("configs/lossgrid_debug.yaml", [f"cache_dir={cache}", f"output_dir={tmp_path}"])
-    tasks = make_tasks(cfg, "val")
+    tasks = make_tasks(cfg)
     assert len(tasks) == 15 * 2 * 1 * 2          # arms x lr x weight x seeds: equal per arm
     per_arm = {}
     for t in tasks:
@@ -136,18 +136,37 @@ def test_grid_enumerates_15_arms_and_summarises(cache, tmp_path):
     md = open(tmp_path / "summary.md").read()
     assert "ce+brier+bt+sigmoid" in md and "Main effects" in md
     sel = json.load(open(tmp_path / "selected.json"))
-    assert len(sel) == 15
-    eff = pd.read_csv(tmp_path / "effects_test.csv")
+    assert len(sel) == 15 and all(len(v["heads"]) == 2 and all(os.path.exists(h) for h in v["heads"])
+                                  for v in sel.values())
+    eff = pd.read_csv(tmp_path / "effects_validation.csv")
     assert {"ce", "sigmoid", "cexsigmoid"} <= set(eff["effect"])
-    summ = pd.read_csv(tmp_path / "summary_test.csv")
+    summ = pd.read_csv(tmp_path / "summary_validation.csv")
     assert len(summ) == 15 and (summ["n_seeds"] == 2).all()
-    lines = open(tmp_path / "results.jsonl").read().splitlines()
-    assert len(lines) == 60 + 30
+    assert len(open(tmp_path / "results.jsonl").read().splitlines()) == 60
     # resumable: a rerun does not retrain (mtime unchanged)
-    p = tmp_path / "runs" / "val"
+    p = tmp_path / "runs"
     before = {f.name: f.stat().st_mtime_ns for f in p.iterdir()}
     grid_main(["--config", "configs/lossgrid_debug.yaml", f"cache_dir={cache}", f"output_dir={tmp_path}"])
     assert before == {f.name: f.stat().st_mtime_ns for f in p.iterdir()}
+
+
+def test_best_validation_checkpoint_is_restored_and_saved(cache, tmp_path):
+    """The restored state scores the recorded best validation loss; the saved head reloads to the same rewards."""
+    from scrm.feat_train import load_head, make_batch, train_run, val_loss
+    cfg = _cfg(cache, **{"train.steps": 40, "train.lr": 0.5, "train.eval_every": 5, "train.warmup_steps": 1})
+    cfg["loss"]["terms"] = ["ce"]
+    model, readouts, info = train_run(cfg, log=lambda *_: None)
+    val = get_split(cfg, "validation")
+    terms, w = info["terms"], info["weights"]
+    again = val_loss(model, readouts, val, terms, w, cfg["loss"], cfg["train"], torch.device("cpu"))
+    assert again == pytest.approx(info["val_loss"])
+    res = run_experiment(cfg, ["validation"], log=lambda *_: None, head_path=str(tmp_path / "h.pt"))
+    assert res["best_step"] % 5 == 0 or res["best_step"] == 40
+    head, blob = load_head(str(tmp_path / "h.pt"), torch.device("cpu"))
+    assert blob["feature_key"] == "feat_L16" and blob["best_step"] == res["best_step"]
+    b = make_batch(val, list(range(8)))
+    with torch.no_grad():
+        assert torch.allclose(head(b["x"], b["mask"]), model.eval()(b["x"], b["mask"]))
 
 
 # ---- metrics ----

@@ -89,12 +89,25 @@ class VLLMFeatureExtractor:
             enable_prefix_caching=bool(ecfg["enable_prefix_caching"]),
             enable_chunked_prefill=bool(ecfg["enable_chunked_prefill"]),
             mamba_cache_mode="align" if ecfg["enable_prefix_caching"] else "none",
-            enforce_eager=True, seed=int(cfg["seed"]),
+            enforce_eager=bool(ecfg.get("enforce_eager", True)), disable_log_stats=not ecfg.get("log_stats", False),
+            seed=int(cfg["seed"]),
         )
         self.d_hidden = int(self.engine.llm_engine.model_config.hf_text_config.hidden_size)
         self.tokenizer = prepare_tokenizer(self.engine.get_tokenizer())
         # These are raw checkpoint-normalized hidden states, not unit-length embeddings.
         self.pooling_params = PoolingParams(use_activation=False)
+
+    def prefix_cache_stats(self) -> dict | None:
+        """Cumulative prefix-cache queries/hits (tokens) from vLLM's metrics; None unless features.vllm.log_stats."""
+        try:
+            metrics = self.engine.get_metrics()
+        except Exception:
+            return None
+        out = {}
+        for m in metrics:
+            if "prefix_cache" in m.name and hasattr(m, "value"):
+                out[m.name.removeprefix("vllm:")] = out.get(m.name.removeprefix("vllm:"), 0) + m.value
+        return out or None
 
     @torch.no_grad()
     def embed_items(self, items) -> dict[int, torch.Tensor]:

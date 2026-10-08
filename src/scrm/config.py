@@ -109,7 +109,8 @@ DEFAULTS: dict[str, Any] = {
         "resume_legacy_hf": False,       # old manifests lack data identity; explicit trust required for one-time upgrade
         # vLLM pooling: packed prefill-only requests; HF batching knobs above do not apply.
         "vllm": {"gpu_memory_utilization": 0.9, "max_num_batched_tokens": 16384, "max_num_seqs": 32,
-                 "request_batch_size": 256, "enable_prefix_caching": True, "enable_chunked_prefill": True},
+                 "request_batch_size": 256, "enable_prefix_caching": True, "enable_chunked_prefill": True,
+                 "enforce_eager": True, "log_stats": False},   # enforce_eager=false: CUDA graphs; log_stats: cache hits
     },
     # test-only evaluations at every save step (and at the end); never used for checkpoint selection
     "benchmarks": {

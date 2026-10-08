@@ -31,13 +31,14 @@ TERMS = ("ce", "brier", "bt", "sigmoid")
 FEAT_DEFAULTS: dict = {
     "seed": 0,
     "cache_dir": "outputs/feat_cache",
-    "data": {"layer": 24, "train_split": "train", "val_split": "validation", "test_splits": ["test"],
+    "data": {"layer": 24, "train_split": "train", "val_split": "validation",
              "max_options": None, "drop_truncated": False,
              "augment_variants": False},          # train on a random presentation variant per set (else variant 0 only)
     "model": {"head": "linear", "hidden": 256, "dropout": 0.1,       # mlp
               "d_set": 256, "set_layers": 2, "set_heads": 4, "set_ffn_mult": 2, "set_dropout": 0.1},
     "train": {"steps": 2000, "batch_size": 64, "eval_batch_size": 128, "lr": 1e-3, "weight_decay": 0.01,
-              "warmup_steps": 50, "grad_clip": 1.0, "device": "auto", "readout_lr_mult": 10.0, "log_every": 100},
+              "warmup_steps": 50, "grad_clip": 1.0, "device": "auto", "readout_lr_mult": 10.0, "log_every": 100,
+              "eval_every": 250},    # validation loss every N steps; the best-val-loss state is kept (0 = final)
     "loss": {
         "terms": ["ce"], "weights": {"ce": 1.0, "brier": 1.0, "bt": 1.0, "sigmoid": 1.0}, "weight": 1.0,
         "w_center": 0.01, "w_perm": 0.0,
@@ -323,8 +324,31 @@ def term_weights(lcfg: dict, terms) -> dict:
     return {t: float(lcfg["weights"][t]) * float(lcfg.get("weight", 1.0)) for t in terms}
 
 
+@torch.no_grad()
+def val_loss(model, readouts, split: FeatSplit, terms, weights: dict, lcfg: dict, tcfg: dict, device,
+             fam_index=None) -> float:
+    """The run's own training objective (selected terms + center, no perm term) on variant 0, mean over sets."""
+    was = model.training
+    model.eval()
+    total, n, bs = 0.0, 0, int(tcfg["eval_batch_size"])
+    for i in range(0, len(split), bs):
+        idxs = list(range(i, min(i + bs, len(split))))
+        b = _to(make_batch(split, idxs, 0, fam_index), device)
+        loss, _ = feat_loss(model(b["x"], b["mask"]), b, readouts, terms, weights, lcfg)
+        total += float(loss) * len(idxs)
+        n += len(idxs)
+    model.train(was)
+    return total / max(n, 1)
+
+
+def _snapshot(m: nn.Module) -> dict:
+    return {k: v.detach().to("cpu", copy=True) for k, v in m.state_dict().items()}
+
+
 def train_run(cfg: dict, wb=None, log=print):
-    """Train one head with cfg["loss"]["terms"]; returns (model, readouts, info). Deterministic given (seed, cfg)."""
+    """Train one head with cfg["loss"]["terms"]; every `train.eval_every` steps (and at the end) score the validation
+    loss and keep the best state, which is restored before returning (model, readouts, info).
+    Deterministic given (seed, cfg)."""
     wb = wb or NullRun()
     tcfg, lcfg, dcfg = cfg["train"], cfg["loss"], cfg["data"]
     terms = [t for t in TERMS if t in lcfg["terms"]]
@@ -332,6 +356,9 @@ def train_run(cfg: dict, wb=None, log=print):
     weights = term_weights(lcfg, terms)
     seed, device = int(cfg["seed"]), _device(tcfg)
     split = get_split(cfg, dcfg["train_split"])
+    val = get_split(cfg, dcfg["val_split"])
+    every = int(tcfg.get("eval_every") or 0)
+    best = {"key": math.inf, "loss": math.nan, "step": 0, "model": None, "readouts": None}
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     # standardisation stats / readout priors from the train variant-0 rows
@@ -381,23 +408,66 @@ def train_run(cfg: dict, wb=None, log=print):
         if (step + 1) % tcfg["log_every"] == 0 or step + 1 == steps:
             log(f"step {step + 1}/{steps} loss {loss.item():.4f} ema {ema:.4f} ({time.time() - t0:.0f}s)")
             wb.log({"train/loss": loss.item(), **{f"train/{k}": v.item() for k, v in parts.items()}}, step + 1)
-    return model, readouts, {"train_loss_ema": ema, "fam_index": fam_index, "terms": terms, "weights": weights}
+        if (every and (step + 1) % every == 0) or step + 1 == steps:
+            vl = val_loss(model, readouts, val, terms, weights, lcfg, tcfg, device, fam_index)
+            wb.log({"val/loss": vl}, step + 1)
+            key = vl if math.isfinite(vl) else math.inf          # NaN/inf never beat a finite loss
+            if best["model"] is None or key < best["key"]:
+                best.update(key=key, loss=vl, step=step + 1, model=_snapshot(model), readouts=_snapshot(readouts))
+    model.load_state_dict(best["model"])
+    readouts.load_state_dict(best["readouts"])
+    log(f"best validation loss {best['loss']:.4f} at step {best['step']}/{steps}")
+    return model, readouts, {"train_loss_ema": ema, "fam_index": fam_index, "terms": terms, "weights": weights,
+                             "best_step": best["step"], "val_loss": best["loss"], "d": split.d}
 
 
-def run_experiment(cfg: dict, eval_splits: list, log=print) -> dict:
-    """Train once, evaluate on the named splits. Returns a JSON-able result dict."""
+HEAD_FORMAT = "scrm-feat-head-1"
+
+
+def save_head(path: str, cfg: dict, model: FeatModel, info: dict) -> None:
+    """Atomic head checkpoint: everything needed to score new backbone features (scrm.dindex_frozen)."""
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(os.path.join(cfg["cache_dir"], "manifest.json")) as f:
+        man = json.load(f)
+    blob = {"format": HEAD_FORMAT, "model_cfg": dict(cfg["model"]), "d": int(info["d"]), "state": _snapshot(model),
+            "layer": cfg["data"]["layer"], "feature_key": f"feat_L{cfg['data']['layer']}",
+            "backbone": man.get("model"), "cache_dir": os.path.abspath(cfg["cache_dir"]),
+            "cache_sources": man.get("packed") or {"all": {"backend": man.get("backend", "hf")}},
+            "terms": info["terms"], "weights": info["weights"], "lr": cfg["train"]["lr"], "seed": cfg["seed"],
+            "best_step": info["best_step"], "val_loss": info["val_loss"]}
+    tmp = path + ".tmp"
+    torch.save(blob, tmp)
+    os.replace(tmp, path)
+
+
+def load_head(path: str, device) -> tuple[FeatModel, dict]:
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    if blob.get("format") != HEAD_FORMAT:
+        raise ValueError(f"{path}: not a {HEAD_FORMAT} checkpoint")
+    model = FeatModel(blob["d"], blob["model_cfg"])
+    model.load_state_dict(blob["state"])
+    return model.to(device).eval(), blob
+
+
+def run_experiment(cfg: dict, eval_splits: list, log=print, head_path: str | None = None) -> dict:
+    """Train once (best validation-loss state), evaluate on the named splits, optionally save the head.
+    Returns a JSON-able result dict."""
     from .wandb_utils import init_wandb
     wb = init_wandb(cfg["wandb"], cfg) if cfg["wandb"].get("enabled") else NullRun()
     t0 = time.time()
     model, readouts, info = train_run(cfg, wb, log)
+    if head_path:
+        save_head(head_path, cfg, model, info)
     device = _device(cfg["train"])
     metrics = {}
     for name in eval_splits:
         metrics[name] = evaluate(model, readouts, get_split(cfg, name), info["terms"], cfg["train"], device,
                                  info["fam_index"])
-        wb.log({f"eval/{name}/{k}": v for k, v in metrics[name]["all"].items()}, cfg["train"]["steps"])
+        wb.log({f"eval/{name}/{k}": v for k, v in metrics[name]["all"].items()}, info["best_step"])
+    metrics.setdefault(cfg["data"]["val_split"], {})["loss"] = {"total": info["val_loss"]}
     wb.finish()
     return {"terms": info["terms"], "weights": info["weights"], "lr": cfg["train"]["lr"], "seed": cfg["seed"],
-            "steps": cfg["train"]["steps"], "head": cfg["model"]["head"], "layer": cfg["data"]["layer"],
+            "steps": cfg["train"]["steps"], "best_step": info["best_step"], "val_loss": info["val_loss"],
+            "head": cfg["model"]["head"], "layer": cfg["data"]["layer"], "head_path": head_path,
             "train_loss_ema": info["train_loss_ema"], "readouts": readouts.values(), "metrics": metrics,
             "seconds": time.time() - t0}

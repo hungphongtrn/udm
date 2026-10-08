@@ -106,7 +106,8 @@ multi-layer pooler uses its native model/pooling interfaces; `cu130`/`cpu` envir
 * Scheduling knobs may change on resume: `features.vllm.max_num_seqs`, `request_batch_size`,
   `gpu_memory_utilization`, `max_num_batched_tokens`, prefix caching and chunked prefill. Qwen3.5 aligned prefix caching
   requires chunked prefill (the default enables both). To disable chunking, also disable prefix caching and keep
-  `max_num_batched_tokens >= data.render.max_len`. For the HF path, batching knobs remain
+  `max_num_batched_tokens >= data.render.max_len`. `enforce_eager` (default true; false = CUDA graphs) and
+  `log_stats` (prefix-cache hit counters) are scheduling knobs too. For the HF path, batching knobs remain
   `features.max_tokens`, `max_batch_size` and `cache_tokens`. Kernel rounding can vary with batching.
 * Manifest format 2 records the backend/feature identity and a per-split selected-files/rows digest. A split is ready
   for head training only when its `complete` flag is true; consumers use the manifest shard list, not stray files.
@@ -137,8 +138,29 @@ scripts/train/extract_features.sh configs/features_qwen3_5_4b.yaml \
 Interrupt once during extraction, wait for a committed-shard stop, then repeat that same command and check the
 resume/skip messages. Inspect `manifest.json` for `backend: vllm`, all three keys (`feat_L16`, `feat_L24`,
 `feat_Llast`) and completed splits. This is a correctness/startup check, not a throughput or VRAM guarantee.
-Run the full extraction to completion before training heads. `configs/lossgrid_qwen3_5_4b.yaml` now points at the
-vLLM cache and `outputs/lossgrid/qwen3_5_4b_vllm_set`; prior HF pilot results remain untouched.
+
+### Frozen loss study: pack, train heads, full Decision Index
+
+`scripts/train/frozen_pipeline.sh` chains three resumable stages (each also runnable alone):
+
+1. `pack_features.sh` builds `outputs/features_qwen3_5_4b_pack` from symlinks: the complete HF train split of
+   `outputs/features_qwen3_5_4b` plus the first `VAL_SHARDS` (8 x 512 sets, a source-balanced prefix) of the vLLM
+   validation cache `outputs/features_qwen3_5_4b_vllm_eval`. Train (HF) and validation (vLLM) backends differ
+   slightly; accepted, recorded under `packed` in the manifest and in every head.
+2. `lossgrid.sh configs/lossgrid_qwen3_5_4b.yaml` trains every loss subset x seed; validation loss every
+   `train.eval_every` steps, the lowest-validation-loss state is restored and saved as `heads/<run>.pt`. The arm's
+   learning rate/weight is chosen by validation loss; `selected.json` lists each arm's heads (one per seed). No
+   test split is used.
+3. `dindex_frozen.sh` featurizes the **full** Decision Index 0.2.1 suite once with the frozen vLLM backbone
+   (`outputs/dindex_feats_qwen3_5_4b`, resumable shards; each question rendered like training, every option graded;
+   too long / unsupported = wrong), then scores every selected head with the kit's scorer into
+   `outputs/dindex_frozen/qwen3_5_4b_pack/<run>/scores.json` and `summary.md` (per arm mean ± sd over seeds, board
+   rank). Needs `dindex_setup.sh`.
+
+Before stage 3, `scripts/train/bench_vllm.sh` times the same featurize workload on the first `LIMIT` suite requests
+for several engine settings (fresh process and throwaway cache each, `outputs/vllm_bench`) and prints steady-state
+requests/s, unique/submitted tokens/s, prefix-cache hit rate vs the ideal and the full-suite ETA. Pass the winner's
+overrides as `FEATS_OVERRIDES="..."` to `dindex_frozen.sh` / `frozen_pipeline.sh` (they do not change features).
 
 ## Design choices
 
