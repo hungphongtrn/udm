@@ -160,7 +160,9 @@ resume/skip messages. Inspect `manifest.json` for `backend: vllm`, all three key
 Before stage 3, `scripts/train/bench_vllm.sh` times the same featurize workload on the first `LIMIT` suite requests
 for several engine settings (fresh process and throwaway cache each, `outputs/vllm_bench`) and prints steady-state
 requests/s, unique/submitted tokens/s, prefix-cache hit rate vs the ideal and the full-suite ETA. Pass the winner's
-overrides as `FEATS_OVERRIDES="..."` to `dindex_frozen.sh` / `frozen_pipeline.sh` (they do not change features).
+overrides as `FEATS_OVERRIDES="..."` to `dindex_frozen.sh` / `frozen_pipeline.sh` (they do not change features). The
+default sweep is sized for one 24 GB RTX 3090 (`max_num_seqs` 32-128, 16k-token budget, eager vs CUDA graphs, prefix
+cache on/off); an out-of-memory setting is reported as `failed`. Run it alone on the GPU.
 
 ## Design choices
 

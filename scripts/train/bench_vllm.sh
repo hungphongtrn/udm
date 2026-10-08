@@ -4,24 +4,27 @@
 # throwaway cache under $BENCH, then prints steady-state throughput, prefix-cache hit rate and full-suite ETA.
 #   scripts/train/bench_vllm.sh                 # default sweep below
 #   scripts/train/bench_vllm.sh 'mine|features.vllm.max_num_seqs=64'   # custom 'tag|overrides' settings
-# Env: LIMIT (1024 requests; 2 shards, the 2nd = steady state), FEATS_CFG, BENCH (outputs/vllm_bench), DI_DIR.
+# Env: LIMIT (512 requests; 2 shards, the 2nd = steady state), FEATS_CFG, BENCH (outputs/vllm_bench), DI_DIR.
+# One GPU: do not run it while the loss grid or another vLLM process holds the card.
 # Pick the fastest tag and pass its overrides to dindex_frozen.sh via FEATS_OVERRIDES.
 set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 cd "$REPO_ROOT"
-LIMIT="${LIMIT:-1024}"; BENCH="${BENCH:-outputs/vllm_bench}"; CFG="${FEATS_CFG:-configs/features_qwen3_5_4b.yaml}"
+LIMIT="${LIMIT:-512}"; BENCH="${BENCH:-outputs/vllm_bench}"; CFG="${FEATS_CFG:-configs/features_qwen3_5_4b.yaml}"
 export DI_DIR="${DI_DIR:-$REPO_ROOT/../decision-index}"
 PY="${FEATURES_PYTHON:-${UV_PROJECT_ENVIRONMENT:-$REPO_ROOT/.venv}/bin/python}"
 V=features.vllm
 SETTINGS=("$@")
+# Sized for one 24 GB RTX 3090 (the config's 16k-token budget / 32 seqs is what the extraction ran with). Every
+# sequence pins Qwen3.5 Mamba state, so more seqs trade KV/prefix-cache room for parallelism; an OOM shows as failed.
 [ ${#SETTINGS[@]} -gt 0 ] || SETTINGS=(
   "base|"
-  "seqs128|$V.max_num_seqs=128"
-  "seqs256_tok32k|$V.max_num_seqs=256 $V.max_num_batched_tokens=32768"
-  "graphs|$V.enforce_eager=false"
-  "graphs_seqs256_tok32k|$V.enforce_eager=false $V.max_num_seqs=256 $V.max_num_batched_tokens=32768"
-  "graphs_seqs256_tok32k_win1024|$V.enforce_eager=false $V.max_num_seqs=256 $V.max_num_batched_tokens=32768 $V.request_batch_size=1024"
   "nocache|$V.enable_prefix_caching=false"
+  "seqs64|$V.max_num_seqs=64"
+  "seqs128|$V.max_num_seqs=128"
+  "graphs|$V.enforce_eager=false"
+  "graphs_seqs64|$V.enforce_eager=false $V.max_num_seqs=64"
+  "seqs64_win1024|$V.max_num_seqs=64 $V.request_batch_size=1024"
 )
 mkdir -p "$BENCH"
 for s in "${SETTINGS[@]}"; do

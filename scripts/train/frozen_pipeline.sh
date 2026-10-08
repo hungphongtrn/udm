@@ -4,8 +4,10 @@
 #   2. lossgrid.sh        every loss subset x seeds; checkpoint = lowest validation loss; -> selected.json + heads
 #   3. dindex_frozen.sh   full Decision Index 0.2.1: backbone once over the suite, then every selected head
 #   scripts/train/frozen_pipeline.sh
-# Env: WORKERS (lossgrid parallel runs), GRID_CFG (configs/lossgrid_qwen3_5_4b.yaml), FEATS_OVERRIDES (fastest
-# bench_vllm.sh setting), plus those of the three stage scripts. Run bench_vllm.sh first to choose FEATS_OVERRIDES.
+# Env: WORKERS (lossgrid parallel runs; all share the one GPU and each loads the train features into RAM, so keep it
+# small on the 3090 box), GRID_CFG (configs/lossgrid_qwen3_5_4b.yaml), FEATS_OVERRIDES (fastest bench_vllm.sh
+# setting), plus those of the three stage scripts. Run bench_vllm.sh first (alone on the GPU) to choose FEATS_OVERRIDES.
+# Stages run one after another, so vLLM (stage 3) never shares the card with head training.
 set -euo pipefail
 HERE="$(dirname "${BASH_SOURCE[0]}")"
 GRID_CFG="${GRID_CFG:-configs/lossgrid_qwen3_5_4b.yaml}"
