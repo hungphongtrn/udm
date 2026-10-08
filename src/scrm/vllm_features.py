@@ -102,30 +102,42 @@ class VLLMFeatureExtractor:
         storage = torch.empty((count, len(self.layers), self.d_hidden), dtype=torch.bfloat16)
         features = {layer: storage[:, i, :] for i, layer in enumerate(self.layers)}
         width = len(self.layers) * self.d_hidden
-        requests = []
-        offset = 0
 
-        def submit():
-            nonlocal offset
-            outputs = self.engine.encode(requests, pooling_params=self.pooling_params, pooling_task="embed",
-                                         use_tqdm=False)
-            if len(outputs) != len(requests):
+        def encode(batch: list[tuple[int, list[int]]]):
+            outputs = self.engine.encode([{"prompt_token_ids": ids} for _, ids in batch],
+                                         pooling_params=self.pooling_params, pooling_task="embed", use_tqdm=False)
+            if len(outputs) != len(batch):
                 raise RuntimeError("vLLM returned an invalid multi-layer feature batch")
-            for j, out in enumerate(outputs):
+            for (row, _), out in zip(batch, outputs):
                 values = out.outputs.data
                 if values.ndim != 1 or values.numel() != width:
                     raise RuntimeError("vLLM returned an invalid multi-layer feature vector")
                 # Direct cast into final CPU storage; no float-list conversion or temporary stacked matrix.
-                storage[offset + j].copy_(values.reshape(len(self.layers), self.d_hidden))
-            offset += len(outputs)
-            requests.clear()
+                storage[row].copy_(values.reshape(len(self.layers), self.d_hidden))
 
+        def submit(window):
+            # All options of a set share its prompt. Submitted together, siblings are admitted while the prompt is
+            # still being prefilled, so (especially for the hybrid Mamba state, cached only at aligned, computed
+            # boundaries) they recompute it. Finish one option per set first, then its siblings reuse the cache.
+            firsts = [reqs[0] for reqs in window]
+            rest = [r for reqs in window for r in reqs[1:]]
+            encode(firsts)
+            if rest:
+                encode(rest)
+
+        window, pending, row = [], 0, 0
         for it in items:
             prefix = it.prefix.tolist()
+            reqs = []
             for suffix in it.suffixes:
-                requests.append({"prompt_token_ids": prefix + suffix.tolist()})
-                if len(requests) == self.request_batch_size:
-                    submit()
-        if requests:
-            submit()
+                reqs.append((row, prefix + suffix.tolist()))
+                row += 1
+            if reqs:
+                window.append(reqs)
+                pending += len(reqs)
+            if pending >= self.request_batch_size:
+                submit(window)
+                window, pending = [], 0
+        if window:
+            submit(window)
         return features
