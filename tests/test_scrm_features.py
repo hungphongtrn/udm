@@ -163,6 +163,28 @@ def test_resume_skips_completed_shards(synth, tmp_path, monkeypatch):
     assert calls == []                                              # everything complete: nothing to do
 
 
+def test_lowered_max_sets_keeps_prefix_shards(synth, tmp_path, monkeypatch):
+    """Lowering a split's cap keeps the committed shards fully inside the new prefix (same rows, untouched files),
+    recomputes only a straddling shard, and refuses to raise the cap."""
+    out = str(tmp_path / "f")
+    F.run(_cfg(synth, out, "features.shard_size=2", "features.splits=[train]"))       # 6 rows -> 3 shards
+    d = os.path.join(out, "train")
+    stamp = {f: os.stat(os.path.join(d, f)).st_mtime_ns for f in os.listdir(d)}
+    calls = []
+    real = F.extract_rows
+    monkeypatch.setattr(F, "extract_rows", lambda *a, **k: calls.append(1) or real(*a, **k))
+    man = F.run(_cfg(synth, out, "features.shard_size=2", "features.splits=[train]", "features.max_sets.train=4"))
+    sp = man["splits"]["train"]
+    assert calls == [] and sp["complete"] and [s["name"] for s in sp["shards"]] == ["shard_00000", "shard_00001"]
+    assert sorted(os.listdir(d)) == sorted(f for f in stamp if not f.startswith("shard_00002"))
+    assert all(os.stat(os.path.join(d, f)).st_mtime_ns == stamp[f] for f in os.listdir(d))
+    man = F.run(_cfg(synth, out, "features.shard_size=2", "features.splits=[train]", "features.max_sets.train=3"))
+    sp = man["splits"]["train"]
+    assert calls == [1] and sp["complete"] and sp["n_selected"] == 3
+    with pytest.raises(SystemExit):
+        F.run(_cfg(synth, out, "features.shard_size=2", "features.splits=[train]", "features.max_sets.train=6"))
+
+
 def test_config_change_needs_new_out_dir(synth, tmp_path):
     out = str(tmp_path / "f")
     F.run(_cfg(synth, out, "features.splits=[validation]"))

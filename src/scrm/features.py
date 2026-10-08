@@ -524,6 +524,51 @@ def _install_signal_handlers(ctrl: _StopController) -> list:
     return prev
 
 
+def _finish_split(sp: dict, n_shards: int) -> None:
+    sp["complete"] = {s["name"] for s in sp["shards"]} >= {f"shard_{i:05d}" for i in range(n_shards)}
+    sp["shards"].sort(key=lambda s: s["name"])
+    sp["n_sets"] = sum(s["n_sets"] for s in sp["shards"])
+    sp["n_rows"] = sum(s["n_rows"] for s in sp["shards"])
+    sp["n_dropped"] = sum(s["n_dropped"] for s in sp["shards"])
+
+
+def _caps_lowered(old: dict | None, new: dict | None) -> bool:
+    """Every split's max_sets equal or lower (None = all rows)."""
+    old, new = old or {}, new or {}
+    return all(old.get(s) == new.get(s) or (new.get(s) is not None and (old.get(s) is None or new[s] <= old[s]))
+               for s in set(old) | set(new))
+
+
+def _lower_caps(cfg: dict, man: dict, old_caps: dict | None) -> None:
+    """Resume with a lowered features.max_sets. `select_locations` truncates one fixed seeded round-robin order, so the
+    new selection is a prefix of the old one and every full committed shard inside that prefix holds exactly the rows
+    the new cap selects. Checks the old selection against its recorded digest and the prefix, then forgets shards
+    beyond it (their files are purged when the split is next processed). Mutates `man` only; caller commits it."""
+    fcfg, d = cfg["features"], cfg["data"]
+    S, seed, new_caps = int(fcfg["shard_size"]), int(fcfg["seed"]), fcfg["max_sets"] or {}
+    for split, sp in man["splits"].items():
+        o, n = (old_caps or {}).get(split), new_caps.get(split)
+        if o == n:
+            continue
+        filters = d["filters"] if split == d["train_split"] else d["eval_filters"]
+        files, old_locs = select_locations(d, split, filters, o, seed)
+        if sp.get("selection") != _selection_digest(files, old_locs):
+            raise SystemExit(f"{split}: cannot lower max_sets: the recorded selection no longer matches the data; "
+                             "use a new features.out_dir")
+        _, locs = select_locations(d, split, filters, n, seed)
+        if not np.array_equal(locs, old_locs[:len(locs)]):
+            raise SystemExit(f"{split}: lowered max_sets did not select a prefix of the recorded rows; use a new "
+                             "features.out_dir")
+        same = len(locs) == len(old_locs)
+        before = len(sp["shards"])
+        sp["shards"] = [s for s in sp["shards"] if same or (int(s["name"][len("shard_"):]) + 1) * S <= len(locs)]
+        n_shards = -(-len(locs) // S)
+        sp.update(n_selected=int(len(locs)), n_shards=n_shards, selection=_selection_digest(files, locs))
+        _finish_split(sp, n_shards)
+        print(f"[features] {split}: max_sets {o} -> {n}: kept {len(sp['shards'])}/{before} committed shard(s) "
+              f"({len(locs)} rows, {n_shards} shards, complete={sp['complete']})", flush=True)
+
+
 def run(cfg: dict, device=None, *, stop=None) -> dict:
     """Drive the feature cache. `stop` is a test seam: pass a `_StopController` to exercise the cooperative stop
     without signals (a real run installs SIGINT/SIGTERM handlers and uses its own controller)."""
@@ -577,15 +622,19 @@ def _run_locked(cfg: dict, device, out_dir: str, ctrl: _StopController) -> dict:
             changed = sorted(k for k in set(old_ident) | set(full)
                              if json.dumps(old_ident.get(k), sort_keys=True, default=str)
                              != json.dumps(full.get(k), sort_keys=True, default=str))
-            detail = "; ".join(f"{k}: {old_ident.get(k)!r} -> {full.get(k)!r}" for k in changed) or "fingerprint only"
-            raise SystemExit(f"{path} was made with a different features/render/model/data-selection config "
-                             f"({detail}); use a new features.out_dir or features.overwrite=true")
+            if changed == ["max_sets"] and old.get("identity") and _caps_lowered(old_ident["max_sets"], full["max_sets"]):
+                _lower_caps(cfg, old, old_ident["max_sets"])
+            else:
+                detail = "; ".join(f"{k}: {old_ident.get(k)!r} -> {full.get(k)!r}" for k in changed) or "fingerprint only"
+                raise SystemExit(f"{path} was made with a different features/render/model/data-selection config "
+                                 f"({detail}); use a new features.out_dir or features.overwrite=true")
         man = old
         man["format"] = max(int(man.get("format", 1)), MANIFEST_FORMAT)
         man["fingerprint"] = fp
         man["legacy_fingerprint"] = fp_legacy
         man["backend"] = backend
         man["identity"] = full
+        man.update(base)
         man["keys"] = [layer_key(l) for l in base["layers"]]
         man["splits"] = man.get("splits") or {}
     # Commit the manifest before the first shard: an interruption right after startup still pins the config, so a
@@ -652,11 +701,7 @@ def _run_locked(cfg: dict, device, out_dir: str, ctrl: _StopController) -> dict:
                 print(f"[features] stopped cleanly after committing {split}/{name}; rerun the same command to resume",
                       flush=True)
                 break
-        sp["complete"] = {s["name"] for s in sp["shards"]} >= {f"shard_{i:05d}" for i in range(n_shards)}
-        sp["shards"].sort(key=lambda s: s["name"])
-        sp["n_sets"] = sum(s["n_sets"] for s in sp["shards"])
-        sp["n_rows"] = sum(s["n_rows"] for s in sp["shards"])
-        sp["n_dropped"] = sum(s["n_dropped"] for s in sp["shards"])
+        _finish_split(sp, n_shards)
         _write_manifest(out_dir, man)
         if ctrl.requested:
             break

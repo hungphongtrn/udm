@@ -100,6 +100,9 @@ multi-layer pooler uses its native model/pooling interfaces; `cu130`/`cpu` envir
 * Keep model/backend, data selection, rendering, layers, variants, seed, shard size and row caps unchanged. Use a
   **new output directory** for a different cache identity. Missing/corrupt committed shards are errors, not silently
   replaced features. Do not edit the manifest to bypass identity checks.
+* Row caps may only be **lowered** in place (`features.max_sets.<split>=N`): the capped selection is a prefix of the
+  previous one, so full committed shards inside it are kept and the split can become complete immediately; a shard
+  straddling the new end is recomputed. Raising a cap needs a new output directory.
 * Scheduling knobs may change on resume: `features.vllm.max_num_seqs`, `request_batch_size`,
   `gpu_memory_utilization`, `max_num_batched_tokens`, prefix caching and chunked prefill. Qwen3.5 aligned prefix caching
   requires chunked prefill (the default enables both). To disable chunking, also disable prefix caching and keep
