@@ -218,3 +218,69 @@ def test_abstention_via_model_removal(cache):
     model, ro, info = train_run(cfg, log=lambda *_: None)
     m = evaluate(model, ro, get_split(cfg, "validation"), info["terms"], cfg["train"], _device(cfg["train"]))["all"]
     assert m["abst_n"] > 0 and m["abst_sigmoid_after"] < m["abst_sigmoid_before"]
+
+
+def test_train_split_keeps_only_used_variants_and_batches_match(cache):
+    from scrm.feat_train import make_batch, train_variants
+    cfg = _cfg(cache)
+    assert train_variants(cfg) == (0,)
+    full, v0 = get_split(cfg, "train"), get_split(cfg, "train", (0,))
+    assert v0.feats.shape[0] < full.feats.shape[0]
+    for idxs, db in ((list(range(len(full))), False), ([3, 1, 7], True)):
+        a, b = make_batch(full, idxs, drop_best=db), make_batch(v0, idxs, drop_best=db)
+        assert all(torch.equal(a[k], b[k]) for k in a)
+    cfg["data"]["augment_variants"] = True
+    assert train_variants(cfg) is None
+
+
+def test_grid_scores_every_head_on_decision_index(cache, tmp_path, monkeypatch, capsys):
+    """dindex.enabled: every head goes to scrm.dindex_frozen.score (stubbed: no suite here); the reports carry the
+    per-arm index, the term effects on it, every config and the validation -> index correlations."""
+    from scrm import dindex_frozen
+    feats = tmp_path / "difeats"
+    feats.mkdir()
+    (feats / "manifest.json").write_text(json.dumps({"complete": True}))
+    calls = []
+
+    def fake_score(feats_dir, heads, out_dir, suite_dir, edition, board, report=True, rescore=False):
+        calls.append((feats_dir, list(heads), out_dir, report))
+        rows = []
+        for h in heads:
+            blob = torch.load(h, weights_only=False)
+            rows.append({"run": os.path.basename(h)[:-3], "arm": "+".join(blob["terms"]), "seed": blob["seed"],
+                         "lr": blob["lr"], "index": 10.0 * len(blob["terms"]) + blob["seed"], "raw_index": 1.0,
+                         "answered_frac": 0.9, "complete": True, "area/reasoning": 5.0 * ("ce" in blob["terms"])})
+        return rows
+
+    monkeypatch.setattr(dindex_frozen, "score", fake_score)
+    out = tmp_path / "grid"
+    args = ["--config", "configs/lossgrid_debug.yaml", f"cache_dir={cache}", f"output_dir={out}",
+            "dindex.enabled=true", f"dindex.feats_dir={feats}"]
+    grid_main(args)
+    assert len(calls) == 1 and len(calls[0][1]) == 60 and calls[0][3] is False
+    assert calls[0][2] == os.path.join(str(out), "dindex")
+    md = open(out / "summary.md").read()
+    assert "## Decision Index" in md and "Effect of each loss term" in md and "Every config" in md
+    assert "Does validation predict" in md
+    summ = pd.read_csv(out / "summary_dindex.csv")
+    assert len(summ) == 15 and (summ["n_seeds"] == 2).all()
+    full = summ.set_index("arm").loc["ce+brier+bt+sigmoid"]
+    assert full["di/index_mean"] == pytest.approx(40.5) and full["area/reasoning_mean"] == 5.0
+    eff = pd.read_csv(out / "effects_dindex.csv").set_index(["metric", "effect"])
+    assert eff.loc[("area/reasoning", "ce"), "diff"] == pytest.approx(5.0)
+    runs = pd.read_csv(out / "dindex_runs.csv")
+    assert len(runs) == 60 and {"val/all/top1", "di/index", "area/reasoning"} <= set(runs.columns)
+    conf = pd.read_csv(out / "dindex_configs.csv")
+    assert len(conf) == 30 and conf.groupby("arm")["val_selected"].sum().eq(1).all()
+    # heads=selected only scores the validation-selected config of each arm
+    calls.clear()
+    grid_main(["--summarize-only"] + args + ["dindex.heads=selected"])
+    assert len(calls[0][1]) == 30
+    # no feature cache -> clear error; --print-dindex-feats names the dir to featurize
+    with pytest.raises(SystemExit, match="featurize"):
+        grid_main(["--summarize-only"] + args[:-1] + [f"dindex.feats_dir={tmp_path / 'missing'}"])
+    capsys.readouterr()
+    grid_main(["--print-dindex-feats"] + args[:-1] + [f"dindex.feats_dir={tmp_path / 'missing'}"])
+    assert capsys.readouterr().out.strip() == str(tmp_path / "missing")
+    grid_main(["--print-dindex-feats"] + args)                          # complete cache: nothing to featurize
+    assert capsys.readouterr().out.strip() == ""

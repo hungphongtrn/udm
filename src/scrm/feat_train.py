@@ -33,7 +33,8 @@ FEAT_DEFAULTS: dict = {
     "cache_dir": "outputs/feat_cache",
     "data": {"layer": 24, "train_split": "train", "val_split": "validation",
              "max_options": None, "drop_truncated": False,
-             "augment_variants": False},          # train on a random presentation variant per set (else variant 0 only)
+             "augment_variants": False,           # train on a random presentation variant per set (else variant 0 only)
+             "feats_on_device": True},            # feature matrix lives on the training device (one gather per batch)
     "model": {"head": "linear", "hidden": 256, "dropout": 0.1,       # mlp
               "d_set": 256, "set_layers": 2, "set_heads": 4, "set_ffn_mult": 2, "set_dropout": 0.1},
     "train": {"steps": 2000, "batch_size": 64, "eval_batch_size": 128, "lr": 1e-3, "weight_decay": 0.01,
@@ -79,12 +80,60 @@ class SetRec:
 
 @dataclass
 class FeatSplit:
-    feats: torch.Tensor           # [M,d] bf16
+    feats: torch.Tensor           # [M,d] bf16 (on the training device once get_split has placed it)
     sets: list = field(default_factory=list)
     d: int = 0
+    _tab: dict | None = field(default=None, repr=False)
 
     def __len__(self):
         return len(self.sets)
+
+    def tables(self) -> dict:
+        """Padded per-set label arrays + per-variant row offsets, built once so make_batch is a single gather."""
+        if self._tab is None:
+            S = len(self.sets)
+            N = max((r.n for r in self.sets), default=1)
+            V = max((max(r.rows) for r in self.sets), default=0) + 1
+            n = np.array([r.n for r in self.sets], np.int64)
+            off = np.zeros((S, V), np.int64)
+            tiers = np.full((S, N), -1, np.int64)
+            probs = np.zeros((S, N), np.float32)
+            has = np.zeros(S, bool)
+            ab = np.full((S, N), np.nan, np.float32)
+            for i, r in enumerate(self.sets):
+                off[i] = [r.rows.get(v, r.rows[0]) for v in range(V)]      # a missing variant falls back to 0
+                tiers[i, :r.n] = r.tiers
+                ab[i, :r.n] = r.abs
+                if r.probs is not None:
+                    probs[i, :r.n] = r.probs
+                    has[i] = True
+            self._tab = {"n": n, "off": off, "tiers": tiers, "probs": probs, "has_probs": has, "abs": ab,
+                         "family": np.array([r.family for r in self.sets], dtype=object)}
+        return self._tab
+
+    def to(self, device) -> "FeatSplit":
+        self.feats = self.feats.to(device)
+        return self
+
+    def keep_variants(self, keep) -> "FeatSplit":
+        """Drop the feature rows of every other presentation variant (variant 0 is always kept)."""
+        keep = sorted(set(keep) | {0})
+        starts, lens, sets, base = [], [], [], 0
+        for r in self.sets:
+            rows = {}
+            for v in keep:
+                if v in r.rows:
+                    rows[v] = base
+                    starts.append(r.rows[v])
+                    lens.append(r.n)
+                    base += r.n
+            sets.append(SetRec(r.id, r.n, rows, r.tiers, r.probs, r.abs, r.source, r.kind, r.family))
+        starts, lens = np.array(starts, np.int64), np.array(lens, np.int64)
+        idx = np.repeat(starts - np.concatenate([[0], np.cumsum(lens)[:-1]]), lens) + np.arange(base)
+        return FeatSplit(self.feats[torch.from_numpy(idx).to(self.feats.device)], sets, self.d)
+
+    def nbytes(self) -> int:
+        return self.feats.numel() * self.feats.element_size()
 
 
 def load_split(cache_dir: str, split: str, layer, max_options: int | None = None, drop_truncated: bool = False) -> FeatSplit:
@@ -128,39 +177,37 @@ def load_split(cache_dir: str, split: str, layer, max_options: int | None = None
 
 def make_batch(split: FeatSplit, idxs, variants=0, fam_index: dict | None = None, drop_best: bool = False) -> dict:
     """Pad sets idxs to [B,Nmax]. variants: int or per-set list (falls back to 0 when a set lacks it).
-    drop_best: remove the (single) tier-0 option from the set (mask False, tier -1)."""
-    recs = [split.sets[i] for i in idxs]
-    B, N = len(recs), max(r.n for r in recs)
-    x = torch.zeros(B, N, split.d)
-    tiers = torch.full((B, N), -1, dtype=torch.long)
-    probs = torch.zeros(B, N)
-    has_probs = torch.zeros(B, dtype=torch.bool)
-    ab = torch.zeros(B, N)
-    abm = torch.zeros(B, N, dtype=torch.bool)
-    fam = torch.zeros(B, dtype=torch.long)
-    for b, r in enumerate(recs):
-        v = variants if isinstance(variants, int) else variants[b]
-        off = r.rows.get(v, r.rows[0])
-        x[b, :r.n] = split.feats[off:off + r.n].float()
-        tiers[b, :r.n] = torch.from_numpy(r.tiers)
-        if r.probs is not None:
-            probs[b, :r.n] = torch.from_numpy(r.probs)
-            has_probs[b] = True
-        a = torch.from_numpy(r.abs)
-        abm[b, :r.n] = ~torch.isnan(a)
-        ab[b, :r.n] = torch.nan_to_num(a)
-        if fam_index is not None:
-            fam[b] = fam_index.get(r.family, len(fam_index))
+    drop_best: remove the (single) tier-0 option from the set (mask False, tier -1).
+    One gather from split.feats; every tensor is returned on split.feats.device."""
+    t = split.tables()
+    idxs = np.asarray(idxs, dtype=np.int64)
+    B = len(idxs)
+    n = t["n"][idxs]
+    N = int(n.max())
+    v = np.full(B, variants, np.int64) if isinstance(variants, (int, np.integer)) else np.asarray(variants, np.int64)
+    v = np.where(v < t["off"].shape[1], v, 0)
+    off = t["off"][idxs, v]
+    tiers = t["tiers"][idxs, :N].copy()
+    a = t["abs"][idxs, :N]
+    abm = ~np.isnan(a)
     mask = tiers >= 0
     if drop_best:
-        top = tiers.masked_fill(~mask, 10**9).argmin(1)
-        ar = torch.arange(B)
+        top = np.where(mask, tiers, 10**9).argmin(1)
+        ar = np.arange(B)
         mask[ar, top] = False
         tiers[ar, top] = -1
-        x[ar, top] = 0
         abm &= mask
-    return {"x": x, "mask": mask, "tiers": tiers, "probs": probs, "has_probs": has_probs, "abs": ab, "abs_mask": abm,
-            "fam": fam}
+    pos = np.arange(N)[None, :]
+    rows = off[:, None] + np.where(pos < n[:, None], pos, 0)
+    dev = split.feats.device
+    m = torch.from_numpy(mask).to(dev)
+    x = split.feats[torch.from_numpy(rows).to(dev)].float().masked_fill_(~m[..., None], 0.0)
+    fam = np.zeros(B, np.int64)
+    if fam_index is not None:
+        fam[:] = [fam_index.get(f, len(fam_index)) for f in t["family"][idxs]]
+    out = {"tiers": tiers, "probs": t["probs"][idxs, :N], "has_probs": t["has_probs"][idxs], "abs": np.nan_to_num(a),
+           "abs_mask": abm, "fam": fam}
+    return {"x": x, "mask": m, **{k: torch.from_numpy(np.ascontiguousarray(a)).to(dev) for k, a in out.items()}}
 
 
 def _to(b: dict, device) -> dict:
@@ -307,17 +354,54 @@ def make_batch_meta(split: FeatSplit, Nmax: int) -> dict:
 _SPLITS: dict = {}
 
 
-def get_split(cfg: dict, name: str) -> FeatSplit:
+def _feats_device(cfg: dict) -> torch.device:
+    """data.feats_on_device: keep the feature matrix on the training device (batches are then one GPU gather instead
+    of a per-set CPU copy + transfer, which leaves a small head's GPU mostly idle)."""
+    return _device(cfg["train"]) if cfg["data"].get("feats_on_device", True) else torch.device("cpu")
+
+
+def train_variants(cfg: dict):
+    """Presentation variants training reads: all of them for augment_variants / the perm loss, else only 0."""
+    return None if cfg["data"]["augment_variants"] or cfg["loss"]["w_perm"] else (0,)
+
+
+def get_split(cfg: dict, name: str, variants=None) -> FeatSplit:
+    """Cached per process. variants: keep only these presentation variants' rows (None = all)."""
     d = cfg["data"]
-    k = (os.path.abspath(cfg["cache_dir"]), name, str(d["layer"]), d["max_options"], d["drop_truncated"])
+    dev = _feats_device(cfg)
+    k = (os.path.abspath(cfg["cache_dir"]), name, str(d["layer"]), d["max_options"], d["drop_truncated"], str(dev),
+         None if variants is None else tuple(sorted(variants)))
     if k not in _SPLITS:
-        _SPLITS[k] = load_split(cfg["cache_dir"], name, d["layer"], d["max_options"], d["drop_truncated"])
+        sp = load_split(cfg["cache_dir"], name, d["layer"], d["max_options"], d["drop_truncated"])
+        if variants is not None:
+            sp = sp.keep_variants(variants)
+        _SPLITS[k] = sp.to(dev)
+        print(f"[feat] {name}: {len(sp)} sets, {sp.feats.shape[0]} rows, {sp.nbytes() / 2**30:.2f} GiB on {dev} "
+              f"(pid {os.getpid()})", flush=True)
     return _SPLITS[k]
 
 
 def _device(tcfg):
     return torch.device("cuda" if tcfg["device"] == "auto" and torch.cuda.is_available() else
                         "cpu" if tcfg["device"] == "auto" else tcfg["device"])
+
+
+@torch.no_grad()
+def _feat_stats(split: FeatSplit, chunk: int = 65536) -> tuple[torch.Tensor, torch.Tensor]:
+    """Mean / unbiased std over the variant-0 option rows, in chunks (no full float copy of the matrix)."""
+    t = split.tables()
+    idx = torch.from_numpy(np.repeat(t["off"][:, 0], t["n"]) +
+                           np.arange(int(t["n"].sum())) - np.repeat(np.cumsum(t["n"]) - t["n"], t["n"]))
+    dev, M = split.feats.device, len(idx)
+    s = torch.zeros(split.d, dtype=torch.float64, device=dev)
+    for i in range(0, M, chunk):
+        s += split.feats[idx[i:i + chunk].to(dev)].double().sum(0)
+    mu = s / M
+    ss = torch.zeros_like(s)
+    for i in range(0, M, chunk):
+        ss += ((split.feats[idx[i:i + chunk].to(dev)].double() - mu) ** 2).sum(0)
+    sd = (ss / max(M - 1, 1)).sqrt()
+    return mu.float().cpu(), sd.float().clamp(min=1e-4).cpu()
 
 
 def term_weights(lcfg: dict, terms) -> dict:
@@ -355,15 +439,14 @@ def train_run(cfg: dict, wb=None, log=print):
     assert terms, "need at least one loss term"
     weights = term_weights(lcfg, terms)
     seed, device = int(cfg["seed"]), _device(tcfg)
-    split = get_split(cfg, dcfg["train_split"])
+    split = get_split(cfg, dcfg["train_split"], train_variants(cfg))
     val = get_split(cfg, dcfg["val_split"])
     every = int(tcfg.get("eval_every") or 0)
     best = {"key": math.inf, "loss": math.nan, "step": 0, "model": None, "readouts": None}
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     # standardisation stats / readout priors from the train variant-0 rows
-    rows = torch.cat([split.feats[r.rows[0]:r.rows[0] + r.n] for r in split.sets]).float()
-    mu, sd = rows.mean(0), rows.std(0).clamp(min=1e-4)
+    mu, sd = _feat_stats(split)
     avg_n = float(np.mean([r.n for r in split.sets]))
     fam_index = None
     if lcfg["per_family_bias"]:

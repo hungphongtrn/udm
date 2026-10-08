@@ -199,32 +199,62 @@ def _rewards(head, x: torch.Tensor, questions: list[dict], device, batch: int = 
     return out
 
 
-def score(feats_dir: str, head_specs: list[str], out_dir: str, suite_dir: str, edition: str, board: str | None):
-    from safetensors import safe_open
-    from decision_index.pipeline import score_run
-    from .dindex import summarize
+def _stamp(feats_dir: str, man: dict, head_path: str) -> dict:
+    """What a head's saved score depends on: the feature cache (shards, completeness) and the head file itself."""
+    return {"feats": os.path.abspath(feats_dir), "shards": sorted(man["shards"]), "complete": bool(man.get("complete")),
+            "head": os.path.abspath(head_path), "head_mtime_ns": os.stat(head_path).st_mtime_ns}
+
+
+def score(feats_dir: str, head_specs: list[str], out_dir: str, suite_dir: str, edition: str, board: str | None,
+          report: bool = True, rescore: bool = False) -> list[dict]:
+    """Score every head; returns one row per head. Resumable: a head whose <out>/<run>/row.json was made from the same
+    features and the same head file is not rescored (rescore=True forces it)."""
     from .feat_train import load_head
     man = json.load(open(os.path.join(feats_dir, "manifest.json")))
     if not man.get("complete"):
         print(f"[dindex-frozen] WARNING: {feats_dir} is incomplete; scores will have complete=false", flush=True)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    heads = {}
-    for p in _heads(head_specs):
+    paths = {os.path.basename(p)[:-len(".pt")]: p for p in _heads(head_specs)}
+    if not paths:
+        raise SystemExit("no heads to score")
+    done, heads, stamps = {}, {}, {}
+    for name, p in paths.items():
+        stamps[name] = _stamp(feats_dir, man, p)
+        rp = os.path.join(out_dir, name, "row.json")
+        if not rescore and os.path.exists(rp):
+            saved = json.load(open(rp))
+            if saved.get("stamp") == stamps[name]:
+                done[name] = saved["row"]
+                continue
         model, blob = load_head(p, device)
         if blob["feature_key"] not in man["keys"] or blob["d"] != man["hidden_size"]:
             raise SystemExit(f"{p}: needs {blob['feature_key']} d={blob['d']}, features have {man['keys']} "
                              f"d={man['hidden_size']}")
-        heads[os.path.basename(p)[:-len(".pt")]] = (model, blob)
-    if not heads:
-        raise SystemExit("no heads to score")
+        heads[name] = (model, blob)
+    print(f"[dindex-frozen] {len(done)}/{len(paths)} heads already scored, scoring {len(heads)}", flush=True)
     os.makedirs(out_dir, exist_ok=True)
+    t0 = time.time()
+    rows = dict(done)
+    if heads:
+        rows.update(_score_heads(heads, man, feats_dir, out_dir, suite_dir, edition, stamps, device))
+    rows = [rows[n] for n in paths]
+    if report:
+        _report(rows, out_dir, board, time.time() - t0)
+    return rows
+
+
+def _score_heads(heads: dict, man: dict, feats_dir: str, out_dir: str, suite_dir: str, edition: str, stamps: dict,
+                 device) -> dict:
+    from safetensors import safe_open
+    from decision_index.pipeline import score_run
+    from .dindex import summarize
     files = {}
     for name in heads:
         os.makedirs(os.path.join(out_dir, name), exist_ok=True)
         files[name] = open(os.path.join(out_dir, name, "results.jsonl"), "w")
     suite = _suite(suite_dir, edition)
     evals = {r["_evaluation"]["run_id"]: r for r in suite.rows(apply_exclusions=True)}
-    t0, head_sec = time.time(), {n: 0.0 for n in heads}
+    head_sec = {n: 0.0 for n in heads}
     keys_needed = sorted({b["feature_key"] for _, b in heads.values()})
     for shard in sorted(man["shards"]):
         idx = json.load(open(os.path.join(feats_dir, shard + ".json")))
@@ -254,18 +284,19 @@ def score(feats_dir: str, head_specs: list[str], out_dir: str, suite_dir: str, e
             files[name].write("".join(json.dumps(l, ensure_ascii=False) + "\n" for l in lines))
     for fh in files.values():
         fh.close()
-    rows = []
+    rows = {}
     for name, (_, blob) in heads.items():
         d = os.path.join(out_dir, name)
         s = score_run(suite, os.path.join(d, "results.jsonl"), f"scrm-frozen:{name}", d)
         m = summarize(s, len(evals), head_sec[name])
-        rows.append({"run": name, "arm": "+".join(blob["terms"]), "seed": blob["seed"], "lr": blob["lr"],
-                     "best_step": blob["best_step"], "index": m["index"], "raw_index": m["raw_index"],
-                     "answered_frac": m["answered_frac"], "complete": s["complete"],
-                     **{k: v for k, v in m.items() if k.startswith("area/")}})
+        rows[name] = {"run": name, "arm": "+".join(blob["terms"]), "seed": blob["seed"], "lr": blob["lr"],
+                      "best_step": blob["best_step"], "index": m["index"], "raw_index": m["raw_index"],
+                      "answered_frac": m["answered_frac"], "complete": s["complete"],
+                      **{k: v for k, v in m.items() if k.startswith("area/")}}
+        _atomic_json(os.path.join(d, "row.json"), {"stamp": stamps[name], "row": rows[name]})
         print(f"[dindex-frozen] {name}: index {m['index']:.2f} raw {m['raw_index']:.2f} "
               f"answered {m['answered_frac']:.3f}", flush=True)
-    _report(rows, out_dir, board, time.time() - t0)
+    return rows
 
 
 def _report(rows: list[dict], out_dir: str, board: str | None, seconds: float) -> None:
@@ -305,6 +336,7 @@ def main(argv=None):
     s.add_argument("--heads", required=True, nargs="+", help="selected.json and/or head .pt files")
     s.add_argument("--out", required=True)
     s.add_argument("--board", default=None, help="default: <di-dir>/tests/fixtures/board-0.2.1.json")
+    s.add_argument("--rescore", action="store_true", help="rescore heads that already have a matching row.json")
     for p in (f, s):
         p.add_argument("--di-dir", default=os.environ.get("DI_DIR", DEFAULT_DI_DIR))
         p.add_argument("--edition", default="0.2.1")
@@ -314,7 +346,7 @@ def main(argv=None):
         featurize(load_config(a.config, a.overrides), a.out, suite_dir, a.edition, a.shard_requests, a.limit)
     else:
         score(a.feats, a.heads, a.out, suite_dir, a.edition,
-              a.board or os.path.join(a.di_dir, "tests", "fixtures", "board-0.2.1.json"))
+              a.board or os.path.join(a.di_dir, "tests", "fixtures", "board-0.2.1.json"), rescore=a.rescore)
 
 
 if __name__ == "__main__":

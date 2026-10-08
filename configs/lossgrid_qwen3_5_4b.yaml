@@ -2,13 +2,14 @@
 # python -m scrm.lossgrid --config configs/lossgrid_qwen3_5_4b.yaml   (or scripts/train/lossgrid.sh <config>)
 cache_dir: outputs/features_qwen3_5_4b_pack     # scrm.feature_pack: HF train + first 8 vLLM validation shards
 output_dir: outputs/lossgrid/qwen3_5_4b_pack
-workers: 1                                        # parallel runs (spawn); each run holds its own cached features in RAM
+workers: 4                                        # parallel runs (spawn) on the one GPU; each holds train (variant 0)
+                                                  # + validation features on the GPU (data.feats_on_device)
 
 data:
   layer: 24                                       # feat_L24 (also 16, last -> "last")
   train_split: train
   val_split: validation
-                                                  # test: full Decision Index on live features (scrm.dindex_frozen)
+                                                  # test: full Decision Index on live features (dindex below)
   augment_variants: false                         # true: train on a random presentation variant per set
 
 model:
@@ -38,6 +39,11 @@ grid:                                             # every arm gets lr x weight c
   lr: [3.0e-4, 1.0e-3]
   weight: [1.0]                                   # global multiplier on all of an arm's term weights
   seeds: [0, 1, 2]
+
+dindex:                                           # test: every head on the full Decision Index 0.2.1 after training
+  enabled: true                                   # needs scripts/train/dindex_setup.sh once; lossgrid.sh featurizes first
+  feats_dir: outputs/dindex_feats_qwen3_5_4b      # backbone features of the suite (shared with dindex_frozen.sh)
+  heads: all                                      # all = every (arm, lr, seed) run; selected = val-selected config only
 
 selection:
   metric: loss/total                              # validation loss of the arm's own objective, mean over seeds
