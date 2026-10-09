@@ -169,6 +169,11 @@ def test_grid_enumerates_15_arms_and_summarises(cache, tmp_path):
     before = {f.name: f.stat().st_mtime_ns for f in p.iterdir()}
     grid_main(["--config", "configs/lossgrid_debug.yaml", f"cache_dir={cache}", f"output_dir={tmp_path}"])
     assert before == {f.name: f.stat().st_mtime_ns for f in p.iterdir()}
+    # a different per-run config (here the step budget) must not silently reuse those finished runs
+    with pytest.raises(SystemExit, match="train"):
+        grid_main(["--config", "configs/lossgrid_debug.yaml", f"cache_dir={cache}", f"output_dir={tmp_path}",
+                   "train.steps=7"])
+    assert before == {f.name: f.stat().st_mtime_ns for f in p.iterdir()}
 
 
 def test_best_validation_checkpoint_is_restored_and_saved(cache, tmp_path):

@@ -31,6 +31,7 @@ GRID_DEFAULTS = {
                         "all/brier_softmax", "all/nll_softmax", "all/sig_ece", "all/sig_brier",
                         "all/abst_sigmoid_drop", "all/abst_softmax_drop", "all/flip_rate", "all/mean_abs_dp"],
 }
+RESUME_FREE = {"output_dir", "workers", "grid", "selection", "summary_metrics", "wandb"}   # may change on resume
 
 
 def load_grid_config(path: str | None, overrides: list[str] | None = None) -> dict:
@@ -229,7 +230,15 @@ def main(argv=None):
     cfg = load_grid_config(a.config, a.overrides)
     workers = a.workers or cfg["workers"]
     os.makedirs(cfg["output_dir"], exist_ok=True)
-    with open(os.path.join(cfg["output_dir"], "config.json"), "w") as f:
+    cpath = os.path.join(cfg["output_dir"], "config.json")
+    if os.path.exists(cpath):               # run ids only encode (arm, lr, weight, seed): anything else must match
+        with open(cpath) as f:
+            old = json.load(f)
+        new = json.loads(json.dumps(cfg))
+        changed = sorted(k for k in set(old) | set(new) if k not in RESUME_FREE and old.get(k) != new.get(k))
+        if changed:
+            raise SystemExit(f"{cpath}: finished runs used a different {changed}; use a new output_dir")
+    with open(cpath, "w") as f:
         json.dump(cfg, f, indent=1)
     tasks = make_tasks(cfg)
     if not a.summarize_only:

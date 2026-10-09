@@ -141,20 +141,24 @@ resume/skip messages. Inspect `manifest.json` for `backend: vllm`, all three key
 
 ### Frozen loss study: pack, train heads, full Decision Index
 
-`scripts/train/frozen_pipeline.sh` chains three resumable stages (each also runnable alone):
+`scripts/train/frozen_pipeline.sh [grid overrides]` chains three resumable stages (each also runnable alone):
 
 1. `pack_features.sh` builds `outputs/features_qwen3_5_4b_pack` from symlinks: the complete HF train split of
    `outputs/features_qwen3_5_4b` plus the first `VAL_SHARDS` (8 x 512 sets, a source-balanced prefix) of the vLLM
    validation cache `outputs/features_qwen3_5_4b_vllm_eval`. Train (HF) and validation (vLLM) backends differ
    slightly; accepted, recorded under `packed` in the manifest and in every head.
-2. `lossgrid.sh configs/lossgrid_qwen3_5_4b.yaml` trains every loss subset x seed; validation loss every
+2. `lossgrid.sh configs/lossgrid_qwen3_5_4b.yaml [overrides]` trains every loss subset x seed; validation loss every
    `train.eval_every` steps, the lowest-validation-loss state is restored and saved as `heads/<run>.pt`. The arm's
    learning rate/weight is chosen by validation loss; `selected.json` lists each arm's heads (one per seed). No
-   test split is used.
+   test split is used. Run files are keyed only by (arm, lr, weight, seed), so resuming an `output_dir` whose
+   `config.json` differs in anything but `grid` / `selection` / `workers` / reporting stops with an error: use a new
+   `output_dir` (e.g. `output_dir=outputs/lossgrid/steps5000 train.steps=5000`). When the grid finishes, `lossgrid.sh`
+   runs stage 3 on its `selected.json` (`DINDEX=0` skips it).
 3. `dindex_frozen.sh` featurizes the Decision Index 0.2.1 suite once with the frozen backbone (resumable shards in
-   `outputs/dindex_feats_qwen3_5_4b_<backend>_<scope>`; each question rendered like training, every option graded;
-   too long / unsupported = wrong), then scores every selected head with the kit's scorer into
-   `outputs/dindex_frozen/qwen3_5_4b_pack_<scope>/<run>/scores.json` and `summary.md` (per arm mean ± sd over seeds,
+   `outputs/dindex_feats_qwen3_5_4b_<backend>_<scope>`, reused by every later grid; each question rendered like
+   training, every option graded; too long / unsupported = wrong), then scores every selected head with the kit's
+   scorer into `outputs/dindex_frozen/<grid>_<scope>/<run>/scores.json` (`<grid>` = basename of the grid's
+   `output_dir`), `runs.csv` (per head, per area) and `summary.md` (per arm mean ± sd over seeds,
    board rank). Scope: by default the fixed stratified `sample-1000.jsonl.gz` that `dindex_setup.sh` writes (the
    in-training eval's sample, scored with the kit's scorers restricted to it: an estimate, for ranking the arms);
    `SAMPLE=` (empty) runs the full suite (~150k requests, about a day on one 3090), worth it only for the final head.

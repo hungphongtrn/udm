@@ -7,7 +7,7 @@
 #      BACKEND (hf: each question's prompt encoded once, options branch off its cache - the train cache's backend;
 #      vllm: one request per option, ~10x+ more compute on DI's many-option questions), FEATS_CFG
 #      (configs/features_qwen3_5_4b.yaml), DI_FEATS (outputs/dindex_feats_qwen3_5_4b_<backend>_<sample|full>),
-#      OUT (outputs/dindex_frozen/qwen3_5_4b_pack_<sample|full>), SHARD_REQUESTS (128 with SAMPLE, else 1024: one
+#      OUT (outputs/dindex_frozen/<grid>_<scope>; <grid> = the loss-grid output_dir of the first head), SHARD_REQUESTS (128 with SAMPLE, else 1024: one
 #      progress line + resume point per shard), DI_DIR (../decision-index),
 #      FEATS_OVERRIDES (hf: "features.max_batch_size=32 features.cache_tokens=65536"; vllm: bench_vllm.sh winner).
 # Needs scripts/train/dindex_setup.sh first. Ctrl-C between shards is safe; rerun to resume.
@@ -31,5 +31,6 @@ PY="${FEATURES_PYTHON:-${UV_PROJECT_ENVIRONMENT:-$REPO_ROOT/.venv}/bin/python}"
 "$PY" -m scrm.dindex_frozen featurize --config "${FEATS_CFG:-configs/features_qwen3_5_4b.yaml}" --out "$DI_FEATS" \
     --shard-requests "${SHARD_REQUESTS:-$SHARD_DEFAULT}" ${SAMPLE_ARGS[@]+"${SAMPLE_ARGS[@]}"} "features.backend=$BACKEND" \
     ${FEATS_OVERRIDES:-}
+GRID="$(dirname "${HEADS[0]}")"; [[ "${HEADS[0]}" == *.pt ]] && GRID="$(dirname "$GRID")"   # .../<grid>/heads/x.pt
 "$PY" -m scrm.dindex_frozen score --feats "$DI_FEATS" --heads "${HEADS[@]}" \
-    --out "${OUT:-outputs/dindex_frozen/qwen3_5_4b_pack_$SCOPE}"
+    --out "${OUT:-outputs/dindex_frozen/$(basename "$GRID")_$SCOPE}"
