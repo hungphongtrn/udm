@@ -171,6 +171,8 @@ but only ~450-580 unique tokens/s, 1-2.3 h per 1024-request shard. HF batch knob
 `features.cache_tokens`, `features.max_tokens`) do not change features; pass them as `FEATS_OVERRIDES`.
 `scripts/train/bench_vllm.sh` times vLLM engine settings on the first `LIMIT` requests; those are not representative
 of the suite (its ETA was ~50x too low), so judge a backend by full shards.
+Results of the frozen study (pilot, 3000-step 3-seed grid, step budget, layer ablation):
+[`studies/frozen_lossgrid.md`](studies/frozen_lossgrid.md).
 
 ## Design choices
 

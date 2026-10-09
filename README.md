@@ -28,6 +28,7 @@ Machine 1 (many CPUs)                         Machine 2 (1 GPU, 24-40 GB)
 | [`docs/CONTRACT.md`](docs/CONTRACT.md) | The data ↔ trainer contract: row semantics and how each label kind becomes tiers |
 | [`docs/DATA_SPEC.md`](docs/DATA_SPEC.md) | Full data spec: schema, hash recipes, per-source mapping, metadata recovery for score/noul, drop reasons |
 | [`docs/TRAINING.md`](docs/TRAINING.md) | Model design, memory budget, configs, data mixing, metrics, checkpoints, inference |
+| [`docs/studies/`](docs/studies/README.md) | Results of every study so far: data build, LoRA runs, frozen features, loss grid, Decision Index |
 
 ---
 
