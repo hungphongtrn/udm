@@ -110,6 +110,9 @@ def featurize(cfg: dict, out_dir: str, suite_dir: str, edition: str, shard_reque
         man = {"format": FEATS_FORMAT, "identity": identity, "keys": [layer_key(l) for l in layers],
                "hidden_size": None, "shards": {}, "complete": False}
         _atomic_json(mpath, man)
+    print(f"[dindex-feats] backend={backend} out={out_dir} shard_requests={shard_requests} "
+          f"sample={identity.get('sample', {}).get('n', 'none (full suite)')} done_shards={len(man['shards'])}",
+          flush=True)
     model = renderer = prev = None
     rows = suite.rows(apply_exclusions=True)
     n_req, shard = 0, 0
