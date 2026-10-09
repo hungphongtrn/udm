@@ -153,10 +153,47 @@ def _set_jobs(renderer: Renderer, row: dict, variants: int, seed: int):
 
 
 @torch.no_grad()
-def extract_rows(model, renderer: Renderer, rows: list[dict], fcfg: dict, split: str, device) -> tuple[dict, list, int]:
-    """Featurize rows -> ({layer: [M, d] bf16 tensors}, parquet records, number of dropped rows)."""
+def embed_items_hf(model, items, fcfg: dict, device, pad_id: int) -> dict[int, torch.Tensor]:
+    """HF backend: {layer: [graded options of all items, d] bf16 CPU}, item order then suffix order (as the vLLM
+    extractor's `embed_items`). Each set's shared prompt is encoded once and its options continue from copies of that
+    prompt's cache (`embed_prefix_cached`), so cost ~ unique tokens, not prompt x options."""
     from .collator import collate
     from .packing import pack_bfd
+    layers = [int(l) for l in fcfg["layers"]]
+    start, n = [], 0
+    for it in items:
+        start.append(n)
+        n += len(it.suffixes)
+    out = {l: torch.empty(n, model.d_hidden, dtype=torch.bfloat16) for l in layers}
+    buckets = {}
+    for i, it in enumerate(items):
+        buckets.setdefault(len(it.prefix), []).append(i)
+    amp = device.type == "cuda"
+    for P, idx in buckets.items():
+        for sel in pack_bfd([P + sum(len(s) for s in items[i].suffixes) for i in idx],
+                            int(fcfg["max_tokens"]), int(fcfg["max_batch_size"])):
+            batch = [idx[j] for j in sel]
+            b = collate([items[i] for i in batch], pad_id=pad_id)
+            # Scheduling metadata stays on CPU: embed_prefix_cached reads it as Python lists.
+            # Moving it to CUDA only to call .tolist() forces an avoidable GPU synchronization.
+            for key in ("input_ids", "position_ids"):
+                b["pack"][key] = b["pack"][key].to(device, non_blocking=True)
+            with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
+                e = model.embed_prefix_cached(b["pack"], layers=layers, cache_tokens=int(fcfg["cache_tokens"]),
+                                              prefill_tokens=int(fcfg["max_tokens"]),
+                                              max_batch_size=int(fcfg["max_batch_size"]))
+            s = 0
+            for i in batch:
+                k = len(items[i].suffixes)
+                for l in layers:
+                    out[l][start[i]:start[i] + k] = e[l][s:s + k].to(torch.bfloat16).cpu()
+                s += k
+    return out
+
+
+@torch.no_grad()
+def extract_rows(model, renderer: Renderer, rows: list[dict], fcfg: dict, split: str, device) -> tuple[dict, list, int]:
+    """Featurize rows -> ({layer: [M, d] bf16 tensors}, parquet records, number of dropped rows)."""
     layers, K = [int(l) for l in fcfg["layers"]], int(fcfg["variants"])
     jobs, dropped = [], 0
     for row in rows:
@@ -179,49 +216,22 @@ def extract_rows(model, renderer: Renderer, rows: list[dict], fcfg: dict, split:
                             "family": meta["family"], "source_id": meta["source_id"], "split": split,
                             "truncated": bool(meta["truncated"])})
             off += meta["n_options"]
+    items = [it for _, its, _ in jobs for it in its]
+    if not items:
+        return feats, records, dropped
     if fcfg.get("backend", "hf") == "vllm":
         # The engine schedules variable lengths; requests remain independent causal sequences.
-        items = [it for _, its, _ in jobs for it in its]
         e = model.embed_items(items)
-        s = 0
-        for it in items:
-            o, perm = where[id(it)]
-            n = len(perm)
-            dest = o + torch.as_tensor(perm)
-            for l in layers:
-                feats[l][dest] = e[l][s:s + n]
-            s += n
-        return feats, records, dropped
-    buckets = {}
-    for _, its, _ in jobs:
-        for it in its:
-            buckets.setdefault(len(it.prefix), []).append(it)
-    amp = device.type == "cuda"
-    batches = (
-        [items[i] for i in indices]
-        for P, items in buckets.items()
-        for indices in pack_bfd([P + sum(len(s) for s in it.suffixes) for it in items],
-                                int(fcfg["max_tokens"]), int(fcfg["max_batch_size"]))
-    )
-    for batch_items in batches:
-        b = collate(batch_items, pad_id=renderer.pad_id)
-        # Scheduling metadata stays on CPU: embed_prefix_cached reads it as Python lists.
-        # Moving it to CUDA only to call .tolist() forces an avoidable GPU synchronization.
-        for key in ("input_ids", "position_ids"):
-            b["pack"][key] = b["pack"][key].to(device, non_blocking=True)
-        with torch.autocast(device.type, dtype=torch.bfloat16, enabled=amp):
-            e = model.embed_prefix_cached(b["pack"], layers=layers, cache_tokens=int(fcfg["cache_tokens"]),
-                                          prefill_tokens=int(fcfg["max_tokens"]),
-                                          max_batch_size=int(fcfg["max_batch_size"]))
-        e = {l: x.to(torch.bfloat16).cpu() for l, x in e.items()}
-        s = 0
-        for it in batch_items:
-            o, perm = where[id(it)]
-            n = len(perm)
-            dest = o + torch.as_tensor(perm)       # slot p was presented at position p = canonical option perm[p]
-            for l in layers:
-                feats[l][dest] = e[l][s:s + n]
-            s += n
+    else:
+        e = embed_items_hf(model, items, fcfg, device, renderer.pad_id)
+    s = 0
+    for it in items:
+        o, perm = where[id(it)]
+        n = len(perm)
+        dest = o + torch.as_tensor(perm)           # slot p was presented at position p = canonical option perm[p]
+        for l in layers:
+            feats[l][dest] = e[l][s:s + n]
+        s += n
     return feats, records, dropped
 
 

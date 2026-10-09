@@ -68,15 +68,16 @@ def render_request(renderer, row: dict):
 
 def featurize(cfg: dict, out_dir: str, suite_dir: str, edition: str, shard_requests: int, limit: int | None = None):
     from safetensors.torch import save_file
-    from .features import build_feature_extractor, layer_key
+    from .features import build_feature_extractor, embed_items_hf, layer_key
     from .render import Renderer
     fcfg = cfg["features"]
-    if fcfg.get("backend", "hf") != "vllm":
-        raise SystemExit("dindex_frozen featurize supports features.backend=vllm only")
+    # hf: each question's prompt is encoded once and its options branch off it (cost ~ unique tokens). vllm: one
+    # request per option; its block-aligned prefix cache recomputes most of the shared prompt per option.
+    backend = fcfg.get("backend", "hf")
     layers = [int(l) for l in fcfg["layers"]]
     suite = _suite(suite_dir, edition)
     render_cfg = _render_cfg(cfg)
-    identity = {"model": cfg["model"]["name_or_path"], "backend": "vllm", "layers": layers,
+    identity = {"model": cfg["model"]["name_or_path"], "backend": backend, "layers": layers,
                 "render": render_cfg, "edition": edition, "rows_sha256": suite.edition.get("rows_sha256"),
                 "added_sha256": suite.edition.get("added_sha256"), "shard_requests": int(shard_requests),
                 "limit": limit}           # a --limit run is a separate (timing) cache: its last shard is short
@@ -111,7 +112,8 @@ def featurize(cfg: dict, out_dir: str, suite_dir: str, edition: str, shard_reque
         if name in man["shards"]:
             continue
         if model is None:
-            model, tok = build_feature_extractor(cfg, torch.device("cuda"))
+            dev = torch.device("cuda")
+            model, tok = build_feature_extractor(cfg, dev)
             renderer = Renderer(tok, render_cfg)
             man["hidden_size"] = int(model.d_hidden)
         t0 = time.time()
@@ -129,7 +131,8 @@ def featurize(cfg: dict, out_dir: str, suite_dir: str, edition: str, shard_reque
         t_render = time.time() - t0
         feats = {l: torch.empty(off, man["hidden_size"], dtype=torch.bfloat16) for l in layers}
         if items:
-            e = model.embed_items(items)
+            e = (model.embed_items(items) if backend == "vllm"
+                 else embed_items_hf(model, items, fcfg, dev, renderer.pad_id))
             s = 0
             for q, it in zip(questions, items):
                 dest = q["offset"] + torch.as_tensor(it.order)      # suffix j is option order[j] (key order)
@@ -146,7 +149,7 @@ def featurize(cfg: dict, out_dir: str, suite_dir: str, edition: str, shard_reque
         uniq = sum(len(it.prefix) + sum(len(x) for x in it.suffixes) for it in items)   # perfect prefix reuse
         man["shards"][name] = {"n_requests": len(chunk), "n_rows": off, "n_unsupported": len(unsupported),
                                "seconds": sec, "render_seconds": t_render, "tokens": n_tok, "unique_tokens": uniq}
-        cache = model.prefix_cache_stats()
+        cache = model.prefix_cache_stats() if backend == "vllm" else None
         hit = ""
         if cache:
             q = cache.get("prefix_cache_queries", 0) - (prev or {}).get("prefix_cache_queries", 0)

@@ -151,18 +151,20 @@ resume/skip messages. Inspect `manifest.json` for `backend: vllm`, all three key
    `train.eval_every` steps, the lowest-validation-loss state is restored and saved as `heads/<run>.pt`. The arm's
    learning rate/weight is chosen by validation loss; `selected.json` lists each arm's heads (one per seed). No
    test split is used.
-3. `dindex_frozen.sh` featurizes the **full** Decision Index 0.2.1 suite once with the frozen vLLM backbone
-   (`outputs/dindex_feats_qwen3_5_4b`, resumable shards; each question rendered like training, every option graded;
-   too long / unsupported = wrong), then scores every selected head with the kit's scorer into
+3. `dindex_frozen.sh` featurizes the **full** Decision Index 0.2.1 suite once with the frozen backbone
+   (`outputs/dindex_feats_qwen3_5_4b_<backend>`, resumable shards; each question rendered like training, every option
+   graded; too long / unsupported = wrong), then scores every selected head with the kit's scorer into
    `outputs/dindex_frozen/qwen3_5_4b_pack/<run>/scores.json` and `summary.md` (per arm mean ± sd over seeds, board
    rank). Needs `dindex_setup.sh`.
 
-Before stage 3, `scripts/train/bench_vllm.sh` times the same featurize workload on the first `LIMIT` suite requests
-for several engine settings (fresh process and throwaway cache each, `outputs/vllm_bench`) and prints steady-state
-requests/s, unique/submitted tokens/s, prefix-cache hit rate vs the ideal and the full-suite ETA. Pass the winner's
-overrides as `FEATS_OVERRIDES="..."` to `dindex_frozen.sh` / `frozen_pipeline.sh` (they do not change features). The
-default sweep is sized for one 24 GB RTX 3090 (`max_num_seqs` 32-128, 16k-token budget, eager vs CUDA graphs, prefix
-cache on/off); an out-of-memory setting is reported as `failed`. Run it alone on the GPU.
+Stage 3 defaults to `BACKEND=hf`, the train cache's backend: each question's prompt is encoded once and every option
+continues from a copy of its cache (`embed_prefix_cached`), so cost follows unique tokens. Most suite questions have a
+~900-token prompt and 77-151 options; `BACKEND=vllm` sends one request per option and Qwen3.5's block-aligned
+(`mamba_cache_mode=align`) prefix cache recomputes most of the prompt each time: measured on a 3090, ~20-28k submitted
+but only ~450-580 unique tokens/s, 1-2.3 h per 1024-request shard. HF batch knobs (`features.max_batch_size`,
+`features.cache_tokens`, `features.max_tokens`) do not change features; pass them as `FEATS_OVERRIDES`.
+`scripts/train/bench_vllm.sh` times vLLM engine settings on the first `LIMIT` requests; those are not representative
+of the suite (its ETA was ~50x too low), so judge a backend by full shards.
 
 ## Design choices
 
