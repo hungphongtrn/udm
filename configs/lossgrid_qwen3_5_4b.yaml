@@ -2,7 +2,7 @@
 # python -m scrm.lossgrid --config configs/lossgrid_qwen3_5_4b.yaml   (or scripts/train/lossgrid.sh <config>)
 cache_dir: outputs/features_qwen3_5_4b_pack     # scrm.feature_pack: HF train + first 8 vLLM validation shards
 output_dir: outputs/lossgrid/qwen3_5_4b_pack
-workers: 1                                        # parallel runs (spawn); each run holds its own cached features in RAM
+workers: 1                                        # parallel runs (spawn); features are memory-mapped, so workers share the page cache
 
 data:
   layer: 24                                       # feat_L24 (also 16, last -> "last")

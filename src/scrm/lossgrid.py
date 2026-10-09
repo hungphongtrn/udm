@@ -79,7 +79,10 @@ def _done(task: dict) -> bool:
 def run_task(task: dict) -> str:
     if _done(task):
         return task["path"]
-    res = run_experiment(task["cfg"], task["evals"], log=lambda *_: None, head_path=task["head_path"])
+    rid = os.path.basename(task["path"])[:-len(".json")]
+    print(f"[{rid}] start", flush=True)
+    res = run_experiment(task["cfg"], task["evals"], log=lambda *a: print(f"[{rid}]", *a, flush=True),
+                         head_path=task["head_path"])
     res.update(arm=task["arm"], weight=task["weight"])
     os.makedirs(os.path.dirname(task["path"]), exist_ok=True)
     tmp = task["path"] + ".tmp"
@@ -89,11 +92,17 @@ def run_task(task: dict) -> str:
     return task["path"]
 
 
+def _init_worker(threads: int):
+    import torch
+    torch.set_num_threads(threads)          # N workers x all-core intra-op pools would oversubscribe the CPU
+
+
 def run_tasks(tasks: list[dict], workers: int = 1):
     todo = [t for t in tasks if not _done(t)]
     print(f"[lossgrid] {len(tasks) - len(todo)}/{len(tasks)} runs already done, running {len(todo)}", flush=True)
     if workers > 1 and len(todo) > 1:
-        with mp.get_context("spawn").Pool(workers) as pool:
+        threads = max(1, (os.cpu_count() or 1) // workers)
+        with mp.get_context("spawn").Pool(workers, initializer=_init_worker, initargs=(threads,)) as pool:
             for i, p in enumerate(pool.imap_unordered(run_task, todo), 1):
                 print(f"[lossgrid] ({i}/{len(todo)}) {os.path.basename(p)}", flush=True)
     else:

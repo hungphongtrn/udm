@@ -46,7 +46,9 @@ def write_cache(root, sizes=None, d=D, seed=0, strength=2.0, variants=3, shard=4
             off = np.cumsum([0] + [r["n_options"] for r in m])[:-1]
             x = np.concatenate(feats[k:k + shard])
             tag = os.path.join(root, split, f"shard_{k // shard:05d}")
-            save_file({"feat_L16": torch.tensor(x, dtype=torch.bfloat16)}, tag + ".safetensors")
+            # a second layer in the same file: one of the two tensors starts at a non-zero data offset
+            save_file({"feat_L16": torch.tensor(x, dtype=torch.bfloat16),
+                       "feat_L24": torch.tensor(-x, dtype=torch.bfloat16)}, tag + ".safetensors")
             pd.DataFrame([{**r, "row_offset": int(o)} for r, o in zip(m, off)]).to_parquet(tag + ".parquet")
             state["shards"].append({"name": f"shard_{k // shard:05d}", "n_records": len(m)})
     with open(os.path.join(root, "manifest.json"), "w") as f:
@@ -66,12 +68,31 @@ def _cfg(cache, **kw):
 
 def test_load_split(cache):
     sp = load_split(cache, "validation", 16)
-    assert len(sp) == 30 and sp.d == D and sp.feats.dtype == torch.bfloat16
+    assert len(sp) == 30 and sp.d == D
     r = sp.sets[0]
     assert sorted(r.rows) == [0, 1, 2] and len(r.tiers) == r.n
     assert sp.sets[0].probs is not None and sp.sets[1].probs is None
     with pytest.raises(KeyError):
         load_split(cache, "validation", 99)
+
+
+@pytest.mark.parametrize("layer,sign", [(16, 1.0), (24, -1.0)])
+def test_load_split_rows_match_written_features(cache, layer, sign):
+    """Memory-mapped rows of every (set, variant) block, across shard boundaries, equal the written bf16 tensor."""
+    from safetensors.torch import load_file
+    root = os.path.join(cache, "validation")
+    names = sorted(n for n in os.listdir(root) if n.endswith(".safetensors"))
+    full = torch.cat([load_file(os.path.join(root, n))[f"feat_L{layer}"] for n in names])
+    ref = torch.cat([load_file(os.path.join(root, n))["feat_L16"] for n in names])
+    assert torch.equal(full, (sign * ref.float()).to(torch.bfloat16))
+    sp = load_split(cache, "validation", layer)
+    for r in sp.sets:
+        for off in r.rows.values():
+            got = sp.rows(off, r.n)
+            assert got.dtype == torch.bfloat16 and torch.equal(got, full[off:off + r.n])
+    mu, sd = sp.norm_stats()
+    x = torch.cat([full[r.rows[0]:r.rows[0] + r.n] for r in sp.sets]).double()
+    assert torch.allclose(mu.double(), x.mean(0), atol=1e-5) and torch.allclose(sd.double(), x.std(0), atol=1e-4)
 
 
 def test_incomplete_cache_cannot_train(tmp_path):

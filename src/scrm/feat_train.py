@@ -77,18 +77,62 @@ class SetRec:
     family: str
 
 
+_ST_DTYPES = {"BF16": (np.uint16, torch.bfloat16), "F16": (np.float16, None), "F32": (np.float32, None)}
+
+
+def _st_memmap(path: str, key: str):
+    """Read-only memmap of one safetensors tensor: no read up front, pages shared by every process via the page cache."""
+    with open(path, "rb") as f:
+        n = int.from_bytes(f.read(8), "little")
+        hdr = json.loads(f.read(n))
+    if key not in hdr:
+        raise KeyError(f"{key} not in {path} (have {[k for k in hdr if k.startswith('feat_')]})")
+    info = hdr[key]
+    np_dt, view = _ST_DTYPES[info["dtype"]]
+    shape = tuple(info["shape"])
+    if shape[0] == 0:                     # np.memmap cannot map zero bytes
+        return np.zeros(shape, np_dt), view
+    return np.memmap(path, dtype=np_dt, mode="r", offset=8 + n + info["data_offsets"][0], shape=shape), view
+
+
 @dataclass
 class FeatSplit:
-    feats: torch.Tensor           # [M,d] bf16
+    shards: list                  # per shard: read-only memmap [m_i, d]
+    starts: np.ndarray            # global row offset of each shard
+    view: torch.dtype | None      # torch dtype to reinterpret the memmap as (bf16 is stored as uint16)
     sets: list = field(default_factory=list)
     d: int = 0
+    _stats: tuple | None = None
 
     def __len__(self):
         return len(self.sets)
 
+    def rows(self, off: int, n: int) -> torch.Tensor:
+        """Feature rows [off, off+n) (global offsets; one (set, variant) block never spans two shards)."""
+        i = int(np.searchsorted(self.starts, off, side="right")) - 1
+        a = off - int(self.starts[i])
+        t = torch.from_numpy(np.array(self.shards[i][a:a + n]))
+        return t.view(self.view) if self.view is not None else t
+
+    def norm_stats(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Per-dim mean / unbiased std over the variant-0 rows of every set (float64 accumulation), cached."""
+        if self._stats is None:
+            s = torch.zeros(self.d, dtype=torch.float64)
+            sq = torch.zeros(self.d, dtype=torch.float64)
+            m = 0
+            for r in self.sets:
+                x = self.rows(r.rows[0], r.n).double()
+                s += x.sum(0)
+                sq += (x * x).sum(0)
+                m += r.n
+            mu = s / m
+            var = ((sq - m * mu * mu) / max(m - 1, 1)).clamp(min=0)
+            self._stats = (mu.float(), var.sqrt().float().clamp(min=1e-4))
+        return self._stats
+
 
 def load_split(cache_dir: str, split: str, layer, max_options: int | None = None, drop_truncated: bool = False) -> FeatSplit:
-    from safetensors import safe_open
+    t0 = time.time()
     key = f"feat_L{layer}"
     with open(os.path.join(cache_dir, "manifest.json")) as f:
         manifest = json.load(f)
@@ -101,18 +145,17 @@ def load_split(cache_dir: str, split: str, layer, max_options: int | None = None
           if rec.get("files", rec.get("n_records", 0) > 0)]
     if not pq:
         raise FileNotFoundError(f"no shards under {os.path.join(cache_dir, split)}")
-    chunks, base, rows, meta = [], 0, {}, {}
+    shards, starts, base, rows, meta, view = [], [], 0, {}, {}, None
     for p in pq:
         df = pd.read_parquet(p)
-        with safe_open(p[:-len(".parquet")] + ".safetensors", "pt") as f:
-            if key not in f.keys():
-                raise KeyError(f"{key} not in {p} (have {[k for k in f.keys() if k.startswith('feat_')]})")
-            chunks.append(f.get_tensor(key))
+        mm, view = _st_memmap(p[:-len(".parquet")] + ".safetensors", key)
+        shards.append(mm)
+        starts.append(base)
         for r in df.itertuples(index=False):
             rows.setdefault(r.decision_set_id, {})[int(r.variant)] = base + int(r.row_offset)
             if int(r.variant) == 0:
                 meta[r.decision_set_id] = r
-        base += chunks[-1].shape[0]
+        base += mm.shape[0]
     sets = []
     for sid, r in meta.items():
         n = int(r.n_options)
@@ -122,8 +165,10 @@ def load_split(cache_dir: str, split: str, layer, max_options: int | None = None
         sets.append(SetRec(sid, n, rows[sid], np.array(json.loads(r.tiers_json), np.int64),
                            None if np.isnan(probs).all() else np.nan_to_num(probs), _floats(r.abs_label_json, n),
                            str(r.source_id), str(r.label_kind), str(r.family)))
-    feats = torch.cat(chunks) if len(chunks) > 1 else chunks[0]
-    return FeatSplit(feats, sets, feats.shape[1])
+    d = shards[0].shape[1]
+    print(f"[feat] {split} {key}: {len(sets)} sets, {base} rows x {d} ({base * d * shards[0].itemsize / 2**30:.1f} GB "
+          f"memory-mapped) from {len(pq)} shards in {time.time() - t0:.1f}s", flush=True)
+    return FeatSplit(shards, np.asarray(starts, np.int64), view, sets, d)
 
 
 def make_batch(split: FeatSplit, idxs, variants=0, fam_index: dict | None = None, drop_best: bool = False) -> dict:
@@ -141,7 +186,7 @@ def make_batch(split: FeatSplit, idxs, variants=0, fam_index: dict | None = None
     for b, r in enumerate(recs):
         v = variants if isinstance(variants, int) else variants[b]
         off = r.rows.get(v, r.rows[0])
-        x[b, :r.n] = split.feats[off:off + r.n].float()
+        x[b, :r.n] = split.rows(off, r.n).float()
         tiers[b, :r.n] = torch.from_numpy(r.tiers)
         if r.probs is not None:
             probs[b, :r.n] = torch.from_numpy(r.probs)
@@ -362,8 +407,7 @@ def train_run(cfg: dict, wb=None, log=print):
     torch.manual_seed(seed)
     rng = np.random.default_rng(seed)
     # standardisation stats / readout priors from the train variant-0 rows
-    rows = torch.cat([split.feats[r.rows[0]:r.rows[0] + r.n] for r in split.sets]).float()
-    mu, sd = rows.mean(0), rows.std(0).clamp(min=1e-4)
+    mu, sd = split.norm_stats()
     avg_n = float(np.mean([r.n for r in split.sets]))
     fam_index = None
     if lcfg["per_family_bias"]:
@@ -411,6 +455,7 @@ def train_run(cfg: dict, wb=None, log=print):
         if (every and (step + 1) % every == 0) or step + 1 == steps:
             vl = val_loss(model, readouts, val, terms, weights, lcfg, tcfg, device, fam_index)
             wb.log({"val/loss": vl}, step + 1)
+            log(f"step {step + 1}/{steps} val loss {vl:.4f}")
             key = vl if math.isfinite(vl) else math.inf          # NaN/inf never beat a finite loss
             if best["model"] is None or key < best["key"]:
                 best.update(key=key, loss=vl, step=step + 1, model=_snapshot(model), readouts=_snapshot(readouts))
