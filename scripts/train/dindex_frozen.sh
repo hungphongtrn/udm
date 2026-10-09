@@ -15,6 +15,11 @@ set -euo pipefail
 . "$(dirname "${BASH_SOURCE[0]}")/_env.sh"
 cd "$REPO_ROOT"
 HEADS=("$@"); [ ${#HEADS[@]} -gt 0 ] || HEADS=(outputs/lossgrid/qwen3_5_4b_pack/selected.json)
+for h in "${HEADS[@]}"; do
+    [ -e "$h" ] || { echo "[dindex_frozen] missing $h: run scripts/train/lossgrid.sh configs/lossgrid_qwen3_5_4b.yaml" \
+        "first (selected.json is written when it finishes; from finished runs only: .venv/bin/python -m scrm.lossgrid" \
+        "--config configs/lossgrid_qwen3_5_4b.yaml --summarize-only)" >&2; exit 1; }
+done
 BACKEND="${BACKEND:-hf}"
 export DI_DIR="${DI_DIR:-$REPO_ROOT/../decision-index}"
 SAMPLE="${SAMPLE-$DI_DIR/sample-1000.jsonl.gz}"
