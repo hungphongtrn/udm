@@ -151,11 +151,13 @@ resume/skip messages. Inspect `manifest.json` for `backend: vllm`, all three key
    `train.eval_every` steps, the lowest-validation-loss state is restored and saved as `heads/<run>.pt`. The arm's
    learning rate/weight is chosen by validation loss; `selected.json` lists each arm's heads (one per seed). No
    test split is used.
-3. `dindex_frozen.sh` featurizes the **full** Decision Index 0.2.1 suite once with the frozen backbone
-   (`outputs/dindex_feats_qwen3_5_4b_<backend>`, resumable shards; each question rendered like training, every option
-   graded; too long / unsupported = wrong), then scores every selected head with the kit's scorer into
-   `outputs/dindex_frozen/qwen3_5_4b_pack/<run>/scores.json` and `summary.md` (per arm mean ± sd over seeds, board
-   rank). Needs `dindex_setup.sh`.
+3. `dindex_frozen.sh` featurizes the Decision Index 0.2.1 suite once with the frozen backbone (resumable shards in
+   `outputs/dindex_feats_qwen3_5_4b_<backend>_<scope>`; each question rendered like training, every option graded;
+   too long / unsupported = wrong), then scores every selected head with the kit's scorer into
+   `outputs/dindex_frozen/qwen3_5_4b_pack_<scope>/<run>/scores.json` and `summary.md` (per arm mean ± sd over seeds,
+   board rank). Scope: by default the fixed stratified `sample-1000.jsonl.gz` that `dindex_setup.sh` writes (the
+   in-training eval's sample, scored with the kit's scorers restricted to it: an estimate, for ranking the arms);
+   `SAMPLE=` (empty) runs the full suite (~150k requests, about a day on one 3090), worth it only for the final head.
 
 Stage 3 defaults to `BACKEND=hf`, the train cache's backend: each question's prompt is encoded once and every option
 continues from a copy of its cache (`embed_prefix_cached`), so cost follows unique tokens. Most suite questions have a

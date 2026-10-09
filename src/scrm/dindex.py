@@ -130,6 +130,17 @@ class SCRMEngine(_Engine):
                 "gpu": torch.cuda.get_device_name(self.device) if self.device.type == "cuda" else None}
 
 
+def sample_suite(base, ids: set):
+    """`base` (a kit Suite) restricted to the requests `ids`: the kit's edition scorers then score exactly those."""
+    from decision_index.suite.io import Suite
+
+    class SampleSuite(Suite):
+        def rows(self, apply_exclusions=False):
+            return (r for r in super().rows(apply_exclusions) if r["_evaluation"]["run_id"] in ids)
+
+    return SampleSuite(base.directory, base.edition["id"])
+
+
 class DecisionIndexEval:
     """Fixed stratified sample of the suite, scored with the kit's edition scorers on exactly the sampled rows.
     cfg: {suite_dir, rows (sample .jsonl.gz from `decision_index suite sample`), edition, max_len, max_tokens}."""
@@ -140,12 +151,7 @@ class DecisionIndexEval:
         self.rows = list(read_jsonl(cfg["rows"]))
         ids = {r["_evaluation"]["run_id"] for r in self.rows}
         base = Suite(cfg["suite_dir"], cfg.get("edition") or "0.2.1")
-
-        class SampleSuite(Suite):      # the edition's suite restricted to the sampled requests
-            def rows(self, apply_exclusions=False):
-                return (r for r in super().rows(apply_exclusions) if r["_evaluation"]["run_id"] in ids)
-
-        self.suite = SampleSuite(base.directory, base.edition["id"])
+        self.suite = sample_suite(base, ids)
         excluded = base.excluded()
         self.rows = [r for r in self.rows if r["_evaluation"]["run_id"] not in excluded
                      and base.in_edition(r["_evaluation"])]

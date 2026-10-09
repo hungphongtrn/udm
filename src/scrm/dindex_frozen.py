@@ -1,7 +1,7 @@
-"""Full Decision Index (edition 0.2.1) for frozen-backbone heads (scrm.lossgrid): the backbone runs ONCE over the whole
-suite, every head is then scored on those features.
+"""Decision Index (edition 0.2.1) for frozen-backbone heads (scrm.lossgrid): the backbone runs ONCE over the suite (or
+a fixed stratified `--sample` of it), every head is then scored on those features.
 
-    python -m scrm.dindex_frozen featurize --config configs/features_qwen3_5_4b.yaml --out DIR [overrides ...]
+    python -m scrm.dindex_frozen featurize --config configs/features_qwen3_5_4b.yaml --out DIR [--sample S] [overrides]
     python -m scrm.dindex_frozen score --feats DIR --heads <lossgrid output_dir>/selected.json --out OUT
 
 featurize: each typed question becomes one decision set rendered exactly like the training data and like
@@ -9,7 +9,9 @@ scrm.dindex (question_example: `choice` = the option descriptions, `noul` = "no"
 truncated). A request with a question longer than data.render.max_len, or of an unsupported type, is recorded as
 `unsupported` (counted as wrong by the index). Features of every option, in option-key order, go into resumable shards
 of `--shard-requests` requests: shard_XXXXX.safetensors (`feat_L{layer}`, [rows, d] bf16) + shard_XXXXX.json (index).
-The backend (vLLM by default, as in the features config) and its scheduling knobs come from the features config.
+The backend (HF prefix-cached or vLLM) and its batching knobs come from the features config. `--sample` (a
+`decision_index suite sample` file) restricts the suite to those requests; `score` reads it from the features manifest
+and scores with the kit's scorers restricted to them (scrm.dindex.sample_suite), as the in-training eval does.
 
 score: per head, rewards over each question's options -> softmax -> the kit's answer format (scrm.dindex._answer),
 written as a kit results.jsonl and scored with the kit's own edition scorers (decision_index.pipeline.score_run) into
@@ -37,9 +39,21 @@ def _atomic_json(path: str, obj) -> None:
     os.replace(tmp, path)
 
 
-def _suite(suite_dir: str, edition: str):
-    from decision_index.suite.io import Suite
-    return Suite(suite_dir, edition)
+def _suite(suite_dir: str, edition: str, sample: str | None = None):
+    from decision_index.suite.io import Suite, read_jsonl
+    suite = Suite(suite_dir, edition)
+    if sample:
+        from .dindex import sample_suite
+        suite = sample_suite(suite, {r["_evaluation"]["run_id"] for r in read_jsonl(sample)})
+    return suite
+
+
+def _sample_id(sample: str) -> dict:
+    import hashlib
+    from decision_index.suite.io import read_jsonl
+    ids = sorted(r["_evaluation"]["run_id"] for r in read_jsonl(sample))
+    return {"path": os.path.abspath(sample), "n": len(ids),
+            "sha256": hashlib.sha256("\n".join(ids).encode()).hexdigest()[:16]}
 
 
 # ----------------------------------------------------------------------------- featurize
@@ -66,7 +80,8 @@ def render_request(renderer, row: dict):
     return out, None
 
 
-def featurize(cfg: dict, out_dir: str, suite_dir: str, edition: str, shard_requests: int, limit: int | None = None):
+def featurize(cfg: dict, out_dir: str, suite_dir: str, edition: str, shard_requests: int, limit: int | None = None,
+              sample: str | None = None):
     from safetensors.torch import save_file
     from .features import build_feature_extractor, embed_items_hf, layer_key
     from .render import Renderer
@@ -75,12 +90,14 @@ def featurize(cfg: dict, out_dir: str, suite_dir: str, edition: str, shard_reque
     # request per option; its block-aligned prefix cache recomputes most of the shared prompt per option.
     backend = fcfg.get("backend", "hf")
     layers = [int(l) for l in fcfg["layers"]]
-    suite = _suite(suite_dir, edition)
+    suite = _suite(suite_dir, edition, sample)
     render_cfg = _render_cfg(cfg)
     identity = {"model": cfg["model"]["name_or_path"], "backend": backend, "layers": layers,
                 "render": render_cfg, "edition": edition, "rows_sha256": suite.edition.get("rows_sha256"),
                 "added_sha256": suite.edition.get("added_sha256"), "shard_requests": int(shard_requests),
                 "limit": limit}           # a --limit run is a separate (timing) cache: its last shard is short
+    if sample:
+        identity["sample"] = _sample_id(sample)
     os.makedirs(out_dir, exist_ok=True)
     mpath = os.path.join(out_dir, "manifest.json")
     if os.path.exists(mpath):
@@ -225,7 +242,8 @@ def score(feats_dir: str, head_specs: list[str], out_dir: str, suite_dir: str, e
     for name in heads:
         os.makedirs(os.path.join(out_dir, name), exist_ok=True)
         files[name] = open(os.path.join(out_dir, name, "results.jsonl"), "w")
-    suite = _suite(suite_dir, edition)
+    sample = (man.get("identity") or {}).get("sample")
+    suite = _suite(suite_dir, edition, sample and sample["path"])
     evals = {r["_evaluation"]["run_id"]: r for r in suite.rows(apply_exclusions=True)}
     t0, head_sec = time.time(), {n: 0.0 for n in heads}
     keys_needed = sorted({b["feature_key"] for _, b in heads.values()})
@@ -268,10 +286,11 @@ def score(feats_dir: str, head_specs: list[str], out_dir: str, suite_dir: str, e
                      **{k: v for k, v in m.items() if k.startswith("area/")}})
         print(f"[dindex-frozen] {name}: index {m['index']:.2f} raw {m['raw_index']:.2f} "
               f"answered {m['answered_frac']:.3f}", flush=True)
-    _report(rows, out_dir, board, time.time() - t0)
+    scope = f"stratified sample of {sample['n']} requests (estimate)" if sample else "full suite"
+    _report(rows, out_dir, board, time.time() - t0, scope)
 
 
-def _report(rows: list[dict], out_dir: str, board: str | None, seconds: float) -> None:
+def _report(rows: list[dict], out_dir: str, board: str | None, seconds: float, scope: str) -> None:
     import pandas as pd
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(out_dir, "runs.csv"), index=False)
@@ -279,7 +298,7 @@ def _report(rows: list[dict], out_dir: str, board: str | None, seconds: float) -
                               n_seeds=("index", "size"), answered=("answered_frac", "mean")).reset_index()
     g = g.sort_values("index_mean", ascending=False)
     g.to_csv(os.path.join(out_dir, "summary.csv"), index=False)
-    md = ["# Decision Index 0.2.1 (full suite), frozen backbone + head\n",
+    md = [f"# Decision Index 0.2.1 ({scope}), frozen backbone + head\n",
           f"Scoring time {seconds / 60:.1f} min; complete={bool(df['complete'].all())}.\n",
           "| arm | index | raw index | seeds | answered | board rank |", "|---|---|---|---|---|---|"]
     for _, r in g.iterrows():
@@ -302,6 +321,7 @@ def main(argv=None):
     f.add_argument("--out", required=True)
     f.add_argument("--shard-requests", type=int, default=1024)
     f.add_argument("--limit", type=int, default=None, help="first N requests only (timing / smoke)")
+    f.add_argument("--sample", default=None, help="`decision_index suite sample` .jsonl.gz: only those requests")
     f.add_argument("overrides", nargs="*", help="dotted overrides, e.g. 'features.layers=[24]'")
     s = sub.add_parser("score")
     s.add_argument("--feats", required=True)
@@ -314,7 +334,8 @@ def main(argv=None):
     a = ap.parse_args(argv)
     suite_dir = os.path.join(a.di_dir, "suite-0.2")
     if a.cmd == "featurize":
-        featurize(load_config(a.config, a.overrides), a.out, suite_dir, a.edition, a.shard_requests, a.limit)
+        featurize(load_config(a.config, a.overrides), a.out, suite_dir, a.edition, a.shard_requests, a.limit,
+                  a.sample)
     else:
         score(a.feats, a.heads, a.out, suite_dir, a.edition,
               a.board or os.path.join(a.di_dir, "tests", "fixtures", "board-0.2.1.json"))
