@@ -25,6 +25,8 @@ scripts/pref/wave1.sh 0,1               # 2 GPUs: queue GPU0 = A C F, queue GPU1
 SEEDS="0 1 2" scripts/pref/wave1.sh 0,1 # more seeds (seeds run one after another)
 RUN_C0=1 scripts/pref/wave1.sh 0,1      # also C0
 RUN_F=0 scripts/pref/wave1.sh 0         # skip F (run later: scripts/pref/run_arm.sh F 0 0 after C is done)
+# Resume a stopped wave: rerun the same command. Arms with head.pt are evaluated only (scored splits skipped); an arm
+# stopped mid-training has no head.pt and cannot resume (LoRA): delete its runs/pref/ARM/seedN first, then it retrains.
 
 # G: eval_arm.sh already runs the calibration split and passes it to reward_report.py; to redo by hand for any arm:
 .venv/bin/python scripts/pref/reward_report.py runs/pref/C/seed0/eval/decision-v7-development --calib runs/pref/C/seed0/eval/decision-v7-calibration
@@ -35,7 +37,7 @@ TEST=1 scripts/pref/eval_arm.sh runs/pref/C/seed0     # each finished run; skips
 
 ## Env vars
 - `BATCH_FALLBACK=1`: `--batch 2 --accum 4` (same effective batch 8) if batch 4 OOMs on 24GB. Use it for every arm of a comparison, not just the one that OOMed.
-- `FORCE=1`: delete an existing `runs/pref/ARM/seedN` and rerun (without it run_arm.sh refuses if the dir exists, finished or not).
+- `FORCE=1`: delete an existing `runs/pref/ARM/seedN` and retrain it (applies to every arm a wave1.sh run touches). Without it run_arm.sh evaluates a trained run (head.pt) only and refuses an unfinished one.
 - `BCE_W` (default 0.5), `F_EPOCHS` (default 1): arm F.
 - `SEEDS`, `RUN_C0`, `RUN_F`: wave1.sh. `TEST=1`: eval on the locked test split.
 

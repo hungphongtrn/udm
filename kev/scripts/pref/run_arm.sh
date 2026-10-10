@@ -15,7 +15,10 @@ fi
 OUT=runs/pref/$ARM/seed$SEED
 if [ -e "$OUT" ]; then
   if [ "${FORCE:-0}" = 1 ]; then rm -rf "$OUT"
-  else echo "refusing: $OUT exists (head.pt: $([ -f $OUT/head.pt ] && echo yes || echo no)); FORCE=1 to delete and rerun" >&2; exit 1; fi
+  elif [ -f "$OUT/head.pt" ]; then   # trained: evaluate only (eval_arm.sh skips splits already scored)
+    echo "[$(date -Is)] arm $ARM seed $SEED already trained ($OUT/head.pt): evaluating only"
+    CUDA_VISIBLE_DEVICES=$GPU scripts/pref/eval_arm.sh "$OUT"; exit
+  else echo "refusing: $OUT exists without head.pt (unfinished training; LoRA runs cannot resume); FORCE=1 or delete it to rerun" >&2; exit 1; fi
 fi
 [ "$ARM" = F ] && [ ! -f "runs/pref/C/seed$SEED/head.pt" ] && { echo "arm F needs runs/pref/C/seed$SEED (run C first)" >&2; exit 1; }
 FLAGS=$(arm_flags "$ARM" "$SEED")
