@@ -37,7 +37,8 @@ TEST=1 scripts/pref/eval_arm.sh runs/pref/C/seed0     # each finished run; skips
 
 ## Env vars
 - `PYTORCH_ALLOC_CONF`: run_arm.sh defaults it to `expandable_segments:True` (allocator fragmentation on the chat-format arms; no effect on results).
-- `BATCH_FALLBACK=1`: `--batch 2 --accum 4` (same effective batch 8) if batch 4 still OOMs on 24GB. Use it for every arm of a comparison, not just the one that OOMed.
+- Batch: every arm takes 8 records per optimizer step. A B C0 run 4 per forward x `--accum 2`; the chat-format arms C D E F run 2 x `--accum 4`, because at 4 they run out of memory on a 24 GB 3090. The gradient does not depend on the split (train.py divides each pass's loss by the step's record count), so A/B trained at 4 x 2 stay comparable: with LoRA dropout off, a CPU check gave the same step-1 gradient norm for 4 x 2, 2 x 4 and 1 x 8 on A B C and C+BCE. Two caveats: LoRA dropout (0.05) draws different masks for a different split, which is noise like a different seed, not a bias; and D/E's `--reg` is computed per forward pass, so their gradient changes with the split (+0.2% at step 1). Keep D/E's split the same across seeds.
+- `BATCH_FALLBACK=1`: halves every arm's microbatch (Kev 2 x 4, chat 1 x 8) if the defaults still run out of memory.
 - `FORCE=1`: delete an existing `runs/pref/ARM/seedN` and retrain it (applies to every arm a wave1.sh run touches). Without it run_arm.sh evaluates a trained run (head.pt) only and refuses an unfinished one.
 - `BCE_W` (default 0.5), `F_EPOCHS` (default 1): arm F.
 - `SEEDS`, `RUN_C0`, `RUN_F`: wave1.sh. `TEST=1`: eval on the locked test split.
