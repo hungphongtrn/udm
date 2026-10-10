@@ -3,7 +3,15 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."            # kev/
 source scripts/pref/arms.sh
-ARM=${1:?arm}; SEED=${2:?seed}; GPU=${3:-${CUDA_VISIBLE_DEVICES:-0}}
+ARM=${1:?arm}; SEED=${2:?seed}; GPU=${3:-0}
+export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}   # physical indices = nvidia-smi order
+# GPU is an index into the caller's CUDA_VISIBLE_DEVICES when that is set (e.g. two exported GPU UUIDs: 0 = the first),
+# else a physical index; a UUID / non-numeric value is used as is
+if [ -n "${CUDA_VISIBLE_DEVICES:-}" ] && [[ $GPU =~ ^[0-9]+$ ]]; then
+  IFS=, read -ra _VIS <<< "$CUDA_VISIBLE_DEVICES"
+  [ "$GPU" -lt "${#_VIS[@]}" ] || { echo "GPU index $GPU out of range for CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES" >&2; exit 1; }
+  GPU=${_VIS[$GPU]}
+fi
 OUT=runs/pref/$ARM/seed$SEED
 if [ -e "$OUT" ]; then
   if [ "${FORCE:-0}" = 1 ]; then rm -rf "$OUT"
