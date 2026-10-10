@@ -475,7 +475,7 @@ def parse_args():
     ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
     if a.shared_prefix is None: a.shared_prefix = a.full_ft
-    a.bce_types = set(t for t in a.bce_types.split(",") if t)
+    a.bce_types = sorted({t for t in a.bce_types.split(",") if t})   # a list: vars(a) is written to JSON
     if a.input_format == "chat" and a.head != "scalar":
         ap.error("--input_format chat reads one reward per option row: needs --head scalar")
     if a.input_format == "chat" and (a.option_isolation or a.pass_tokens_max):
@@ -484,7 +484,7 @@ def parse_args():
         ap.error("--ord_w / --label_smoothing / --brier_w / --focal_gamma modify the CE loss; not with --loss pref")
     if a.reg != "none" and a.loss != "pref":
         ap.error("--reg regularizes the preference pairs' rewards: needs --loss pref")
-    if not (math.isfinite(a.reg_w) and a.reg_w >= 0 and math.isfinite(a.bce_w) and a.bce_w >= 0) or not a.bce_types <= {"choice", "noul", "score"}:
+    if not (math.isfinite(a.reg_w) and a.reg_w >= 0 and math.isfinite(a.bce_w) and a.bce_w >= 0) or not set(a.bce_types) <= {"choice", "noul", "score"}:
         ap.error("--reg_w and --bce_w are finite and >= 0; --bce_types is a subset of choice,noul,score")
     if min(a.epochs, a.accum, a.n_per_source, a.lora, a.batch, a.synthetic_repeat) < 1 or not 0 < a.public_frac <= 1:
         ap.error("epochs, accum, n_per_source, lora, batch and synthetic_repeat must be positive; 0 < public_frac <= 1")
