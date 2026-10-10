@@ -1,5 +1,7 @@
 # Agent instructions (CLAUDE.md, AGENTS.md, .agents/, .claude/) are shared by every branch. When a push to any other branch
 # changes them, copy exactly those files (additions, edits, deletions) onto main and push. Nothing else is merged.
+# This workflow must itself be on main to run on branches cut from it. It cannot sync itself: the default GITHUB_TOKEN
+# may not push changes under .github/workflows/, so edits to this file reach main through a normal merge.
 name: Sync agent instructions to main
 
 on:

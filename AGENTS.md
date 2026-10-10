@@ -6,14 +6,13 @@ Read the relevant doc before changing code or proposing experiments.
 
 | Doc | What it covers |
 |---|---|
-| [`README.md`](README.md) | Repo overview: hypothesis branches on a vendored Kev fork |
-| [`kev/UPSTREAM.md`](kev/UPSTREAM.md) | The Kev fork's change log relative to upstream |
-| [`kev/scripts/pref/README.md`](kev/scripts/pref/README.md) | Run commands for the preference-model scripts (training machine only) |
-| [`docs/hypotheses/`](docs/hypotheses/) | One doc per `hyp/` branch: claim, arms, decision rule, commands, results (e.g. [`preference-reward-model.md`](docs/hypotheses/preference-reward-model.md)) |
+| [`README.md`](README.md) | What this branch holds and how to run it |
+| [`docs/hypotheses/`](docs/hypotheses/) | One doc per `hyp/` branch: claim, arms, decision rule, exact commands, results, and pointers to that branch's code |
+
+This file and CLAUDE.md are shared by every branch (CI copies changes to them onto `main`), so keep them
+branch-neutral: anything specific to one branch's code goes in its README or hypothesis doc.
 
 ## Study results
-
-These studies' code (SCRM) was removed from this branch; it lives on `main`.
 
 Start at [`docs/studies/README.md`](docs/studies/README.md) (headline Decision Index table, conclusions, open items).
 
