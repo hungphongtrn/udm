@@ -36,7 +36,8 @@ TEST=1 scripts/pref/eval_arm.sh runs/pref/C/seed0     # each finished run; skips
 ```
 
 ## Env vars
-- `BATCH_FALLBACK=1`: `--batch 2 --accum 4` (same effective batch 8) if batch 4 OOMs on 24GB. Use it for every arm of a comparison, not just the one that OOMed.
+- `PYTORCH_ALLOC_CONF`: run_arm.sh defaults it to `expandable_segments:True` (allocator fragmentation on the chat-format arms; no effect on results).
+- `BATCH_FALLBACK=1`: `--batch 2 --accum 4` (same effective batch 8) if batch 4 still OOMs on 24GB. Use it for every arm of a comparison, not just the one that OOMed.
 - `FORCE=1`: delete an existing `runs/pref/ARM/seedN` and retrain it (applies to every arm a wave1.sh run touches). Without it run_arm.sh evaluates a trained run (head.pt) only and refuses an unfinished one.
 - `BCE_W` (default 0.5), `F_EPOCHS` (default 1): arm F.
 - `SEEDS`, `RUN_C0`, `RUN_F`: wave1.sh. `TEST=1`: eval on the locked test split.
