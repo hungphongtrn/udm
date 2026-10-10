@@ -1,6 +1,6 @@
 # Data studies
 
-Schema and per-source mapping: `docs/DATA_SPEC.md` (on main); trainer contract: `docs/CONTRACT.md` (on main).
+Schema and per-source mapping: `docs/DATA_SPEC.md` (on `claude/set-conditioned-reward-model-hvsb9s`); trainer contract: `docs/CONTRACT.md` (on `claude/set-conditioned-reward-model-hvsb9s`).
 
 ## 1. Build and push (2026-10-02)
 

@@ -2,7 +2,7 @@
 
 Record of every experiment run on this branch (`claude/set-conditioned-reward-model-hvsb9s`): what was asked, how it
 was set up, the measured numbers and the decision taken. How-to material (configs, scripts, flags) lives in
-`docs/TRAINING.md` (on main); this directory holds results only.
+`docs/TRAINING.md` (on `claude/set-conditioned-reward-model-hvsb9s`); this directory holds results only.
 
 | Doc | Covers |
 |---|---|

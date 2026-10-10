@@ -8,4 +8,4 @@ Hypothesis branches (`hyp/<slug>`) on top of a vendored fork of Kev in [`kev/`](
 - Current hypotheses: [`docs/hypotheses/`](docs/hypotheses/).
 - Past SCRM (set-conditioned reward model) results: [`docs/studies/`](docs/studies/README.md). Their code (`src/`,
   `scripts/`, `configs/`, `tests/`, `docs/TRAINING.md` etc.) was removed on this branch but lives in git history on
-  `main`; read it with `git show main:<path>`.
+  `claude/set-conditioned-reward-model-hvsb9s` (the branch this one was cut from); read it with `git show origin/claude/set-conditioned-reward-model-hvsb9s:<path>`.
