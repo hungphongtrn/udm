@@ -6,12 +6,14 @@ Read the relevant doc before changing code or proposing experiments.
 
 | Doc | What it covers |
 |---|---|
-| [`README.md`](README.md) | Project overview, two-machine workflow (CPU data build → HF repo → GPU training) |
-| [`docs/CONTRACT.md`](docs/CONTRACT.md) | Data ↔ trainer contract: row semantics, label kinds → tiers |
-| [`docs/DATA_SPEC.md`](docs/DATA_SPEC.md) | Schema, hash recipes, per-source mapping, metadata recovery, drop reasons |
-| [`docs/TRAINING.md`](docs/TRAINING.md) | Model design, memory budget, configs, metrics, checkpoints, frozen feature pipeline, inference |
+| [`README.md`](README.md) | Repo overview: hypothesis branches on a vendored Kev fork |
+| [`kev/UPSTREAM.md`](kev/UPSTREAM.md) | The Kev fork's change log relative to upstream |
+| [`kev/scripts/pref/README.md`](kev/scripts/pref/README.md) | Run commands for the preference-model scripts (training machine only) |
+| [`docs/hypotheses/`](docs/hypotheses/) | One doc per `hyp/` branch: claim, arms, decision rule, commands, results (e.g. [`preference-reward-model.md`](docs/hypotheses/preference-reward-model.md)) |
 
 ## Study results
+
+These studies' code (SCRM) was removed from this branch; it lives on `main`.
 
 Start at [`docs/studies/README.md`](docs/studies/README.md) (headline Decision Index table, conclusions, open items).
 

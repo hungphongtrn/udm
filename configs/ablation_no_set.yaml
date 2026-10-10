@@ -1,6 +1,0 @@
-# No-interaction ablation: set transformer removed (per-candidate projection + reward head only).
-base: scrm_qwen3_5_4b_24gb.yaml
-output_dir: outputs/ablation_no_set
-model:
-  set_layers: 0
-wandb: {tags: [qwen3-4b, ablation, no-set]}

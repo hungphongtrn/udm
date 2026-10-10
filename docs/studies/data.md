@@ -1,6 +1,6 @@
 # Data studies
 
-Schema and per-source mapping: [`../DATA_SPEC.md`](../DATA_SPEC.md); trainer contract: [`../CONTRACT.md`](../CONTRACT.md).
+Schema and per-source mapping: `docs/DATA_SPEC.md` (on main); trainer contract: `docs/CONTRACT.md` (on main).
 
 ## 1. Build and push (2026-10-02)
 

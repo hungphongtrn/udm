@@ -151,7 +151,6 @@ activemq-data/
 .env
 .envrc
 .venv
-.venv-cpu
 env/
 venv/
 ENV/
@@ -219,10 +218,8 @@ __marimo__/
 .streamlit/secrets.toml
 
 # project outputs
-/data/
 /outputs/
+runs/
 /checkpoints/
 wandb/
-*.parquet
-/data_cache/
 /build/

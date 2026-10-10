@@ -3,7 +3,7 @@
 Contract: Qwen3.5-4B, prefill only (no generation), one vector per option = hidden state at the last input token of
 `[prompt with all options][Grade this choice: Option k: …]<assistant header>`, layers 16, 24 and last, final RMSNorm
 applied, bf16. Two presentation variants per set (canonical + seeded shuffle). Setup and resume rules:
-[`../TRAINING.md` § Frozen feature extraction](../TRAINING.md#frozen-feature-extraction).
+`docs/TRAINING.md` § Frozen feature extraction (on main).
 
 ## 1. HF prefix-cached extraction of train (2026-10-07)
 
