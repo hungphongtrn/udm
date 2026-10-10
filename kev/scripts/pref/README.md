@@ -44,9 +44,9 @@ TEST=1 scripts/pref/eval_arm.sh runs/pref/C/seed0     # each finished run; skips
 runs/pref/<ARM>/seed<N>/              checkpoint (head.pt, adapter, tokenizer), train.log (also runs/pref/<ARM>/seed<N>.train.log)
   eval/<suite>-<split>/                rows.json report.json predictions.jsonl (kev.benchmark), reward_report.json (our table)
 ```
-Splits: `decision-v7-{calibration,development}`, `transfer-v4-{calibration,development}` (+ `-test` with TEST=1).
+Splits: `decision-v7-{calibration,development}`, `transfer-v4-development` (+ `-test` with TEST=1). transfer-v4 is eval-only: its calibration split is empty by design.
 `reward_report.json`: `raw` (by type and overall: top1, pairwise_acc, reward stats, nll, ece_softmax, ece_sigmoid), `permutation`, and `G` (fitted T and Platt a,b; metrics at fitted T / Platt).
-Platt and T are fit per run on that run's calibration rows and applied to its development rows; decision rule should compare `G` numbers across arms for calibration, raw numbers for ranking quality.
+Platt and T are fit per run on that run's decision-v7 calibration rows and applied to its development, transfer-v4 and test rows; decision rule should compare `G` numbers across arms for calibration, raw numbers for ranking quality.
 
 ## Compute
 ~2-3 h per arm on one 3090 [estimate, unmeasured; the released recipe is ~1 h on an H100], plus ~15-30 min eval [estimate]. Wave 1 seed 0 on one GPU: ~12-18 h; on two GPUs ~7-10 h. F is ~half a run.
