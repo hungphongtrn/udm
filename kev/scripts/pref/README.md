@@ -16,7 +16,8 @@ Every arm: Kev-4B recipe on decision-v7 (LoRA r16, 2 epochs, lr 5e-5, eff. batch
 ## Commands, in order
 ```bash
 cd kev
-scripts/pref/setup_3090.sh              # check the printed chat template and rendered example prompt (and that CUDA devices are listed) before anything else
+TORCH_EXTRA=cu128 scripts/pref/setup_3090.sh   # cu128 (default) or cu130; generates kev/uv.lock if missing (commit it), uv sync --extra; never `uv sync`/`uv run` without the extra afterwards (removes torch). Check the printed chat template and rendered example prompt (and that CUDA devices are listed) before anything else
+.venv/bin/python -m pytest tests/test_pref.py   # CPU tests, after setup
 scripts/pref/run_arm.sh C 0 0           # optional smoke test: arm, seed, GPU (train + eval); check loss goes down, then FORCE=1 to rerun or keep it
 
 scripts/pref/wave1.sh 0                 # 1 GPU: A B C D E then F, seed 0, sequentially
@@ -26,7 +27,7 @@ RUN_C0=1 scripts/pref/wave1.sh 0,1      # also C0
 RUN_F=0 scripts/pref/wave1.sh 0         # skip F (run later: scripts/pref/run_arm.sh F 0 0 after C is done)
 
 # G: eval_arm.sh already runs the calibration split and passes it to reward_report.py; to redo by hand for any arm:
-python3 scripts/pref/reward_report.py runs/pref/C/seed0/eval/decision-v7-development --calib runs/pref/C/seed0/eval/decision-v7-calibration
+.venv/bin/python scripts/pref/reward_report.py runs/pref/C/seed0/eval/decision-v7-development --calib runs/pref/C/seed0/eval/decision-v7-calibration
 
 # FINAL VERDICT ONLY (locked test split, read once):
 TEST=1 scripts/pref/eval_arm.sh runs/pref/C/seed0     # each finished run; skips splits already done

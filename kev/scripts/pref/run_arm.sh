@@ -14,7 +14,7 @@ FLAGS=$(arm_flags "$ARM" "$SEED")
 # kev.train refuses an existing --out, so the log lives beside it and is copied in afterwards
 mkdir -p "$(dirname "$OUT")"; LOG="$OUT.train.log"
 echo "[$(date -Is)] arm $ARM seed $SEED gpu $GPU -> $OUT"; echo "flags: $FLAGS" | tee "$LOG"
-CUDA_VISIBLE_DEVICES=$GPU uv run python -m kev.train $FLAGS --out "$OUT" 2>&1 | tee -a "$LOG"
+CUDA_VISIBLE_DEVICES=$GPU .venv/bin/python -m kev.train $FLAGS --out "$OUT" 2>&1 | tee -a "$LOG"
 [ -f "$OUT/head.pt" ] || { echo "training failed: no $OUT/head.pt (log: $LOG)" >&2; exit 1; }
 cp "$LOG" "$OUT/train.log"
 CUDA_VISIBLE_DEVICES=$GPU scripts/pref/eval_arm.sh "$OUT"

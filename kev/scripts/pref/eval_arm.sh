@@ -8,10 +8,10 @@ RUN=${1:?run dir}
 V7=evals/v7/decision-v7; T4=evals/v4/transfer-v4
 bench() {  # suite name split   (split "test" => --allow-test and no --split: benchmark picks the locked test itself)
   local out=$RUN/eval/$2-$3 sp="--split $3"; [ "$3" = test ] && sp="--allow-test"
-  [ -f "$out/report.json" ] || uv run python -m kev.benchmark --run "$RUN" --suite "$1" $sp --out "$out"
+  [ -f "$out/report.json" ] || .venv/bin/python -m kev.benchmark --run "$RUN" --suite "$1" $sp --out "$out"
   local cal=$RUN/eval/$2-calibration   # G: fit on this run's calibration split of the same suite
-  if [ "$3" != calibration ] && [ -f "$cal/rows.json" ]; then python3 scripts/pref/reward_report.py "$out" --calib "$cal"
-  else python3 scripts/pref/reward_report.py "$out"; fi
+  if [ "$3" != calibration ] && [ -f "$cal/rows.json" ]; then .venv/bin/python scripts/pref/reward_report.py "$out" --calib "$cal"
+  else .venv/bin/python scripts/pref/reward_report.py "$out"; fi
 }
 bench $V7 decision-v7 calibration                     # first, so the development reports can include G
 bench $T4 transfer-v4 calibration

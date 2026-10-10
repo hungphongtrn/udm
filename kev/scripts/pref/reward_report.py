@@ -1,6 +1,6 @@
 """Reward-style report over a kev.benchmark output dir (rows.json + report.json). numpy only.
 
-    python3 scripts/pref/reward_report.py runs/pref/C/seed0/eval/decision-v7-development [--calib <calibration dir of the same run>]
+    .venv/bin/python scripts/pref/reward_report.py runs/pref/C/seed0/eval/decision-v7-development [--calib <calibration dir of the same run>]
 
 Per question type and overall (clean, knowable rows; the same population as report.json["clean"]): top-1, pairwise accuracy
 (label vs each other option), reward stats (the row's logits are the rewards), softmax NLL and ECE, sigmoid(reward) ECE vs the

@@ -10,7 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Jared Palmer" }]
-requires-python = ">=3.12,<3.14"
+requires-python = "==3.12.*"
 keywords = ["decision-model", "calibration", "lora", "typesafe", "transformers"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -25,7 +25,6 @@ dependencies = [
     "peft>=0.21",
     "pydantic>=2.9",
     "scikit-learn>=1.9.1",
-    "torch>=2.6,<2.9",
     "transformers>=5.17,<6",
 ]
 
@@ -45,6 +44,18 @@ mlx = [
     "mlx-lm>=0.31.3,<0.32; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 
+# Torch build + GPU kernels: exactly one of cu128 / cu130 / cpu (select with `uv sync --extra cu128`; torch is NOT in the base
+# dependencies, so a bare `uv sync` / `uv run` removes it: scripts call .venv/bin/python directly). Environment deviates
+# from upstream Kev (py3.13, torch 2.8): see UPSTREAM.md. Prebuilt wheels: torch 2.10.0, causal-conv1d 1.7.0 (also what
+# transformers' Gated DeltaNet conv path uses). flash-linear-attention is pinned to 0.5.2: kev.fused_qwen35.FLA_VERSION patches
+# its kernel launches. triton comes from torch 2.10 (3.6): no forced upgrade (upstream forced >=3.7.1 only because torch 2.8
+# pinned 3.4). Caveat: triton 3.6 gives wrong fla chunk_bwd_dqkwg grads on Hopper (H100/H200) only (fla issue #640); on
+# Ampere (3090) it is fine. For Hopper add "tilelang" to the extra (see the udm parent branch's pyproject). flash-attn
+# 2.8.3 is installed because requested, but Kev never uses it (attn_implementation is sdpa/eager, kev/model.py).
+cu128 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention==0.5.2", "flash-attn==2.8.3"]   # CUDA 12.8, driver >= 570 (default)
+cu130 = ["torch==2.10.0", "causal-conv1d==1.7.0", "flash-linear-attention==0.5.2", "flash-attn==2.8.3"]   # CUDA 13.0, driver >= 580
+cpu = ["torch==2.10.0"]   # no GPU kernels; test suite / CPU smoke runs
+
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
@@ -52,6 +63,40 @@ dev = [
     "modal==1.5.5",
     "pytest>=9.1.1",
 ]
+
+[tool.uv]
+conflicts = [[{ extra = "cu128" }, { extra = "cu130" }, { extra = "cpu" }]]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", extra = "cu128" },
+    { index = "pytorch-cu130", extra = "cu130" },
+    { index = "pytorch-cpu", extra = "cpu" },
+]
+causal-conv1d = [
+    { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", extra = "cu128" },
+    { url = "https://github.com/Dao-AILab/causal-conv1d/releases/download/v1.7.0/causal_conv1d-1.7.0+cu13torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl", extra = "cu130" },
+]
+flash-attn = [
+    { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu128torch2.10-cp312-cp312-linux_x86_64.whl", extra = "cu128" },
+    { url = "https://github.com/mjun0812/flash-attention-prebuild-wheels/releases/download/v0.9.0/flash_attn-2.8.3+cu130torch2.10-cp312-cp312-linux_x86_64.whl", extra = "cu130" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

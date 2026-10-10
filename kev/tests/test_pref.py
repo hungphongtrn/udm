@@ -1,5 +1,5 @@
 """Preference-reward branch: kev.pref losses, the chat input format, the scalar head, and tiny CPU training runs.
-Run: uv run --extra serve python -m pytest tests/test_pref.py -q   (on the training machine; nothing here needs weights or a network)
+Run: .venv/bin/python -m pytest tests/test_pref.py -q   (on the training machine; nothing here needs weights or a network)
 """
 import json
 import sys

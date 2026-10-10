@@ -79,6 +79,9 @@ admitted by Kev's own limits (same population in every arm); a chat row (prefix 
   bf16 autocast; gradient checkpointing; `p_none_pair` 0.25; option permutation re-drawn each epoch.
 - `--weights_dtype bf16` for every arm (deviation from the released recipe, for 24 GB on a 3090). So A is "Kev recipe on
   bf16 weights", not the released checkpoint.
+- Environment (deviates from upstream Kev): Python 3.12, torch 2.10.0 (cu128 default; cu130 optional), causal-conv1d 1.7.0 and
+  flash-attn 2.8.3 prebuilt wheels, flash-linear-attention 0.5.2, triton 3.6 from torch; `kev/uv.lock` regenerated on the training
+  machine. Same for every arm. See `kev/UPSTREAM.md`.
 - Final checkpoint only, no checkpoint selection. Seeds 0 first, then 1, 2.
 
 ## Defaults chosen (not specified by the requester)
@@ -126,13 +129,13 @@ F and G are judged against C only (sub-claims above) and do not enter the verdic
 Training machine only, from `kev/`:
 
 ```
-uv run pytest tests/test_pref.py              # CPU; run on the training machine first
-bash scripts/pref/setup_3090.sh               # env check; prints the chat template and an example prompt
+.venv/bin/python -m pytest tests/test_pref.py  # CPU; run on the training machine first
+TORCH_EXTRA=cu128 bash scripts/pref/setup_3090.sh  # (cu130 for CUDA 13) uv lock + uv sync --extra; commit the generated kev/uv.lock; env check; prints the chat template and an example prompt
 bash scripts/pref/run_arm.sh ARM SEED [GPU]   # e.g. run_arm.sh C 0 0
 bash scripts/pref/wave1.sh                    # A-E seed 0, 1 GPU
 bash scripts/pref/wave1.sh 0,1                # 2 GPUs
 bash scripts/pref/eval_arm.sh runs/pref/C/seed0
-python scripts/pref/reward_report.py ...      # see scripts/pref/README.md
+.venv/bin/python scripts/pref/reward_report.py ...  # see scripts/pref/README.md
 ```
 
 OOM fallback: `BATCH_FALLBACK=1` (batch 2 × accum 4, same effective batch 8; defined in `scripts/pref/arms.sh`).
@@ -144,6 +147,7 @@ OOM fallback: `BATCH_FALLBACK=1` (batch 2 × accum 4, same effective batch 8; de
   joined string; identical in training and evaluation, but not what a one-pass render would give.
 - The chat format repeats the state per question (each question has its own prefix) and costs K extra short rows per question.
 - A chat template written for instruct models on a Base model: the tail (assistant header) embeddings may be untrained; LoRA adapts them.
+- torch 2.10 / triton 3.6 vs Kev's released torch 2.8 numerics: A may differ slightly from the published number; identical for all arms.
 - bf16 weights vs released fp32: A may differ from the published Kev number.
 - F's LR schedule restarts from the C checkpoint.
 - BT is shift-invariant: only softmax probabilities are comparable across arms.
