@@ -20,8 +20,8 @@ TORCH_EXTRA=cu128 scripts/pref/setup_3090.sh   # cu128 (default) or cu130; gener
 .venv/bin/python -m pytest tests/test_pref.py   # CPU tests, after setup
 scripts/pref/run_arm.sh C 0 0           # optional smoke test: arm, seed, GPU (train + eval); check loss goes down, then FORCE=1 to rerun or keep it
 
-scripts/pref/wave1.sh 0                 # 1 GPU: A B C D E then F, seed 0, sequentially
-scripts/pref/wave1.sh 0,1               # 2 GPUs: queue GPU0 = A C F, queue GPU1 = B D E
+scripts/pref/wave1.sh 0                 # 1 GPU: C F A B D E, seed 0, sequentially
+scripts/pref/wave1.sh 0,1,2             # N GPUs: one worker per GPU takes the next free arm (C A B D E); F runs after C on C's GPU
 SEEDS="0 1 2" scripts/pref/wave1.sh 0,1 # more seeds (seeds run one after another)
 RUN_C0=1 scripts/pref/wave1.sh 0,1      # also C0
 RUN_F=0 scripts/pref/wave1.sh 0         # skip F (run later: scripts/pref/run_arm.sh F 0 0 after C is done)
@@ -52,5 +52,5 @@ Splits: `decision-v7-{calibration,development}`, `transfer-v4-development` (+ `-
 Platt and T are fit per run on that run's decision-v7 calibration rows and applied to its development, transfer-v4 and test rows; decision rule should compare `G` numbers across arms for calibration, raw numbers for ranking quality.
 
 ## Compute
-~2-3 h per arm on one 3090 [estimate, unmeasured; the released recipe is ~1 h on an H100], plus ~15-30 min eval [estimate]. Wave 1 seed 0 on one GPU: ~12-18 h; on two GPUs ~7-10 h. F is ~half a run.
+~2-3 h per arm on one 3090 [estimate, unmeasured; the released recipe is ~1 h on an H100], plus ~15-30 min eval [estimate]. Wave 1 seed 0 on one GPU: ~12-18 h; on two GPUs ~7-10 h; on three ~5-7 h [estimate: two runs on the busiest GPU]. F is ~half a run.
 First step pays Triton compilation. The log is also at `runs/pref/<ARM>/seed<N>.train.log` if the run dir was removed.
