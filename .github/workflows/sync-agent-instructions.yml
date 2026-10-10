@@ -1,0 +1,57 @@
+# Agent instructions (CLAUDE.md, AGENTS.md, .agents/, .claude/) are shared by every branch. When a push to any other branch
+# changes them, copy exactly those files (additions, edits, deletions) onto main and push. Nothing else is merged.
+# This workflow must itself be on main to run on branches cut from it. It cannot sync itself: the default GITHUB_TOKEN
+# may not push changes under .github/workflows/, so edits to this file reach main through a normal merge.
+name: Sync agent instructions to main
+
+on:
+  push:
+    branches-ignore: [main]
+    paths: ["CLAUDE.md", "AGENTS.md", ".agents/**", ".claude/**"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-agent-instructions   # one sync at a time, in push order
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Copy changed instruction files onto main
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          paths=(CLAUDE.md AGENTS.md .agents .claude)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # what this push changed: since the previous tip, or since main for a new / force-pushed branch
+          if git cat-file -e "${BEFORE}^{commit}" 2>/dev/null && git merge-base --is-ancestor "$BEFORE" "$AFTER"; then base=$BEFORE
+          else base=$(git merge-base origin/main "$AFTER"); fi
+          git diff --name-only -z "$base" "$AFTER" -- "${paths[@]}" > /tmp/changed
+          if [ ! -s /tmp/changed ]; then echo "no instruction files changed"; exit 0; fi
+
+          for attempt in 1 2 3; do
+            git fetch -q origin main
+            git checkout -q -B main origin/main
+            while IFS= read -r -d '' f; do
+              if git cat-file -e "$AFTER:$f" 2>/dev/null; then git checkout "$AFTER" -- "$f"
+              else git rm -q --ignore-unmatch -- "$f"; fi
+            done < /tmp/changed
+            if git diff --cached --quiet; then echo "main already has these versions"; exit 0; fi
+            git diff --cached --stat
+            git commit -q -m "Sync agent instructions from $BRANCH (${AFTER::7})"
+            if git push origin main; then exit 0; fi
+            echo "push rejected (main moved); retrying"; git reset -q --hard origin/main
+          done
+          exit 1
