@@ -436,33 +436,63 @@ class DecisionModel(nn.Module):
         bound with the number of questions). The two forms agree (tests/test_model.py::test_rows_match_packed)."""
         return self.hybrid or any(len(e["ids"]) > ROW_PASS_TOKENS for e in encs)
 
-    def _rows_hidden(self, rows, cache=None, prefix_len=0):
+    def _replicate(self, cache, n):
+        """n copies of `cache` along the batch. The cache layers update their DeltaNet states in place; the copies are fresh
+        tensors (reorder_cache), so passes continuing them leave `cache` as it was."""
+        replica = copy.copy(cache)
+        replica.layers = [copy.copy(layer) for layer in cache.layers]
+        for source, target in zip(cache.layers, replica.layers):
+            if isinstance(source, LinearAttentionCacheLayerMixin):
+                target.conv_states = source.conv_states.copy()
+                target.recurrent_states = source.recurrent_states.copy()
+                target.is_conv_states_initialized = source.is_conv_states_initialized.copy()
+                target.is_recurrent_states_initialized = source.is_recurrent_states_initialized.copy()
+                target.has_previous_state = source.has_previous_state.copy()
+                target.conv_kernel_size = source.conv_kernel_size.copy()
+        replica.reorder_cache(torch.zeros(n, dtype=torch.long, device=self.device))
+        return replica
+
+    def _rows_hidden(self, rows, cache=None, prefix_len=0, chunk=None):
         """Hidden states of causal token rows, one [L_i, d] tensor per row. In eval mode the rows go through the backbone
-        rows_per_pass at a time; training keeps one batch (its batches are small and autograd needs the whole graph anyway).
-        With `cache`, the rows are branches continuing the cached state: in eager mode the cache is replicated once per
-        chunk, leaving the caller's prefix pristine, and the cached tokens are marked real in the attention mask."""
-        chunk = len(rows) if self.training else rows_per_pass([ids for ids, _ in rows], prefix_len)
+        rows_per_pass at a time (or `chunk` at a time); training keeps one batch (its batches are small and autograd needs
+        the whole graph anyway). With `cache`, the rows are branches continuing the cached state: in eager mode the cache is
+        replicated once per chunk, leaving the caller's prefix pristine, and the cached tokens are marked real in the
+        attention mask."""
+        chunk = chunk or (len(rows) if self.training else rows_per_pass([ids for ids, _ in rows], prefix_len))
         out = []
         for start in range(0, len(rows), chunk):
             part = rows[start:start + chunk]
             ids, pos, att = self._pad_rows(part)
             past = {}
             if cache is not None:
-                replica = copy.copy(cache)
-                replica.layers = [copy.copy(layer) for layer in cache.layers]
-                for source, target in zip(cache.layers, replica.layers):
-                    if isinstance(source, LinearAttentionCacheLayerMixin):
-                        target.conv_states = source.conv_states.copy()
-                        target.recurrent_states = source.recurrent_states.copy()
-                        target.is_conv_states_initialized = source.is_conv_states_initialized.copy()
-                        target.is_recurrent_states_initialized = source.is_recurrent_states_initialized.copy()
-                        target.has_previous_state = source.has_previous_state.copy()
-                        target.conv_kernel_size = source.conv_kernel_size.copy()
-                replica.reorder_cache(torch.zeros(len(part), dtype=torch.long, device=self.device))
                 att = torch.cat([torch.ones((len(part), prefix_len), dtype=torch.long, device=self.device), att], 1)
-                past = {"past_key_values": replica, "use_cache": True}
+                past = {"past_key_values": self._replicate(cache, len(part)), "use_cache": True}
             h = self.lm(input_ids=ids, position_ids=pos, attention_mask=att, **past).last_hidden_state.float()
             out += [h[i, : len(row_ids)] for i, (row_ids, _) in enumerate(part)]
+        return out
+
+    @torch.no_grad()
+    def chat_hidden(self, splits, chunk=None):
+        """Inference form of the chat format on a hybrid backbone (splits: one record's enc["chat"]). Every question's
+        prefix starts with the same head + state tokens, so those run once into a cache; each question continues a copy of
+        it with its own instruction and option listing (alone: padding inside a continuation would decay the DeltaNet
+        state), and its K option rows continue that question's cache (_rows_hidden, `chunk` rows per pass if given). The
+        rows see the same tokens at the same positions as branch_hidden's, so the rewards agree up to kernel rounding,
+        while the state runs once per record instead of once per question and no pass holds more than one question's
+        prefix. -> per question, per option, the row's hidden states [L, d] fp32."""
+        ids0, pos0, _ = splits[0]
+        n = min(len(S) for S, _, _ in splits) - 1   # every question keeps at least one token of its own
+        c = next((i for i in range(n) if any(S[i] != ids0[i] or Sp[i] != pos0[i] for S, Sp, _ in splits)), n)
+        run = lambda ids, pos, cache: self.lm(input_ids=torch.tensor([ids], device=self.device), position_ids=torch.tensor([pos], device=self.device),
+                                              past_key_values=cache, use_cache=True)
+        common = DynamicCache(config=self.lm.config)
+        if c: run(ids0[:c], pos0[:c], common)
+        out = []
+        for S, Sp, gs in splits:
+            cache = self._replicate(common, 1) if c else DynamicCache(config=self.lm.config)
+            run(S[c:], Sp[c:], cache)
+            out.append(self._rows_hidden([(g["ids"], g["pos"]) for g in gs], cache=cache, prefix_len=len(S), chunk=chunk))
+            del cache
         return out
 
     def forward_rows_batch(self, encs, shared_prefix=False):
@@ -488,10 +518,13 @@ class DecisionModel(nn.Module):
 
     def forward_chat_batch(self, encs):
         """Chat format (enc["chat"], chat_splits): the same nested [record][question] -> rewards [K] as forward_batch. A hybrid
-        backbone runs each question's prefix once and its K option rows from it (kev.shared_prefix, exact, gradients included);
-        an attention-only one runs prefix + branch as one causal row per option."""
+        backbone runs each question's prefix once and its K option rows from it: with gradients through kev.shared_prefix
+        (exact, gradients included), without them through chat_hidden (the record's state once, then per question). An
+        attention-only one runs prefix + branch as one causal row per option."""
         splits = [s for e in encs for s in e["chat"]]
-        if self.hybrid:
+        if self.hybrid and not torch.is_grad_enabled():
+            hs = [h for e in encs for h in self.chat_hidden(e["chat"])]
+        elif self.hybrid:
             from .shared_prefix import branch_hidden
             hs = branch_hidden(self.lm, splits, self.pad_id, self.device)
         else:

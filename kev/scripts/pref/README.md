@@ -75,9 +75,12 @@ says it fits Decision Index, so `check` pairs D with v7-base three ways: shipped
 1.47 = seed 0's G), raw (both T = 1), and the best T of `TGRID` for each, chosen on the subset itself (optimistic). If
 the winner changes across the three, temperature decides it, not the training loss. Compare D with `v7-base`, not with
 the board's Kev-4B (r10 adds three training stages after the base recipe and T = 2.41).
-Chat checkpoints that run out of memory (many-option requests: CLINC150, API-Bank, ToolRet) are rerun per question with
-option branches in chunks (exact per option up to kernel rounding; the sample run's `raw_output.fallback_chunk` shows it,
-`full` runs `--compact` and keeps no raw output). A resume keeps `unsupported` rows; to retry them, drop them from
+Chat checkpoints on the hybrid backbone score through `DecisionModel.chat_hidden`: the state runs once per request, each
+question continues it with its instruction and option listing, and its option rows continue that (the old path reran the
+state per question; the rows are the same tokens at the same positions, so rewards differ by bf16 kernel rounding only and
+rows scored before the change stay valid for a resume). Requests that still run out of memory (many options: CLINC150,
+API-Bank, ToolRet) are rerun with the option rows in chunks (exact per option up to kernel rounding; the sample run's
+`raw_output.fallback_chunk` shows it, `full` runs `--compact` and keeps no raw output). A resume keeps `unsupported` rows; to retry them, drop them from
 `results.jsonl` first (backup kept):
 `.venv/bin/python -c "import json,shutil,sys; f=sys.argv[1]; shutil.copy(f,f+'.bak'); open(f,'w').writelines(l for l in open(f+'.bak') if l.endswith('\n') and json.loads(l)['status']!='unsupported')" runs/pref/D/seed0/dindex-0.3/results.jsonl`
 

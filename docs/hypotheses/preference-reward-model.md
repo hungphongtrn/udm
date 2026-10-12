@@ -63,7 +63,9 @@ followed by the template's tail (for ChatML-style templates `<|im_end|>\n<|im_st
 Qwen3.5 template adds). The reward is the scalar head applied to the hidden state of the LAST token of that prompt.
 
 Prefix caching: everything up to and including `Grade this option: ` is identical for the K options and runs once
-(`kev.shared_prefix.branch_hidden`, exact with gradients); option k's branch is `tokens(o_k + template tail)`, positions
+(training: `kev.shared_prefix.branch_hidden`, exact with gradients; inference without gradients: `DecisionModel.chat_hidden`,
+which also runs the head + state part once per record and continues it per question, the same tokens at the same positions,
+so it agrees with training's computation up to kernel rounding); option k's branch is `tokens(o_k + template tail)`, positions
 continuing the prefix. The pieces are tokenized separately (template head + `State:\n`, state tokens cut to the state limit,
 the rest of the prefix, each branch), so the prefix ids are byte-identical across options in training and evaluation. The head/tail
 strings come from rendering the template once around a sentinel; their sha256 is recorded in the checkpoint

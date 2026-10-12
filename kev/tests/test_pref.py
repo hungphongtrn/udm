@@ -167,18 +167,21 @@ def chat_model(tiny_base, tok_rec):
 
 
 def test_chat_shared_prefix_matches_per_row(chat_model, tok_rec):
-    """forward_chat_batch (hybrid: each prefix once, branches from it) equals one explicit causal row per option; gradients
-    reach the scalar head."""
+    """Both hybrid chat paths equal one explicit causal row per option: chat_hidden (inference: the state once per record,
+    then per question; any branch chunking) and kev.shared_prefix (with gradients: each prefix once); gradients reach the
+    scalar head."""
     tok, rec = tok_rec
     model = chat_model.eval()
     assert model.hybrid and model.chat_template_sha256 == chat_template_digest(tok)
     enc = model.encode(tok, rec)
     with torch.no_grad():
-        got = model.forward_chat_batch([enc])[0]
-        for z, (S, Sp, gs) in zip(got, enc["chat"]):
-            hs = [model._rows_hidden([(S + g["ids"], Sp + g["pos"])])[0][-1] for g in gs]
-            want = model.head(None, torch.stack(hs))
-            assert z.shape == want.shape and torch.allclose(z, want, atol=1e-4)
+        want = [model.head(None, torch.stack([model._rows_hidden([(S + g["ids"], Sp + g["pos"])])[0][-1] for g in gs])) for S, Sp, gs in enc["chat"]]
+        cached = model.forward_chat_batch([enc])[0]
+        chunked = [model.head(None, torch.stack([h[-1] for h in hs])) for hs in model.chat_hidden(enc["chat"], chunk=1)]
+    shared = model.forward_chat_batch([enc])[0]
+    for got in (cached, chunked, shared):
+        for z, w in zip(got, want):
+            assert z.shape == w.shape and torch.allclose(z.detach(), w, atol=1e-4)
     model.train()
     try:
         out = model.forward_chat_batch([enc])[0]

@@ -13,13 +13,14 @@ Each request is scored by kev.predictors.LocalPredictor under kev.suite.SERVING_
 path kev.serve answers the /v1/systemone API with. The kit's (state, questions) is already that API's shape, so nothing is
 reworded, filtered or truncated.
 
-Out of memory on a chat-format checkpoint on a hybrid backbone (arms C-F): LocalPredictor runs every question's prefix in
-one batch and all its K option branches at once, each branch holding its own gathered copy of the prefix's keys / values
-and DeltaNet state, so a many-option request (CLINC150's 151 intents, API-Bank's 53 tools, ToolRet) does not fit a 24 GB
-card. The fallback reruns such a request one question at a time with the branches in chunks (64, 16, 4, 1) under the
-long-row kernels (kev.predictors.long_row_kernels: flash / memory-efficient SDPA). Branches never see each other and the
-scalar head scores each option on its own, so chunking changes no option's reward; the kernels round differently from the
-math kernel (measured on Kev-4B: max |dp| 6e-4, kev.predictors docstring). Rows that took it carry `fallback_chunk` in raw.
+Chat-format checkpoints on a hybrid backbone (arms C-F) score through DecisionModel.chat_hidden: the request's state runs
+once, each question continues it with its own instruction and option listing, and its K option rows continue that, rows
+per pass bounded by kev.model.rows_per_pass. The rows are branch_hidden's (training's) to kernel rounding. Out of memory
+anyway (CLINC150's 151 intents, API-Bank's 53 tools, ToolRet on a long state): the request is rerun with the option
+rows in chunks (64, 16, 4, 1) under the long-row kernels (kev.predictors.long_row_kernels: flash / memory-efficient
+SDPA). Rows never see each other and the scalar head scores each option on its own, so chunking changes no option's
+reward; the kernels round differently from the math kernel (measured on Kev-4B: max |dp| 6e-4, kev.predictors
+docstring). Rows that took it carry `fallback_chunk` in raw.
 Requests the model still cannot hold (state past the serving context, more than 255 options, out of memory at one
 branch, a question type other than choice / noul) are refused as Unsupported, which the index counts as wrong.
 """
@@ -32,7 +33,6 @@ from kev.checkpoint import LoadOptions
 from kev.data import materialize
 from kev.model import ContextOverflow
 from kev.predictors import LocalPredictor, long_row_kernels
-from kev.shared_prefix import branch_hidden
 from kev.suite import SERVING_CONTEXT
 
 DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32}
@@ -54,8 +54,9 @@ class KevEngine(Engine):
             "temperature": self.predictor.temperature, "context": SERVING_CONTEXT,
             "policy": "kev.predictors.LocalPredictor on the kit's state and questions as given (the /v1/systemone request shape): "
                       "one reward per option from the checkpoint's head, softmax over options at the stated temperature; noul "
-                      "is P(true). Chat checkpoints that run out of memory are rerun per question with option branches in "
-                      "chunks (exact per option up to kernel rounding). Requests past the 64k serving context or 255 options, "
+                      "is P(true). Chat checkpoints run the state once per request and each question's option rows from "
+                      "it; those that run out of memory are rerun with option rows in chunks (exact per option up to kernel "
+                      "rounding). Requests past the 64k serving context or 255 options, "
                       "still out of memory at one branch, or of other question types are refused as unsupported, never "
                       "truncated. No option filtering, no per-benchmark prompts.",
         }
@@ -100,7 +101,7 @@ class KevEngine(Engine):
 
     @torch.no_grad()
     def _chunked(self, record, questions, state):
-        """The out-of-memory path (module docstring): per question, option branches in chunks of CHUNKS until one fits."""
+        """The out-of-memory path (module docstring): option rows in chunks of CHUNKS until one fits."""
         p, m = self.predictor, self.predictor.model
         size = f"{len(questions)} questions, state {len(str(state))} chars"
         if m.input_format != "chat" or not m.hybrid or self.device != "cuda":
@@ -109,12 +110,8 @@ class KevEngine(Engine):
         enc = m.encode(p.tok, rec, max_state=p.context["max_state"], max_branch=p.context["max_branch"], strict=True)
         for chunk in CHUNKS:
             try:
-                logits = []
                 with long_row_kernels():
-                    for S, Sp, gs in enc["chat"]:
-                        zs = [m.head(None, torch.stack([h[-1] for h in branch_hidden(m.lm, [(S, Sp, gs[i:i + chunk])], m.pad_id, m.device)[0]]))
-                              for i in range(0, len(gs), chunk)]
-                        logits.append(torch.cat(zs).float().cpu())
+                    logits = [m.head(None, torch.stack([h[-1] for h in hs])).float().cpu() for hs in m.chat_hidden(enc["chat"], chunk=chunk)]
                 break
             except torch.cuda.OutOfMemoryError:
                 logits = None
