@@ -14,7 +14,8 @@ cd "$(dirname "$0")/../.."            # kev/
 KEV=$PWD PY=$PWD/.venv/bin/python
 DI_DIR=${DI_DIR:-$HOME/decision-index}
 DI_COMMIT=9eb2dbe2a358004c8782c66e40a83ac07b953fec   # kit edition 0.3, the commit the engine was written against
-export HF_HUB_DISABLE_XET=1 PYTHONPATH=$KEV/scripts/pref${PYTHONPATH:+:$PYTHONPATH}
+# PYTHONUNBUFFERED: the kit prints its events without flushing, so through tee / a log file they would sit in the buffer
+export HF_HUB_DISABLE_XET=1 PYTHONUNBUFFERED=1 PYTHONPATH=$KEV/scripts/pref${PYTHONPATH:+:$PYTHONPATH}
 
 cmd=${1:?setup | sample RUN | full RUN}
 if [ "$cmd" = setup ]; then
