@@ -220,16 +220,59 @@ Readings (seed 0 only):
   G ECE; flip rate ties on v7 (0 vs 0) and is lower on t4 (1 vs 3 of 36). Which ECE rule 3 uses is not fixed above;
   `scripts/pref/README.md` says to compare G numbers. This has to be decided before seeds 1-2 are read.
 
-Next (rule 2): seeds 1 and 2 of A and D, with seed 0's microbatch per arm (A 4 x 2, D 1 x 8 via `BATCH_FALLBACK=1`, since
-D's `--reg` is per pass). From `kev/`, one GPU per line (D ~9 h then A ~2.4 h; ~11.5 h total):
+### Seeds 1-2 (A and D, rule 2)
+
+Archive `pref-seeds12.tgz` (all wave-1 runs plus A/D seeds 1-2; its `COMMIT` file, written at pack time, reads `9bce974`,
+which is not on `origin`). Same microbatch per arm as seed 0 (A 4 x 2, D 1 x 8 via `BATCH_FALLBACK=1`); each
+`training_config.json` differs from its seed-0 run only in `seed` and `out`. Seed-0 numbers in the archive reproduce the
+wave-1 table. Commands (from `kev/`, one GPU per line):
 
 ```
 nohup bash -c 'BATCH_FALLBACK=1 scripts/pref/run_arm.sh D 1 0; scripts/pref/run_arm.sh A 1 0' > seeds-gpu0.log 2>&1 &
 nohup bash -c 'BATCH_FALLBACK=1 scripts/pref/run_arm.sh D 2 1; scripts/pref/run_arm.sh A 2 1' > seeds-gpu1.log 2>&1 &
-scripts/pref/pack_results.sh pref-seeds12.tgz   # after both finish
+scripts/pref/pack_results.sh pref-seeds12.tgz
 ```
 
-Open before reading seeds 1-2: whether rule 3's "lower ECE" means raw or G (temperature) ECE.
+| Arm | Seed | v7 top1 | t4 top1 | v7 ECE raw / G | t4 ECE raw / G | v7 NLL raw / G | T | Flip v7 / t4 (count) | v7 \|r\| p99 |
+|---|---|---|---|---|---|---|---|---|---|
+| A | 0 | 87.74 | 78.51 | .064 / .025 | .135 / .070 | .459 / .348 | 1.85 | 0 / 3 | 15.8 |
+| A | 1 | 87.26 | 77.90 | .068 / .030 | .136 / .086 | .460 / .356 | 1.77 | 1 / 3 | 13.2 |
+| A | 2 | 87.66 | 79.57 | .060 / .029 | .128 / .069 | .445 / .351 | 1.72 | 0 / 3 | 16.2 |
+| D | 0 | 87.42 | 79.73 | .053 / .036 | .124 / .088 | .430 / .374 | 1.47 | 0 / 1 | 7.1 |
+| D | 1 | 86.31 | 77.90 | .058 / .038 | .135 / .098 | .418 / .373 | 1.43 | 0 / 2 | 6.9 |
+| D | 2 | 86.55 | 78.81 | .059 / .030 | .130 / .102 | .430 / .375 | 1.43 | 3 / 1 | 7.4 |
+| **A mean** | | **87.55** (sd .25) | **78.66** (sd .85) | .064 / .028 | .133 / .075 | .455 / .352 | 1.78 | 1 / 9 of 180 / 108 | 15.0 |
+| **D mean** | | **86.76** (sd .58) | **78.81** (sd .91) | .057 / .035 | .130 / .096 | .426 / .374 | 1.44 | 3 / 4 of 180 / 108 | 7.1 |
+
+Paired D - A top1 (same questions; 95% CI from 5,000 bootstrap resamples of record groups, 880 on v7, 544 on t4;
+test-set sampling only):
+
+| Diff | v7 | t4 |
+|---|---|---|
+| 3-seed mean (D_s - A_s averaged over s) | **-0.79** [-1.54, -0.05] | +0.15 [-1.41, 1.75] |
+| seed 0 | -0.32 [-1.34, 0.73] | +1.22 [-1.25, 3.75] |
+| seed 1 | -0.95 [-2.15, 0.23] | 0.00 [-2.51, 2.58] |
+| seed 2 | -1.11 [-2.22, 0.00] | -0.76 [-2.99, 1.28] |
+| A seed 1 / 2 - A seed 0 | -0.47 / -0.08 | -0.61 / +1.07 |
+| D seed 1 / 2 - D seed 0 | -1.11 / -0.87 | -1.83 / -0.91 |
+
+Readings:
+
+- Rule 3 fails on top1: D's 3-seed v7 mean is 0.79 below A, past the -0.5 margin (t4 +0.15 passes). Rule 4 does not
+  apply (not >= 2 points worse on either set). Verdict by rule 5: **inconclusive**. The open raw-vs-G ECE question does
+  not change this: rule 3 needs both the top1 condition and a calibration/flip condition.
+- Seed 0 was D's best seed on both sets (v7 87.42, then 86.31 / 86.55): the seed-0 screen (-0.32) understated the gap.
+  The paired 3-seed v7 CI excludes 0 (test sampling only; seed variance is not in it).
+- Where v7 is lost (3-seed means): `choice` -1.33 (n 576) and `score` -1.11 (n 240); `noul` +0.07. By task, banking77
+  (77 options) gives -5.8 (89.6 -> 83.8, n 80), -0.37 of the -0.79 overall; amazon -2.5, dbpedia14 -1.7, the rest within 1.5.
+  [INFERENCE] the chat format's per-option rows with a 77-item option list in every prompt may be what costs banking77;
+  arm H (no option list) would test it.
+- Calibration, 3-seed means: D has lower raw softmax ECE (v7 .057 vs .064; t4 .130 vs .133) and raw NLL, but after G
+  A is better on both (v7 .028 vs .035; t4 .075 vs .096) and on NLL (v7 .352 vs .374). Same pattern as seed 0.
+- Reward scale: D's |r| p99 is 7.1 vs 15.0 and its fitted T 1.44 vs 1.78, stable across seeds (sub-claim C vs D holds).
+- Flips: v7 3 vs 1 of 180, t4 4 vs 9 of 108 (D vs A): too few to separate the arms.
+
+Open: whether rule 3's "lower ECE" means raw or G (temperature) ECE (moot for this verdict).
 Deferred: arm H (no option list in the chat prompt) on branch `idea/pointwise-chat-input`
 ([pointwise-chat-input.md](pointwise-chat-input.md) there).
 
@@ -251,4 +294,5 @@ Commands: `kev/scripts/pref/README.md` "Decision Index 0.3" (`dindex.sh check ru
 | D seed 0 | pending | |
 | kev-4b@v7-base | pending | comparator |
 
-Verdict: pending (seed-0 screen done; seeds 1-2 of A and D next)
+Verdict: **inconclusive** (rule 5). Best scalar-pref arm D: 3-seed top1 v7 -0.79 vs A (fails the -0.5 margin), t4 +0.15;
+not refuted. Decision Index check of D seed 0 still pending.
