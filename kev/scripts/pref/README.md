@@ -51,6 +51,11 @@ scripts/pref/dindex.sh full jaredpalmer/kev-4b@v7-base kev4b-v7base   # comparat
 ```
 `TEMP=1.47` scores D seed 0 at its G temperature instead of the checkpoint's own. Compare D with `v7-base`, not with the
 board's Kev-4B (r10 adds three training stages after the base recipe and T = 2.41).
+Chat checkpoints that run out of memory (many-option requests: CLINC150, API-Bank, ToolRet) are rerun per question with
+option branches in chunks (exact per option up to kernel rounding; the sample run's `raw_output.fallback_chunk` shows it,
+`full` runs `--compact` and keeps no raw output). A resume keeps `unsupported` rows; to retry them, drop them from
+`results.jsonl` first (backup kept):
+`.venv/bin/python -c "import json,shutil,sys; f=sys.argv[1]; shutil.copy(f,f+'.bak'); open(f,'w').writelines(l for l in open(f+'.bak') if l.endswith('\n') and json.loads(l)['status']!='unsupported')" runs/pref/D/seed0/dindex-0.3/results.jsonl`
 
 ## Env vars
 - `PYTORCH_ALLOC_CONF`: run_arm.sh defaults it to `expandable_segments:True` (allocator fragmentation on the chat-format arms; no effect on results).
