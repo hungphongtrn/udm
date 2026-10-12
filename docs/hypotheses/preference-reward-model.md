@@ -158,8 +158,67 @@ use the same `ROW_BUDGET` for every D/E run and seed.
 
 ## Results
 
-| Arm | Seed | Run dir | Dev top1 | Transfer top1 | ECE | Flip rate | Notes |
-|---|---|---|---|---|---|---|---|
-|  |  |  |  |  |  |  |  |
+### Wave 1, seed 0 (A-F)
 
-Verdict: pending
+Code at `0d697fd`; archive `pref-AE.tgz` (logs, metrics, eval outputs; no weights). Final checkpoints, no selection. One
+RTX 3090 per run. A/B trained 4 x accum 2; C-F 1 x accum 8 (`BATCH_FALLBACK=1`, no `ROW_BUDGET`); peak allocated 14.7 GB
+(A/B), 19.7 GB (C-F). Wall time per run: A/B 2.4 h, C/D/E 9.1 h, F 4.6 h (1 epoch).
+
+Clean rows: decision-v7 development n = 1264, transfer-v4 development n = 656. Raw = softmax over the run's logits; G =
+temperature T fit on that run's decision-v7 calibration split (n = 1148), applied to both dev sets. Flip rate:
+`report.json` permutation (60 questions on v7, 36 on t4: one flip = 1.7 / 2.8 points).
+
+| Arm | Seed | Run dir | v7 top1 | t4 top1 | v7 ECE raw / G | t4 ECE raw / G | v7 NLL raw / G | T | Flip v7 / t4 | v7 \|r\| p99 | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A | 0 | runs/pref/A/seed0 | 87.74 | 78.51 | .064 / .025 | .135 / .070 | .459 / .348 | 1.85 | 0 / .083 | 15.8 | baseline |
+| B | 0 | runs/pref/B/seed0 | 87.03 | 80.03 | .063 / .028 | .118 / .068 | .450 / .365 | 1.72 | .017 / .083 | 19.7 | |
+| C | 0 | runs/pref/C/seed0 | 86.55 | 78.66 | .060 / .029 | .143 / .095 | .447 / .380 | 1.53 | .017 / .056 | 10.6 | |
+| D | 0 | runs/pref/D/seed0 | 87.42 | 79.73 | .053 / .036 | .124 / .088 | .430 / .374 | 1.47 | 0 / .028 | 7.1 | best of B-E |
+| E | 0 | runs/pref/E/seed0 | 86.55 | 77.74 | .046 / .038 | .133 / .114 | .415 / .403 | 1.16 | 0 / .028 | 4.0 | |
+| F | 0 | runs/pref/F/seed0 | 86.16 | 77.74 | .092 / .045 | .172 / .096 | .697 / .403 | 2.75 | .017 / .028 | 18.2 | from C |
+
+Paired top1 differences (same questions; 95% CI from 5,000 bootstrap resamples of records; test-set sampling only, seed
+variance not included):
+
+| Diff | v7 | t4 |
+|---|---|---|
+| B - A | -0.71 [-1.72, 0.24] | +1.52 [-1.08, 4.19] |
+| C - A | -1.19 [-2.20, -0.08] | +0.15 [-2.19, 2.40] |
+| D - A | -0.32 [-1.31, 0.70] | +1.22 [-1.21, 3.74] |
+| E - A | -1.19 [-2.20, -0.23] | -0.76 [-2.69, 1.23] |
+| F - A | -1.58 [-2.77, -0.38] | -0.76 [-3.30, 1.76] |
+| D - C | +0.87 [0.00, 1.76] | +1.07 [-0.76, 3.07] |
+| E - C | 0.00 [-0.87, 0.88] | -0.91 [-2.87, 1.07] |
+| F - C | -0.40 [-1.44, 0.64] | -0.91 [-2.90, 1.03] |
+
+Sigmoid-reward ECE (vs one-hot labels; raw / after Platt fit on v7 calibration): v7 C .063 / .010, D .061 / .010,
+E .070 / .013, F .015 / .007; t4 C .159 / .054, D .091 / .063, E .077 / .066, F .107 / .067.
+
+Readings (seed 0 only):
+
+- Screen (rule 1): every B-E arm is within 2 top1 points of A on both dev sets: no arm is separated from A on one seed.
+  Rule 2 picks D (mean of the two dev top1s: D 83.57, B 83.53, A 83.12, C 82.61, E 82.15). D is also the best scalar arm,
+  the one rule 3 judges. B and D are tied for "best of B-E".
+- A vs B (loss): BT on the pointer head is within noise of CE (v7 -0.7, t4 +1.5). B's t4 lead comes from
+  `composition_held_conditional` (96.9 vs 68.8, n = 32) and `composition_held_and_or` (100 vs 90.6, n = 32).
+- B vs C (head + format): C is 0.5 below B on v7 and 1.4 below on t4; C - A on v7 is -1.19 with a CI excluding 0 (test
+  sampling only). C0 was not run, so head and format are not separated.
+- C vs D / E (reward scale): BSR and L2 shrink the reward scale (v7 |r| p99 10.6 -> 7.1 / 4.0; std 4.7 -> 3.4 / 2.0)
+  without costing top1 (D +0.9 / +1.1, E 0.0 / -0.9). Sub-claim holds on seed 0.
+- Calibration: raw softmax ECE is lowest for E / D on v7 (E .046, D .053 vs A .064), but after G (temperature) A is best on
+  both sets (v7 .025 vs D .036; t4 .070 vs D .088). Regularized arms start closer to calibrated (E's T = 1.16) and gain
+  less from a temperature; the temperature fit on v7 transfers worse to t4 for C-F than for A/B.
+- C vs F (BCE stage 2): F's sigmoid(r) is calibrated on v7 (ECE .063 -> .015; t4 .159 -> .107), top1 within noise of C
+  (-0.4 / -0.9), but its softmax gets sharper (label margin 7.4 -> 13.4, T = 2.75, raw NLL .447 -> .697). Platt scaling on C
+  (no retraining) reaches the same sigmoid ECE (v7 .010 vs F .007; t4 .054 vs F .067): G matches F on this metric.
+- G: a temperature fit on v7 calibration lowers softmax ECE for every arm on both sets: about half for A, B, C and F on v7,
+  less for the regularized arms (D .053 -> .036, E .046 -> .038).
+- Flip rates are 0-1 flips of 60 (v7) and 1-3 of 36 (t4): too few questions to separate arms.
+- Rule 3 preview for D (seed 0): top1 passes (v7 -0.32 >= -0.5; t4 +1.22). Calibration passes on raw ECE, fails on
+  G ECE; flip rate ties on v7 (0 vs 0) and is lower on t4 (1 vs 3 of 36). Which ECE rule 3 uses is not fixed above;
+  `scripts/pref/README.md` says to compare G numbers. This has to be decided before seeds 1-2 are read.
+
+Next (rule 2): seeds 1 and 2 of A and D, with seed 0's microbatch per arm (A 4 x 2, D 1 x 8 via `BATCH_FALLBACK=1`, since
+D's `--reg` is per pass).
+
+Verdict: pending (seed-0 screen done; seeds 1-2 of A and D next)
