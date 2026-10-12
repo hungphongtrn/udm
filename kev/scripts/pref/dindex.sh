@@ -8,10 +8,13 @@
 #                                                 benchmarks; same rows for every checkpoint), scored on the subset by
 #                                                 dindex_subset.py; out: RUN/dindex-0.3-sub$N; rows RUN/dindex-0.3 (a
 #                                                 `full` run, finished or stopped) already answered are copied, not rerun
-#   scripts/pref/dindex.sh check  D_RUN           the whole external check, in order: board Kev-4B r10 on the subset +
-#                                                 compare with its board row (does our engine reproduce the board?),
-#                                                 then D_RUN and kev-4b@v7-base on the subset + pair. Stop D_RUN's
-#                                                 `full` run first (one GPU); TEMP applies to D_RUN only. Rerun to resume.
+#   scripts/pref/dindex.sh check  D_RUN           the whole external check, published Kev 4B first: board Kev-4B r10 on the
+#                                                 subset + compare with its board row (does our engine reproduce the
+#                                                 board?), kev-4b@v7-base, then D_RUN; both retempered over TGRID and
+#                                                 paired at shipped T (v7-base's own vs D_T), raw (T=1) and best-on-subset
+#                                                 T. Stop D_RUN's `full` run first (one GPU). Rerun to resume.
+#                                                 env: D_T (D's fitted T, default 1.47 = seed 0's G), TGRID (T values),
+#                                                 TEMP (D_RUN's serving T only: match its full run so its rows are reused)
 # RUN: a checkpoint dir (runs/pref/D/seed0) or a Hub id (jaredpalmer/kev-4b@v7-base: the published base-recipe comparator).
 # NAME: output dir name override (needed for Hub ids): out goes to runs/dindex/NAME[-sample] instead.
 # env: DI_DIR (kit checkout, default ~/decision-index), TEMP (default: checkpoint's own; e.g. 1.47 = D seed0's G),
@@ -51,11 +54,21 @@ if [ "$cmd" = check ]; then
     echo "D's full run is still running; stop it first (its answered rows are reused): pkill -f 'decision_index pipeline .*run=$D'" >&2; exit 1
   fi
   R10=jaredpalmer/kev-4b@139fdd94f1b6a6ad80cc15e08fcb99cac885a101   # the board's "Kev 4B r10" (later commits: model card only)
+  D_T=${D_T:-1.47} TGRID=${TGRID:-0.5 0.7 1 1.2 1.47 1.7 2 2.41 3 4}
+  [[ " $TGRID " == *" $D_T "* ]] || TGRID="$TGRID $D_T"
+  SUBPY=("$PY" "$KEV/scripts/pref/dindex_subset.py") V7=$KEV/runs/dindex/kev4b-v7base-sub$N DS=$D/dindex-0.3-sub$N
   TEMP= "$SELF" subset "$R10" kev4b-r10
-  (cd "$DI_DIR" && "$PY" "$KEV/scripts/pref/dindex_subset.py" compare "$KEV/runs/dindex/kev4b-r10-sub$N" kev-4b-r10)
-  "$SELF" subset "$D"
+  (cd "$DI_DIR" && "${SUBPY[@]}" compare "$KEV/runs/dindex/kev4b-r10-sub$N" kev-4b-r10)
   TEMP= "$SELF" subset jaredpalmer/kev-4b@v7-base kev4b-v7base
-  (cd "$DI_DIR" && "$PY" "$KEV/scripts/pref/dindex_subset.py" pair "$KEV/runs/dindex/kev4b-v7base-sub$N" "$D/dindex-0.3-sub$N")
+  "$SELF" subset "$D"
+  cd "$DI_DIR"
+  # shellcheck disable=SC2086   # TGRID splits into one argument per T
+  "${SUBPY[@]}" retemper "subset-0.3-$N.jsonl.gz" "$V7" $TGRID
+  # shellcheck disable=SC2086
+  "${SUBPY[@]}" retemper "subset-0.3-$N.jsonl.gz" "$DS" $TGRID
+  echo "== shipped: v7-base at its own T vs D at T=$D_T"; "${SUBPY[@]}" pair "$V7" "$DS/T$D_T"
+  echo "== raw: both at T=1";                         "${SUBPY[@]}" pair "$V7/T1" "$DS/T1"
+  echo "== best T of the grid on the subset (optimistic)"; "${SUBPY[@]}" pair "$V7/best" "$DS/best"
   exit
 fi
 

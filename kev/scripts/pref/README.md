@@ -46,7 +46,7 @@ checkpoint through `dindex_engine.py:KevEngine` (kev.predictors.LocalPredictor, 
 hf auth login                                   # and accept https://huggingface.co/datasets/cais/hle terms first
 scripts/pref/dindex.sh setup                    # clone kit to ~/decision-index (DI_DIR), install into .venv, build suite (~7 GB dl, 17 GB disk)
 scripts/pref/dindex.sh sample runs/pref/D/seed0 # 100 requests: smoke + latency -> runs/pref/D/seed0/dindex-0.3-sample/
-scripts/pref/dindex.sh check runs/pref/D/seed0  # everything below in one go (r10 reproduction check, D, v7-base, pair); rerun to resume
+scripts/pref/dindex.sh check runs/pref/D/seed0  # everything below in one go: r10 vs board, v7-base, D, retemper, pairs; rerun to resume
 scripts/pref/dindex.sh subset runs/pref/D/seed0                                # shared subset -> runs/pref/D/seed0/dindex-0.3-sub15000/
 scripts/pref/dindex.sh subset jaredpalmer/kev-4b@v7-base kev4b-v7base           # comparator on the same rows -> runs/dindex/kev4b-v7base-sub15000/
 .venv/bin/python scripts/pref/dindex_subset.py pair runs/dindex/kev4b-v7base-sub15000 runs/pref/D/seed0/dindex-0.3-sub15000  # D - v7-base
@@ -68,8 +68,13 @@ publishes no per-request results):
 scripts/pref/dindex.sh subset jaredpalmer/kev-4b@139fdd94f1b6a6ad80cc15e08fcb99cac885a101 kev4b-r10
 .venv/bin/python scripts/pref/dindex_subset.py compare runs/dindex/kev4b-r10-sub15000 kev-4b-r10   # -> table + board-compare-kev-4b-r10.json
 ```
-`TEMP=1.47` scores D seed 0 at its G temperature instead of the checkpoint's own. Compare D with `v7-base`, not with the
-board's Kev-4B (r10 adds three training stages after the base recipe and T = 2.41).
+Temperature is a scoring choice, not a run choice: `dindex_subset.py retemper ROWS OUT T..` (from `$DI_DIR`) rescores a
+subset run at other temperatures from its saved probabilities (exact: T_run * log p = reward + const per question; the
+top choice never moves, so only probability-sensitive metrics change). D's fitted T comes from decision-v7, and nothing
+says it fits Decision Index, so `check` pairs D with v7-base three ways: shipped (v7-base's own T vs D at `D_T`, default
+1.47 = seed 0's G), raw (both T = 1), and the best T of `TGRID` for each, chosen on the subset itself (optimistic). If
+the winner changes across the three, temperature decides it, not the training loss. Compare D with `v7-base`, not with
+the board's Kev-4B (r10 adds three training stages after the base recipe and T = 2.41).
 Chat checkpoints that run out of memory (many-option requests: CLINC150, API-Bank, ToolRet) are rerun per question with
 option branches in chunks (exact per option up to kernel rounding; the sample run's `raw_output.fallback_chunk` shows it,
 `full` runs `--compact` and keeps no raw output). A resume keeps `unsupported` rows; to retry them, drop them from

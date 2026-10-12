@@ -13,13 +13,23 @@ Run from the kit checkout (dindex.sh does), with the kit installed:
   compare OUT ENGINE           a scored subset run (OUT) vs a board entrant's published 0.3 per-benchmark results
                                (ENGINE: its board id, e.g. kev-4b-r10); writes OUT/board-compare-ENGINE.json
   pair OUT_A OUT_B             two scored subset runs side by side: index, areas, benchmarks (B - A)
+  retemper ROWS OUT T..        rescore a subset run (OUT) at other temperatures, without rerunning the model: each
+                               T -> OUT/T<T>/ (results.jsonl + the kit's scores), OUT/best -> the best T's dir; prints
+                               the index per T
 
 compare is the reproduction check: run a board entrant's own checkpoint on the subset and see whether each benchmark
 lands within sampling error of its board score. Only per-benchmark results are published, not per-request ones, so the
 board score covers the whole benchmark and ours the subset's cases: SE = sqrt(p(1-p)/n) on our n, for the accuracy
 metrics only (F1, nDCG, Brier and quality have no simple SE; their difference is shown without z).
+
+retemper: within a question p_i = softmax(r_i / T_run), so T_run * log p_i = r_i + const and the answers saved in
+results.jsonl (full-precision probabilities, also under --compact) give softmax(T_run / T * log p_i) at any T exactly;
+noul answers are a two-option (false, true) softmax, retempered through their log-odds. The top choice never moves, so
+only probability-sensitive metrics change. T_run is the temperature the run served at (environment.json
+model_source.temperature). The best T over a grid is chosen on the scored rows themselves: an optimistic bound.
 """
 import json
+import math
 import pathlib
 import sys
 
@@ -29,6 +39,7 @@ from decision_index.suite.io import Suite, read_jsonl
 from decision_index.suite.sample import stratified_sample
 
 EDITION, SUITE_DIR = "0.3", "suite-0.3"
+TINY = 1e-300   # a probability that underflowed to 0 stays (near) 0 at any T
 
 
 class Restricted(Suite):
@@ -50,7 +61,6 @@ BOARD = "https://huggingface.co/spaces/multimodalart/jev-decision-index/resolve/
 
 
 def compare(out, engine):
-    import math
     import urllib.request
 
     board = json.loads(urllib.request.urlopen(BOARD).read())
@@ -91,6 +101,41 @@ def pair(a, b):
             print(f"{'    benchmark ' + n:<34} {x['raw']:>24.4f} {y['raw']:>24.4f} {y['raw'] - x['raw']:>+8.4f}")
 
 
+def retempered(answer, ratio):
+    """An answer served at T_run, at T = T_run / ratio."""
+    if answer["type"] == "noul":
+        p = min(max(answer["noul"], TINY), 1 - 1e-16)
+        return {**answer, "noul": 1 / (1 + math.exp(-ratio * math.log(p / (1 - p))))}
+    z = {k: ratio * math.log(max(p, TINY)) for k, p in answer["probabilities"].items()}
+    top = max(z.values())
+    e = {k: math.exp(v - top) for k, v in z.items()}
+    s = sum(e.values())
+    return {**answer, "probabilities": {k: v / s for k, v in e.items()}}   # the choice (argmax) is unchanged
+
+
+def retemper(rows, out, temps):
+    keep = run_ids(rows)
+    t_run = json.loads((out / "environment.json").read_text())["model_source"]["temperature"]
+    results = [json.loads(l) for l in (out / "results.jsonl").read_text(encoding="utf-8").splitlines()]
+    table = []
+    for t in temps:
+        ratio, d = t_run / t, out / f"T{t:g}"
+        d.mkdir(exist_ok=True)
+        with open(d / "results.jsonl", "w", encoding="utf-8") as f:
+            for r in results:
+                if r["status"] == "ok":
+                    r = {**r, "response": {**r["response"], "answers": {q: retempered(a, ratio) for q, a in r["response"]["answers"].items()}}}
+                f.write(json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n")
+        scores = score_run(Restricted(lambda e: e["run_id"] in keep), d / "results.jsonl", "kev", d)
+        table.append((t, scores["decision_index"]))
+        print(json.dumps({"T": t, "T_run": t_run, "index": scores["decision_index"]}))
+    best = max(table, key=lambda x: x[1])
+    link = out / "best"
+    link.unlink(missing_ok=True)
+    link.symlink_to(f"T{best[0]:g}")
+    print(json.dumps({"best_T": best[0], "best_index": best[1], "note": "best T of the grid, chosen on these same rows: optimistic"}))
+
+
 def main(cmd, *args):
     if cmd == "make":
         n, rows = int(args[0]), pathlib.Path(args[1])
@@ -126,6 +171,8 @@ def main(cmd, *args):
         compare(pathlib.Path(args[0]), args[1])
     elif cmd == "pair":
         pair(pathlib.Path(args[0]), pathlib.Path(args[1]))
+    elif cmd == "retemper":
+        retemper(args[0], pathlib.Path(args[1]), [float(t) for t in args[2:]])
     else:
         raise SystemExit(__doc__)
 
