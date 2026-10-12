@@ -16,6 +16,7 @@ GPU out of memory, a question type other than choice / noul) are refused as Unsu
 """
 import torch
 from decision_index.engines import Engine, Unsupported
+from pydantic import ValidationError
 
 from kev.checkpoint import LoadOptions
 from kev.model import ContextOverflow
@@ -65,8 +66,8 @@ class KevEngine(Engine):
             raise Unsupported(f"context: {exc}") from None
         except torch.cuda.OutOfMemoryError:
             torch.cuda.empty_cache()
-            raise Unsupported("CUDA out of memory") from None
-        except ValueError as exc:   # request validation (kev.api: e.g. more than 255 options)
+            raise Unsupported(f"CUDA out of memory ({len(questions)} questions, state {len(str(state))} chars)") from None
+        except ValidationError as exc:   # request outside the API's capacity (kev.api: e.g. more than 255 options); other errors surface as `error`
             raise Unsupported(f"request: {exc}") from None
         answers = {}
         for qid, q in questions.items():
