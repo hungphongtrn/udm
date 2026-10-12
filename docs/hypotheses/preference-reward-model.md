@@ -219,6 +219,16 @@ Readings (seed 0 only):
   `scripts/pref/README.md` says to compare G numbers. This has to be decided before seeds 1-2 are read.
 
 Next (rule 2): seeds 1 and 2 of A and D, with seed 0's microbatch per arm (A 4 x 2, D 1 x 8 via `BATCH_FALLBACK=1`, since
-D's `--reg` is per pass).
+D's `--reg` is per pass). From `kev/`, one GPU per line (D ~9 h then A ~2.4 h; ~11.5 h total):
+
+```
+nohup bash -c 'BATCH_FALLBACK=1 scripts/pref/run_arm.sh D 1 0; scripts/pref/run_arm.sh A 1 0' > seeds-gpu0.log 2>&1 &
+nohup bash -c 'BATCH_FALLBACK=1 scripts/pref/run_arm.sh D 2 1; scripts/pref/run_arm.sh A 2 1' > seeds-gpu1.log 2>&1 &
+scripts/pref/pack_results.sh pref-seeds12.tgz   # after both finish
+```
+
+Open before reading seeds 1-2: whether rule 3's "lower ECE" means raw or G (temperature) ECE.
+Deferred: arm H (no option list in the chat prompt) on branch `idea/pointwise-chat-input`
+([pointwise-chat-input.md](pointwise-chat-input.md) there).
 
 Verdict: pending (seed-0 screen done; seeds 1-2 of A and D next)
