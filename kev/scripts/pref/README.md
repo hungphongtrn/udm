@@ -56,6 +56,13 @@ benchmarks (excluded rows dropped, complete case groups, round-robin over benchm
 `dindex_subset.py score` runs the kit's scorers, chance levels and area weights with the suite restricted to those rows,
 so `index.json` is the index estimated on the subset: a paired D vs v7-base comparison, not a board number. Rows a
 checkpoint already answered in `RUN/dindex-0.3` (a `full` run) seed the subset run instead of being rerun.
+Reproduction check: the board's Kev-4B r10 is Hub `jaredpalmer/kev-4b` at `139fdd94` (weights unchanged in later
+commits), so run it on the same subset and compare it with its own board row (per-benchmark native scores; the board
+publishes no per-request results):
+```bash
+scripts/pref/dindex.sh subset jaredpalmer/kev-4b@139fdd94f1b6a6ad80cc15e08fcb99cac885a101 kev4b-r10
+.venv/bin/python scripts/pref/dindex_subset.py compare runs/dindex/kev4b-r10-sub15000 kev-4b-r10   # -> table + board-compare-kev-4b-r10.json
+```
 `TEMP=1.47` scores D seed 0 at its G temperature instead of the checkpoint's own. Compare D with `v7-base`, not with the
 board's Kev-4B (r10 adds three training stages after the base recipe and T = 2.41).
 Chat checkpoints that run out of memory (many-option requests: CLINC150, API-Bank, ToolRet) are rerun per question with
