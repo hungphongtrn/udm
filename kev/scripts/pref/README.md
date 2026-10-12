@@ -46,16 +46,16 @@ checkpoint through `dindex_engine.py:KevEngine` (kev.predictors.LocalPredictor, 
 hf auth login                                   # and accept https://huggingface.co/datasets/cais/hle terms first
 scripts/pref/dindex.sh setup                    # clone kit to ~/decision-index (DI_DIR), install into .venv, build suite (~7 GB dl, 17 GB disk)
 scripts/pref/dindex.sh sample runs/pref/D/seed0 # 100 requests: smoke + latency -> runs/pref/D/seed0/dindex-0.3-sample/
-scripts/pref/dindex.sh index runs/pref/D/seed0  # ~110k index rows, resumable -> runs/pref/D/seed0/dindex-0.3/{index,scores,benchmark-summary}.json
-scripts/pref/dindex.sh index jaredpalmer/kev-4b@v7-base kev4b-v7base  # comparator: published base-recipe checkpoint -> runs/dindex/kev4b-v7base/
+scripts/pref/dindex.sh subset runs/pref/D/seed0                                # shared subset -> runs/pref/D/seed0/dindex-0.3-sub15000/
+scripts/pref/dindex.sh subset jaredpalmer/kev-4b@v7-base kev4b-v7base           # comparator on the same rows -> runs/dindex/kev4b-v7base-sub15000/
+scripts/pref/dindex.sh full runs/pref/D/seed0                                  # whole suite (140,620 requests): board-comparable only
 ```
-`index` runs only what the index reads: the five areas' benchmarks minus the 442 excluded rows. It skips the
-display-only benchmarks (MMLU, RouterBench, ARC-E/C, SGD, SimpleBench: ~30k requests), so `index.json`'s index is the
-one `full` (all 140,620 requests) would give, but `scores.json` says `complete: false` and is not a board submission. Both
-commands write the same output dir, so `index` can resume a `full` run and `full` can top it up later.
-```bash
-scripts/pref/dindex.sh full runs/pref/D/seed0   # whole suite, needed only for a board submission
-```
+D is compared with `v7-base`, not with the board, so `subset` is the default: `N` (15000) rows of the index's 37
+benchmarks (excluded rows dropped, complete case groups, round-robin over benchmarks, so ~400 cases each; the kit's
+`suite.sample.stratified_sample`), the same file (`$DI_DIR/subset-0.3-$N.jsonl.gz`) for every checkpoint.
+`dindex_subset.py score` runs the kit's scorers, chance levels and area weights with the suite restricted to those rows,
+so `index.json` is the index estimated on the subset: a paired D vs v7-base comparison, not a board number. Rows a
+checkpoint already answered in `RUN/dindex-0.3` (a `full` run) seed the subset run instead of being rerun.
 `TEMP=1.47` scores D seed 0 at its G temperature instead of the checkpoint's own. Compare D with `v7-base`, not with the
 board's Kev-4B (r10 adds three training stages after the base recipe and T = 2.41).
 Chat checkpoints that run out of memory (many-option requests: CLINC150, API-Bank, ToolRet) are rerun per question with

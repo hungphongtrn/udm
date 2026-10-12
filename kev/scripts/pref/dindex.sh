@@ -4,9 +4,9 @@
 #   scripts/pref/dindex.sh setup                  clone the kit (pinned), install it into kev/.venv, build the suite (~7 GB dl, 17 GB disk)
 #   scripts/pref/dindex.sh sample RUN [NAME]      100-request stratified sample: smoke + latency; out: RUN/dindex-0.3-sample
 #   scripts/pref/dindex.sh full   RUN [NAME]      the whole suite (140,620 requests), scored at the end; out: RUN/dindex-0.3
-#   scripts/pref/dindex.sh index  RUN [NAME]      only the rows the index reads (~110k: no display-only benchmarks, no
-#                                                 excluded rows); same index.json value as `full`, scores.json `complete`
-#                                                 false (not a board submission); out: RUN/dindex-0.3 (shared with `full`)
+#   scripts/pref/dindex.sh subset RUN [NAME]      the shared comparison subset (N env, default 15000 rows of the index's
+#                                                 benchmarks; same rows for every checkpoint), scored on the subset by
+#                                                 dindex_subset.py; out: RUN/dindex-0.3-sub$N, seeded from RUN/dindex-0.3
 # RUN: a checkpoint dir (runs/pref/D/seed0) or a Hub id (jaredpalmer/kev-4b@v7-base: the published base-recipe comparator).
 # NAME: output dir name override (needed for Hub ids): out goes to runs/dindex/NAME[-sample] instead.
 # env: DI_DIR (kit checkout, default ~/decision-index), TEMP (default: checkpoint's own; e.g. 1.47 = D seed0's G),
@@ -20,7 +20,7 @@ DI_COMMIT=9eb2dbe2a358004c8782c66e40a83ac07b953fec   # kit edition 0.3, the comm
 # PYTHONUNBUFFERED: the kit prints its events without flushing, so through tee / a log file they would sit in the buffer
 export HF_HUB_DISABLE_XET=1 PYTHONUNBUFFERED=1 PYTHONPATH=$KEV/scripts/pref${PYTHONPATH:+:$PYTHONPATH}
 
-cmd=${1:?setup | sample RUN | full RUN | index RUN}
+cmd=${1:?setup | sample RUN | full RUN | subset RUN}
 if [ "$cmd" = setup ]; then
   [ -d "$DI_DIR/.git" ] || git clone https://github.com/apolinario/decision-index "$DI_DIR"
   git -C "$DI_DIR" fetch -q origin && git -C "$DI_DIR" checkout -q $DI_COMMIT
@@ -54,20 +54,13 @@ case $cmd in
   full)
     mkdir -p "$OUT"
     "$PY" -m decision_index pipeline "${opts[@]}" --compact --out "$OUT" 2>&1 | tee -a "$OUT/pipeline.log" ;;
-  index)
-    # the index reads only the five areas' benchmarks, on non-excluded rows (decision_index/scoring/index02.py);
-    # the display-only ones (not_in_index: MMLU, RouterBench, ARC-E/C, SGD, SimpleBench) are shown, never counted
-    [ -f index-rows-0.3.jsonl.gz ] || "$PY" - <<'EOF'
-import gzip, json, pathlib, decision_index
-from decision_index.suite.io import Suite, dumps
-spec = json.loads((pathlib.Path(decision_index.__file__).parent / "data/index-0.3.json").read_text())
-ids = {n for a in spec["areas"] for n in a["benchmarks"]}
-with gzip.open("index-rows-0.3.jsonl.gz.part", "wt", encoding="utf-8") as f:
-    n = sum(f.write(dumps(r) + "\n") > 0 for r in Suite("suite-0.3", "0.3").rows(apply_exclusions=True) if r["_evaluation"]["catalog_id"] in ids)
-pathlib.Path("index-rows-0.3.jsonl.gz.part").rename("index-rows-0.3.jsonl.gz")
-print(json.dumps({"index_rows": n, "benchmarks": len(ids)}))
-EOF
-    mkdir -p "$OUT"
-    "$PY" -m decision_index pipeline "${opts[@]}" --rows index-rows-0.3.jsonl.gz --compact --out "$OUT" 2>&1 | tee -a "$OUT/pipeline.log" ;;
+  subset)
+    N=${N:-15000}; ROWS=subset-0.3-$N.jsonl.gz; SUB=$OUT-sub$N
+    [ -f "$ROWS" ] || "$PY" "$KEV/scripts/pref/dindex_subset.py" make "$N" "$ROWS"
+    # rows this checkpoint already answered in a full run (same engine options assumed) are reused, not rerun
+    [ -f "$SUB/results.jsonl" ] || [ ! -f "$OUT/results.jsonl" ] || "$PY" "$KEV/scripts/pref/dindex_subset.py" seed "$ROWS" "$OUT/results.jsonl" "$SUB"
+    mkdir -p "$SUB"
+    "$PY" -m decision_index run "${opts[@]}" --rows "$ROWS" --compact --out "$SUB" 2>&1 | tee -a "$SUB/run.log"
+    "$PY" "$KEV/scripts/pref/dindex_subset.py" score "$ROWS" "$SUB/results.jsonl" "$SUB" 2>&1 | tee -a "$SUB/run.log" ;;
   *) echo "unknown command $cmd" >&2; exit 1 ;;
 esac
