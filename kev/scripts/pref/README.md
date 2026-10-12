@@ -31,6 +31,9 @@ RUN_F=0 scripts/pref/wave1.sh 0         # skip F (run later: scripts/pref/run_ar
 # G: eval_arm.sh already runs the calibration split and passes it to reward_report.py; to redo by hand for any arm:
 .venv/bin/python scripts/pref/reward_report.py runs/pref/C/seed0/eval/decision-v7-development --calib runs/pref/C/seed0/eval/decision-v7-calibration
 
+# Download results: logs, training metrics, eval outputs (no weights) into one tgz; prints each run's splits and G's n_calib
+scripts/pref/pack_results.sh pref-AE.tgz
+
 # FINAL VERDICT ONLY (locked test split, read once):
 TEST=1 scripts/pref/eval_arm.sh runs/pref/C/seed0     # each finished run; skips splits already done
 ```
