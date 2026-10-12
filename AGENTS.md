@@ -2,6 +2,12 @@
 
 Read the relevant doc before changing code or proposing experiments.
 
+## Machines
+
+This dev machine is for editing only: NEVER install packages (`uv sync`, `pip`, ...), create a venv, or run the repo's
+code or tests here, not even CPU smoke runs. Write the change and hand the exact command to the user, who runs it on the
+training machine and reports the output.
+
 ## Specs
 
 | Doc | What it covers |
