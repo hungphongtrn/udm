@@ -1,6 +1,7 @@
 """Preference-reward branch: kev.pref losses, the chat input format, the scalar head, and tiny CPU training runs.
 Run: .venv/bin/python -m pytest tests/test_pref.py -q   (on the training machine; nothing here needs weights or a network)
 """
+import inspect
 import json
 import sys
 
@@ -14,6 +15,19 @@ IM = ["<|im_start|>", "<|im_end|>"]
 CHATML = ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
           "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}")
 HEAD, TAIL = "<|im_start|>user\n", "<|im_end|>\n<|im_start|>assistant\n"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def reference_deltanet_kernels():
+    """The tiny models run on CPU, but on the training machine transformers binds its Gated DeltaNet hooks to the installed
+    causal-conv1d / fla packages, which need CUDA tensors. Run the hooks' PyTorch references instead (exact fp32: the parity
+    tests compare paths at 1e-4)."""
+    from transformers.models.qwen3_5 import modeling_qwen3_5 as m
+    names = ("causal_conv1d_fn", "causal_conv1d_update", "torch_chunk_gated_delta_rule", "torch_recurrent_gated_delta_rule")
+    with pytest.MonkeyPatch.context() as mp:
+        for name in names:   # functools.wraps chains __wrapped__ from the dispatching wrapper down to the reference
+            mp.setattr(m, name, inspect.unwrap(getattr(m, name)))
+        yield
 
 
 # --- losses (kev.pref) ---------------------------------------------------------------------------------------------
