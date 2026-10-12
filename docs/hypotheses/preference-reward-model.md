@@ -138,7 +138,10 @@ bash scripts/pref/eval_arm.sh runs/pref/C/seed0
 .venv/bin/python scripts/pref/reward_report.py ...  # see scripts/pref/README.md
 ```
 
-OOM fallback: `BATCH_FALLBACK=1` (batch 2 × accum 4, same effective batch 8; defined in `scripts/pref/arms.sh`).
+OOM fallback: `BATCH_FALLBACK=1` (batch 2 × accum 4 Kev, 1 × 8 chat; same effective batch 8; defined in `scripts/pref/arms.sh`).
+If a chat arm still runs out at batch 1, add `ROW_BUDGET=2048`: `--row_budget` runs a record's questions in several
+forward/backward passes (no record, question or token dropped; same gradient sum). D/E's `--reg` is computed per pass, so
+use the same `ROW_BUDGET` for every D/E run and seed.
 
 ## Risks / open
 

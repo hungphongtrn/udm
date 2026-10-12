@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Train one arm, then evaluate it. Usage: scripts/pref/run_arm.sh ARM SEED [GPU]   (env: FORCE=1, BATCH_FALLBACK=1, BCE_W, F_EPOCHS, TEST=1)
+# Train one arm, then evaluate it. Usage: scripts/pref/run_arm.sh ARM SEED [GPU]   (env: FORCE=1, BATCH_FALLBACK=1, ROW_BUDGET, BCE_W, F_EPOCHS, TEST=1)
 set -euo pipefail
 cd "$(dirname "$0")/../.."            # kev/
 source scripts/pref/arms.sh
