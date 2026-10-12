@@ -38,6 +38,20 @@ scripts/pref/pack_results.sh pref-AE.tgz
 TEST=1 scripts/pref/eval_arm.sh runs/pref/C/seed0     # each finished run; skips splits already done
 ```
 
+## Decision Index 0.3 (arm D; secondary, external)
+`dindex.sh` runs the public Decision Index kit (github.com/apolinario/decision-index, pinned commit in the script) on a
+checkpoint through `dindex_engine.py:KevEngine` (kev.predictors.LocalPredictor, serving context, bf16; over-context / OOM /
+>255-option requests are refused as unsupported = counted wrong, never truncated).
+```bash
+hf auth login                                   # and accept https://huggingface.co/datasets/cais/hle terms first
+scripts/pref/dindex.sh setup                    # clone kit to ~/decision-index (DI_DIR), install into .venv, build suite (~7 GB dl, 17 GB disk)
+scripts/pref/dindex.sh sample runs/pref/D/seed0 # 100 requests: smoke + latency -> runs/pref/D/seed0/dindex-0.3-sample/
+scripts/pref/dindex.sh full runs/pref/D/seed0   # ~140k requests, resumable -> runs/pref/D/seed0/dindex-0.3/{index,scores,benchmark-summary}.json
+scripts/pref/dindex.sh full jaredpalmer/kev-4b@v7-base kev4b-v7base   # comparator: published base-recipe checkpoint -> runs/dindex/kev4b-v7base/
+```
+`TEMP=1.47` scores D seed 0 at its G temperature instead of the checkpoint's own. Compare D with `v7-base`, not with the
+board's Kev-4B (r10 adds three training stages after the base recipe and T = 2.41).
+
 ## Env vars
 - `PYTORCH_ALLOC_CONF`: run_arm.sh defaults it to `expandable_segments:True` (allocator fragmentation on the chat-format arms; no effect on results).
 - Batch: every arm takes 8 records per optimizer step. A B C0 run 4 per forward x `--accum 2`; the chat-format arms C D E F run 2 x `--accum 4`, because at 4 they run out of memory on a 24 GB 3090. The gradient does not depend on the split (train.py divides each pass's loss by the step's record count), so A/B trained at 4 x 2 stay comparable: with LoRA dropout off, a CPU check gave the same step-1 gradient norm for 4 x 2, 2 x 4 and 1 x 8 on A B C and C+BCE. Two caveats: LoRA dropout (0.05) draws different masks for a different split, which is noise like a different seed, not a bias; and D/E's `--reg` is computed per forward pass, so their gradient changes with the split (+0.2% at step 1). Keep D/E's split the same across seeds.
