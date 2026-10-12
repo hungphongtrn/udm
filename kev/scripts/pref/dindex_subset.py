@@ -5,11 +5,14 @@ same requests and the kit's own scorers, chance levels and area weights, so thei
 Run from the kit checkout (dindex.sh does), with the kit installed:
   make N ROWS                  N rows of the index's benchmarks (the five areas), excluded rows dropped, complete case
                                groups, round-robin over benchmarks in hash order (kit's suite.sample.stratified_sample)
-  seed ROWS FROM_RESULTS OUT   copy rows already answered in FROM_RESULTS (a `full` / `index` run of the same checkpoint)
-                               into OUT/results.jsonl, so the subset run does not redo them; `error` rows are left out
+  seed ROWS FROM OUT OPT..     copy rows already answered (ok / abstained) in FROM (dir of a `full` run of the same
+                               checkpoint, possibly still running) into OUT/results.jsonl, skipping rows OUT already
+                               has, so the subset run does not redo them; refuses if FROM ran with other engine options
+                               than OPT (key=value, as given to --option)
   score ROWS RESULTS OUT       the kit's scoring (pipeline.score_run) with the suite restricted to ROWS
   compare OUT ENGINE           a scored subset run (OUT) vs a board entrant's published 0.3 per-benchmark results
                                (ENGINE: its board id, e.g. kev-4b-r10); writes OUT/board-compare-ENGINE.json
+  pair OUT_A OUT_B             two scored subset runs side by side: index, areas, benchmarks (B - A)
 
 compare is the reproduction check: run a board entrant's own checkpoint on the subset and see whether each benchmark
 lands within sampling error of its board score. Only per-benchmark results are published, not per-request ones, so the
@@ -76,6 +79,17 @@ def compare(out, engine):
     print(json.dumps({k: report[k] for k in ("board_public_index", "subset_index", "mean_diff", "z_beyond_3", "with_z")}))
 
 
+def pair(a, b):
+    ia, ib = (json.loads((o / "index.json").read_text()) for o in (a, b))
+    print(f"{'':<34} {a.parent.name + '/' + a.name:>24} {b.parent.name + '/' + b.name:>24} {'B - A':>8}")
+    print(f"{'index':<34} {ia['index']:>24.2f} {ib['index']:>24.2f} {ib['index'] - ia['index']:>+8.2f}")
+    for x, y in zip(ia["areas"], ib["areas"]):
+        print(f"{'  ' + x['label']:<34} {x['raw']:>24.4f} {y['raw']:>24.4f} {y['raw'] - x['raw']:>+8.4f}")
+    for n, x in ia["benchmarks"].items():
+        y = ib["benchmarks"][n]
+        if x["raw"] is not None and y["raw"] is not None:
+            print(f"{'    benchmark ' + n:<34} {x['raw']:>24.4f} {y['raw']:>24.4f} {y['raw'] - x['raw']:>+8.4f}")
+
 
 def main(cmd, *args):
     if cmd == "make":
@@ -87,18 +101,31 @@ def main(cmd, *args):
         part.rename(rows)
         print(json.dumps({**out, "path": str(rows)}))
     elif cmd == "seed":
-        keep, out = run_ids(args[0]), pathlib.Path(args[2])
+        from decision_index.cli import parse_value
+
+        keep, src, out = run_ids(args[0]), pathlib.Path(args[1]), pathlib.Path(args[2])
+        want = {k: parse_value(v) for k, v in (o.partition("=")[::2] for o in args[3:])}
+        ran = json.loads((src / "environment.json").read_text())["engine_options"]
+        if ran != want: raise SystemExit(f"{src} ran with engine options {ran}, not {want}: its rows cannot seed this run")
         out.mkdir(parents=True, exist_ok=True)
-        with open(args[1], encoding="utf-8") as src, open(out / "results.jsonl", "x", encoding="utf-8") as dst:
-            lines = [l for l in src if l.endswith("\n") and (r := json.loads(l))["run_id"] in keep and r["status"] != "error"]
-            dst.writelines(lines)
-        print(json.dumps({"seeded": len(lines), "subset_rows": len(keep)}))
+        dst = out / "results.jsonl"
+        have = set()
+        if dst.exists():   # an interrupted subset run: drop a torn last line (as the kit's resume does), keep the rest
+            text = dst.read_text(encoding="utf-8")
+            dst.write_text(text[: text.rfind("\n") + 1], encoding="utf-8")
+            have = {r["run_id"] for r in map(json.loads, text.splitlines()[: text.count("\n")]) if r["status"] != "error"}
+        with open(src / "results.jsonl", encoding="utf-8") as f, open(dst, "a", encoding="utf-8") as g:
+            lines = [l for l in f if l.endswith("\n") and (r := json.loads(l))["run_id"] in keep - have and r["status"] in ("ok", "abstained")]
+            g.writelines(lines)
+        print(json.dumps({"seeded": len(lines), "already_in_subset": len(have & keep), "subset_rows": len(keep)}))
     elif cmd == "score":
         keep = run_ids(args[0])
         scores = score_run(Restricted(lambda e: e["run_id"] in keep), args[1], "kev", args[2])
-        print(json.dumps({k: scores[k] for k in ("decision_index", "raw_index", "scores", "completed", "counts")}, indent=2))
+        print(json.dumps({k: scores[k] for k in ("decision_index", "scores", "completed", "counts")}, indent=2))
     elif cmd == "compare":
         compare(pathlib.Path(args[0]), args[1])
+    elif cmd == "pair":
+        pair(pathlib.Path(args[0]), pathlib.Path(args[1]))
     else:
         raise SystemExit(__doc__)
 

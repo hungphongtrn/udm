@@ -6,7 +6,12 @@
 #   scripts/pref/dindex.sh full   RUN [NAME]      the whole suite (140,620 requests), scored at the end; out: RUN/dindex-0.3
 #   scripts/pref/dindex.sh subset RUN [NAME]      the shared comparison subset (N env, default 15000 rows of the index's
 #                                                 benchmarks; same rows for every checkpoint), scored on the subset by
-#                                                 dindex_subset.py; out: RUN/dindex-0.3-sub$N, seeded from RUN/dindex-0.3
+#                                                 dindex_subset.py; out: RUN/dindex-0.3-sub$N; rows RUN/dindex-0.3 (a
+#                                                 `full` run, finished or stopped) already answered are copied, not rerun
+#   scripts/pref/dindex.sh check  D_RUN           the whole external check, in order: board Kev-4B r10 on the subset +
+#                                                 compare with its board row (does our engine reproduce the board?),
+#                                                 then D_RUN and kev-4b@v7-base on the subset + pair. Stop D_RUN's
+#                                                 `full` run first (one GPU); TEMP applies to D_RUN only. Rerun to resume.
 # RUN: a checkpoint dir (runs/pref/D/seed0) or a Hub id (jaredpalmer/kev-4b@v7-base: the published base-recipe comparator).
 # NAME: output dir name override (needed for Hub ids): out goes to runs/dindex/NAME[-sample] instead.
 # env: DI_DIR (kit checkout, default ~/decision-index), TEMP (default: checkpoint's own; e.g. 1.47 = D seed0's G),
@@ -20,7 +25,7 @@ DI_COMMIT=9eb2dbe2a358004c8782c66e40a83ac07b953fec   # kit edition 0.3, the comm
 # PYTHONUNBUFFERED: the kit prints its events without flushing, so through tee / a log file they would sit in the buffer
 export HF_HUB_DISABLE_XET=1 PYTHONUNBUFFERED=1 PYTHONPATH=$KEV/scripts/pref${PYTHONPATH:+:$PYTHONPATH}
 
-cmd=${1:?setup | sample RUN | full RUN | subset RUN}
+cmd=${1:?setup | sample RUN | full RUN | subset RUN | check D_RUN}
 if [ "$cmd" = setup ]; then
   [ -d "$DI_DIR/.git" ] || git clone https://github.com/apolinario/decision-index "$DI_DIR"
   git -C "$DI_DIR" fetch -q origin && git -C "$DI_DIR" checkout -q $DI_COMMIT
@@ -38,13 +43,31 @@ if [ "$cmd" = setup ]; then
   exit
 fi
 
+if [ "$cmd" = check ]; then
+  SELF=$KEV/scripts/pref/dindex.sh D=${2:?D checkpoint dir}
+  export N=${N:-15000}
+  D=$(cd "$D" && pwd)
+  if pgrep -f "decision_index pipeline .*run=$D( |$)" >/dev/null; then
+    echo "D's full run is still running; stop it first (its answered rows are reused): pkill -f 'decision_index pipeline .*run=$D'" >&2; exit 1
+  fi
+  R10=jaredpalmer/kev-4b@139fdd94f1b6a6ad80cc15e08fcb99cac885a101   # the board's "Kev 4B r10" (later commits: model card only)
+  TEMP= "$SELF" subset "$R10" kev4b-r10
+  (cd "$DI_DIR" && "$PY" "$KEV/scripts/pref/dindex_subset.py" compare "$KEV/runs/dindex/kev4b-r10-sub$N" kev-4b-r10)
+  "$SELF" subset "$D"
+  TEMP= "$SELF" subset jaredpalmer/kev-4b@v7-base kev4b-v7base
+  (cd "$DI_DIR" && "$PY" "$KEV/scripts/pref/dindex_subset.py" pair "$KEV/runs/dindex/kev4b-v7base-sub$N" "$D/dindex-0.3-sub$N")
+  exit
+fi
+
 RUN=${2:?checkpoint dir or Hub id}
 [ -d "$RUN" ] && RUN=$(cd "$RUN" && pwd)   # the kit runs from DI_DIR, so a local checkpoint needs an absolute path
 if [ -n "${3:-}" ]; then OUT=$KEV/runs/dindex/$3
 elif [ -d "$RUN" ]; then OUT=$RUN/dindex-0.3
 else echo "a Hub id needs NAME (3rd arg)" >&2; exit 1; fi
-opts=(--engine dindex_engine:KevEngine --option "run=$RUN" --option "dtype=${DTYPE:-bf16}")
-[ -n "${TEMP:-}" ] && opts+=(--option "temperature=$TEMP")
+optv=("run=$RUN" "dtype=${DTYPE:-bf16}")
+[ -n "${TEMP:-}" ] && optv+=("temperature=$TEMP")
+opts=(--engine dindex_engine:KevEngine)
+for o in "${optv[@]}"; do opts+=(--option "$o"); done
 cd "$DI_DIR"
 case $cmd in
   sample)
@@ -57,8 +80,8 @@ case $cmd in
   subset)
     N=${N:-15000}; ROWS=subset-0.3-$N.jsonl.gz; SUB=$OUT-sub$N
     [ -f "$ROWS" ] || "$PY" "$KEV/scripts/pref/dindex_subset.py" make "$N" "$ROWS"
-    # rows this checkpoint already answered in a full run (same engine options assumed) are reused, not rerun
-    [ -f "$SUB/results.jsonl" ] || [ ! -f "$OUT/results.jsonl" ] || "$PY" "$KEV/scripts/pref/dindex_subset.py" seed "$ROWS" "$OUT/results.jsonl" "$SUB"
+    # rows this checkpoint already answered in a full run with the same options are reused, not rerun
+    [ ! -f "$OUT/environment.json" ] || "$PY" "$KEV/scripts/pref/dindex_subset.py" seed "$ROWS" "$OUT" "$SUB" "${optv[@]}"
     mkdir -p "$SUB"
     "$PY" -m decision_index run "${opts[@]}" --rows "$ROWS" --compact --out "$SUB" 2>&1 | tee -a "$SUB/run.log"
     "$PY" "$KEV/scripts/pref/dindex_subset.py" score "$ROWS" "$SUB/results.jsonl" "$SUB" 2>&1 | tee -a "$SUB/run.log" ;;

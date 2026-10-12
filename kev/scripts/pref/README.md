@@ -46,8 +46,10 @@ checkpoint through `dindex_engine.py:KevEngine` (kev.predictors.LocalPredictor, 
 hf auth login                                   # and accept https://huggingface.co/datasets/cais/hle terms first
 scripts/pref/dindex.sh setup                    # clone kit to ~/decision-index (DI_DIR), install into .venv, build suite (~7 GB dl, 17 GB disk)
 scripts/pref/dindex.sh sample runs/pref/D/seed0 # 100 requests: smoke + latency -> runs/pref/D/seed0/dindex-0.3-sample/
+scripts/pref/dindex.sh check runs/pref/D/seed0  # everything below in one go (r10 reproduction check, D, v7-base, pair); rerun to resume
 scripts/pref/dindex.sh subset runs/pref/D/seed0                                # shared subset -> runs/pref/D/seed0/dindex-0.3-sub15000/
 scripts/pref/dindex.sh subset jaredpalmer/kev-4b@v7-base kev4b-v7base           # comparator on the same rows -> runs/dindex/kev4b-v7base-sub15000/
+.venv/bin/python scripts/pref/dindex_subset.py pair runs/dindex/kev4b-v7base-sub15000 runs/pref/D/seed0/dindex-0.3-sub15000  # D - v7-base
 scripts/pref/dindex.sh full runs/pref/D/seed0                                  # whole suite (140,620 requests): board-comparable only
 ```
 D is compared with `v7-base`, not with the board, so `subset` is the default: `N` (15000) rows of the index's 37
@@ -55,7 +57,10 @@ benchmarks (excluded rows dropped, complete case groups, round-robin over benchm
 `suite.sample.stratified_sample`), the same file (`$DI_DIR/subset-0.3-$N.jsonl.gz`) for every checkpoint.
 `dindex_subset.py score` runs the kit's scorers, chance levels and area weights with the suite restricted to those rows,
 so `index.json` is the index estimated on the subset: a paired D vs v7-base comparison, not a board number. Rows a
-checkpoint already answered in `RUN/dindex-0.3` (a `full` run) seed the subset run instead of being rerun.
+checkpoint already answered (ok / abstained) in `RUN/dindex-0.3` (a `full` run, finished or stopped) are copied into the
+subset run on every `subset` call instead of being rerun, if the full run used the same engine options (else it refuses:
+e.g. a different `TEMP`). The subset holds ~15,000 of the suite's 140,620 rows (all of the small benchmarks, ~400 cases
+of each large one), so only the full run's rows that fall in it are reused.
 Reproduction check: the board's Kev-4B r10 is Hub `jaredpalmer/kev-4b` at `139fdd94` (weights unchanged in later
 commits), so run it on the same subset and compare it with its own board row (per-benchmark native scores; the board
 publishes no per-request results):

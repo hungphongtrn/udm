@@ -238,11 +238,14 @@ through `kev/scripts/pref/dindex_engine.py` (LocalPredictor, 64k serving context
 unsupported = wrong, no truncation), on the same 15,000-row stratified subset of Decision Index 0.3's index benchmarks
 (kit `apolinario/decision-index@9eb2dbe`, ~400 cases per benchmark), scored by the kit with the suite restricted to the
 subset (`dindex_subset.py`). Paired estimate of the public index, not a board number; the board's Kev-4B (r10) is not
-comparable either (dates, documents-v1 and hard/devtools skill stages after the base recipe, T = 2.41).
-Commands: `kev/scripts/pref/README.md` "Decision Index 0.3".
+a comparator either (dates, documents-v1 and hard/devtools skill stages after the base recipe, T = 2.41), but it is the
+reproduction check: its board checkpoint (`jaredpalmer/kev-4b@139fdd94`) runs on the same subset through our engine and
+each benchmark is compared with its board score (`dindex_subset.py compare`, z on accuracy metrics).
+Commands: `kev/scripts/pref/README.md` "Decision Index 0.3" (`dindex.sh check runs/pref/D/seed0` runs all three).
 
 | Model | DI 0.3 public index | Notes |
 |---|---|---|
+| kev-4b r10 (board 37.95) | pending | reproduction check: per-benchmark z vs board |
 | D seed 0 | pending | |
 | kev-4b@v7-base | pending | comparator |
 
