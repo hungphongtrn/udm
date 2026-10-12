@@ -234,7 +234,7 @@ Deferred: arm H (no option list in the chat prompt) on branch `idea/pointwise-ch
 ### Decision Index 0.3 (arm D, secondary)
 
 External check, not part of the decision rule: D seed 0 on the public Decision Index 0.3 (kit
-`apolinario/decision-index@9eb2dbe`, 37 benchmarks, ~140k requests; the board's "Full score" adds private parts we cannot
+`apolinario/decision-index@9eb2dbe`, 109,759 scoreable + 30,419 added requests; the board's "Full score" adds private parts we cannot
 run). Engine `kev/scripts/pref/dindex_engine.py` (LocalPredictor, 64k serving context, bf16, checkpoint temperature;
 unsupported = wrong, no truncation). Comparator: `jaredpalmer/kev-4b@v7-base` through the same engine. The board's Kev-4B
 (r10) is not comparable: it adds dates, documents-v1 and hard/devtools skill stages after the base recipe, and T = 2.41.
