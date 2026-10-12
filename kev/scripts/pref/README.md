@@ -46,8 +46,15 @@ checkpoint through `dindex_engine.py:KevEngine` (kev.predictors.LocalPredictor, 
 hf auth login                                   # and accept https://huggingface.co/datasets/cais/hle terms first
 scripts/pref/dindex.sh setup                    # clone kit to ~/decision-index (DI_DIR), install into .venv, build suite (~7 GB dl, 17 GB disk)
 scripts/pref/dindex.sh sample runs/pref/D/seed0 # 100 requests: smoke + latency -> runs/pref/D/seed0/dindex-0.3-sample/
-scripts/pref/dindex.sh full runs/pref/D/seed0   # ~140k requests, resumable -> runs/pref/D/seed0/dindex-0.3/{index,scores,benchmark-summary}.json
-scripts/pref/dindex.sh full jaredpalmer/kev-4b@v7-base kev4b-v7base   # comparator: published base-recipe checkpoint -> runs/dindex/kev4b-v7base/
+scripts/pref/dindex.sh index runs/pref/D/seed0  # ~110k index rows, resumable -> runs/pref/D/seed0/dindex-0.3/{index,scores,benchmark-summary}.json
+scripts/pref/dindex.sh index jaredpalmer/kev-4b@v7-base kev4b-v7base  # comparator: published base-recipe checkpoint -> runs/dindex/kev4b-v7base/
+```
+`index` runs only what the index reads: the five areas' benchmarks minus the 442 excluded rows. It skips the
+display-only benchmarks (MMLU, RouterBench, ARC-E/C, SGD, SimpleBench: ~30k requests), so `index.json`'s index is the
+one `full` (all 140,620 requests) would give, but `scores.json` says `complete: false` and is not a board submission. Both
+commands write the same output dir, so `index` can resume a `full` run and `full` can top it up later.
+```bash
+scripts/pref/dindex.sh full runs/pref/D/seed0   # whole suite, needed only for a board submission
 ```
 `TEMP=1.47` scores D seed 0 at its G temperature instead of the checkpoint's own. Compare D with `v7-base`, not with the
 board's Kev-4B (r10 adds three training stages after the base recipe and T = 2.41).
