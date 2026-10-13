@@ -441,14 +441,15 @@ def test_ties_score_zeroes_unsupported_rows_but_keeps_denominators():
     def row(kind, pid, num_correct, scores, unsupported=False):
         return {"id": f"{kind}:{pid}", "num_correct": num_correct, "scores": scores, "unsupported": [unsupported] * len(scores)}
     # ref:0 -> correct [3], wrong [2,1,0]: accurate, margin 3-2 = 1      tied:0 -> correct [3,2], wrong [1,0]: margin 2-1 = 1, diff 1
-    # ref:1 -> correct [0,1], wrong [2,3]: not accurate, margin 0-2 = -2   tied:1 -> correct [4,3], wrong [0,0]: margin 3-0 = 3, diff 1
+    # ref:1 -> correct [0,1], wrong [2,3]: not accurate, margin 0-3 = -3   tied:1 -> correct [4,3], wrong [0,0]: margin 3-0 = 3, diff 1
+    # margin terms: pair 0 tanh(min(1, 1) / 1 - 1) = tanh(0), pair 1 tanh(min(-3, 3) / 1 - 1) = tanh(-4)
     base = [row("ref", 0, 1, [3, 2, 1, 0]), row("tied", 0, 2, [3, 2, 1, 0]),
             row("ref", 1, 2, [0, 1, 2, 3]), row("tied", 1, 2, [4, 3, 0, 0])]
     clean, details = rb.ties_score(base)
-    assert clean == pytest.approx(0.30 * 1.0 + 0.30 * 0.5 + 0.20 * 0.5 + 0.01 * (math.tanh(0.0) + math.tanh(-3.0)) / 2)
+    assert clean == pytest.approx(0.30 * 1.0 + 0.30 * 0.5 + 0.20 * 0.5 + 0.01 * (math.tanh(0.0) + math.tanh(-4.0)) / 2)
     assert details["tied_accuracy"] == 1.0 and details["ref_accuracy"] == 0.5      # tied:0, tied:1 accurate; ref:0 only
     assert details["correctness_preferred"] == 0.5 and details["correctness_preferred_hard"] == 0.0
-    assert details["correctness_margin_score"] == pytest.approx((math.tanh(0.0) + math.tanh(-3.0)) / 2)
+    assert details["correctness_margin_score"] == pytest.approx((math.tanh(0.0) + math.tanh(-4.0)) / 2)
     # one unsupported ref row: pair 1 scores nothing (preferred, hard, margin), both pairs stay in the denominators
     zeroed, zdet = rb.ties_score([base[0], base[1], row("ref", 1, 2, [0, 1, 2, 3], unsupported=True), base[3]])
     assert zdet == {"prompts": 4, "pairs": 2, "unsupported_rows": 1, "tied_accuracy": 1.0, "ref_accuracy": 0.5,
@@ -460,5 +461,5 @@ def test_ties_score_zeroes_unsupported_rows_but_keeps_denominators():
     assert (bdet["prompts"], bdet["pairs"], bdet["unsupported_rows"]) == (4, 2, 2)
     assert (bdet["tied_accuracy"], bdet["ref_accuracy"]) == (0.5, 0.0)
     assert (bdet["correctness_preferred"], bdet["correctness_preferred_hard"]) == (0.5, 0.0)
-    assert bdet["correctness_margin_score"] == pytest.approx((0.0 + math.tanh(-3.0)) / 2)
-    assert both == pytest.approx(0.30 * 0.5 + 0.20 * 0.5 + 0.01 * math.tanh(-3.0) / 2)
+    assert bdet["correctness_margin_score"] == pytest.approx((0.0 + math.tanh(-4.0)) / 2)
+    assert both == pytest.approx(0.30 * 0.5 + 0.20 * 0.5 + 0.01 * math.tanh(-4.0) / 2)
