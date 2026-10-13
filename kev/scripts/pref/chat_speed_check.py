@@ -182,6 +182,14 @@ def main():
           f"rows {cuda_graphs.GRAPH_ROWS}, row tokens {cuda_graphs.GRAPH_TOKENS}) ...", flush=True)
     engine = KevEngine(args.run, dtype=args.dtype, device=args.device, graphs=args.device == "cuda")
     predictor = engine.predictor
+    if args.dtype == "fp32" and predictor.model.dtype != "float32" and predictor.model.graphs is not None:
+        # a checkpoint trained on a bf16 backbone (meta.weights_dtype bf16, the 3090 chat arms) loads in bf16 whatever dtype
+        # is asked (kev.checkpoint._adapted_torch): upcast it here -- the same weights computed in fp32, the adapter stays
+        # the fp32 one -- and rebuild the graph buffers, which take the backbone's dtype
+        predictor.model.graphs = None
+        predictor.model.lm.float()
+        torch.cuda.empty_cache()
+        predictor.model.graphs = cuda_graphs.CudaGraphs(predictor.model.lm, predictor.model.pad_id)
     model, graphs = predictor.model, predictor.model.graphs
     if graphs is None:
         raise SystemExit(f"{args.run} got no graphed chat passes: they need the chat input format on a hybrid backbone on CUDA")
