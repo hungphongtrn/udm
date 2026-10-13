@@ -121,11 +121,18 @@ def training_requests(a, tok, manifest, holdout):
     if not manifest or a.data:
         # frozen suites are filtered to the training context when they are frozen (kev.suite.select_unique); records built
         # on the fly here are not, so apply the same rule instead of letting the strict encoder abort the run (issue #5)
-        kept = [r for r in reqs if fits(materialize(r), tok, **training_context(a.max_state))]
+        ctx = training_context(a.max_state)
+        if a.data:
+            # the user's file was not admitted with kev.suite.ADMISSION_BRANCH_HEADROOM reserved: kev.data.augment adds an
+            # option to a Choice question at training time (0.12 + 0.15 for a two-option question), and a record at the
+            # branch limit would not survive that. A --replay sample is a frozen suite partition and already carries the
+            # reserve, so reserving it again drops nothing.
+            from .suite import ADMISSION_BRANCH_HEADROOM   # here, not at the top: kev.train needs one constant of the suite builder
+            ctx = {**ctx, "max_branch": ctx["max_branch"] - ADMISSION_BRANCH_HEADROOM}
+        kept = [r for r in reqs if fits(materialize(r), tok, **ctx)]
         if len(kept) < len(reqs):
-            c = training_context(a.max_state)
             print(f"dropped {len(reqs) - len(kept)} of {len(reqs)} records that exceed the training context "
-                  f"({c['max_state']} state / {c['max_branch']} branch / {c['max_packed']} packed tokens)", flush=True)
+                  f"({ctx['max_state']} state / {ctx['max_branch']} branch / {ctx['max_packed']} packed tokens)", flush=True)
         reqs = kept
     if not reqs:
         raise ValueError("empty training set")

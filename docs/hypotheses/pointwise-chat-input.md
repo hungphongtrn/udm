@@ -104,6 +104,8 @@ one label per pair, the aggregate.
   distractor, p 0.15) that the converted pair does not carry, and the augmented record must still encode. The row check
   the arm's own format adds comes on top (`kev.model.encode` on the chat layout: the row must fit
   `max_branch + CHAT_ROW_SLACK`, with the same headroom), so nothing in the file can make `kev.train`'s encode raise.
+  `kev.train`'s own re-filter of `--data` records reserves the same headroom, so the rule holds for any data file, not
+  only this converter's output.
   From the character lengths (context p50 1,022 chars, responses p50 1,510 chars; the Kev branch holds the instruction
   and BOTH responses) ~13,000 of the 36,299 non-tie pairs fit [INFERENCE]; the manifest reports the real number and the
   per-limit drop counts.

@@ -55,7 +55,8 @@ format check accepts it (`kev.model.CHAT_FORMATS`). Recipe, rule and thresholds:
 ```bash
 # HP's data (once, CPU): HelpSteer3 preference pairs -> Kev --data records + a manifest (dataset revision, admission
 # counts and drop reasons, sha256). Admission is the trainer's own rule with kev.suite.ADMISSION_BRANCH_HEADROOM reserved
-# on the branch (a training augment can add an option), plus the chat row limit of the format the arm trains.
+# on the branch (a training augment can add an option), plus the chat row limit of the format the arm trains. kev.train's
+# own --data re-filter reserves the headroom too, so the rule holds for any data file.
 # Exact-match decontamination against RewardBench 2 prompts.
 .venv/bin/python scripts/pref/convert_pref_data.py --out runs/pref/data/pref-helpsteer3.jsonl
 
