@@ -5,7 +5,7 @@ cd "$(dirname "$0")/../.."            # kev/
 source scripts/pref/arms.sh
 ARM=${1:?arm}; SEED=${2:?seed}; GPU=${3:-0}
 export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}   # physical indices = nvidia-smi order
-# chat-format arms (C D E F) run K option rows of varying length per question; the caching allocator fragments on them
+# chat-format arms (C D E F H HP) run K option rows of varying length per question; the caching allocator fragments on them
 # (arm C seed 0 ran out with 4 GiB reserved but unallocated). Allocator only: no effect on the numbers, so arms stay comparable.
 export PYTORCH_ALLOC_CONF=${PYTORCH_ALLOC_CONF:-expandable_segments:True}
 # GPU is an index into the caller's CUDA_VISIBLE_DEVICES when that is set (e.g. two exported GPU UUIDs: 0 = the first),

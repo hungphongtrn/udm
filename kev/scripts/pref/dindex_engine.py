@@ -8,9 +8,10 @@ Options (--option key=value):
     temperature  None = the checkpoint's own temperature; a number overrides it (1.0 = raw logits)
     dtype        bf16 (default) | fp32. fp32 is kev's exact path but leaves no room for long states on a 24 GB card.
     device       cuda (default) | cpu | mps
-    graphs       None = CUDA graphs on a CUDA device for a chat-format checkpoint (the serving default: kev.cuda_graphs
-                 replays the chat format's passes per record instead of one eager pass per question plus one per row
-                 chunk); 0 = the eager path (DecisionModel.chat_hidden), every chat number reported before the graphs. The
+    graphs       None = CUDA graphs on a CUDA device for a chat-format checkpoint (chat or chat_pointwise; the serving
+                 default: kev.cuda_graphs replays the chat format's passes per record instead of one eager pass per
+                 question plus one per row chunk); 0 = the eager path (DecisionModel.chat_hidden), every chat number
+                 reported before the graphs. The
                  Kev format's path in this engine runs the row form, which never touches the graphs, so it is left without
                  them (their buffers are ~3 GB on a 4B hybrid).
 
@@ -134,7 +135,7 @@ class KevEngine(Engine):
         """The out-of-memory path (module docstring): option rows in chunks of CHUNKS until one fits."""
         p, m = self.predictor, self.predictor.model
         size = f"{len(questions)} questions, state {len(str(state))} chars"
-        if m.input_format != "chat" or not m.hybrid or self.device != "cuda":
+        if m.input_format not in CHAT_FORMATS or not m.hybrid or self.device != "cuda":
             raise Unsupported(f"CUDA out of memory ({size})")
         rec = materialize(record)
         enc = m.encode(p.tok, rec, max_state=p.context["max_state"], max_branch=p.context["max_branch"], strict=True)

@@ -28,9 +28,10 @@ tok = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-4B-Base", revision="1001bb4d82
 head, tail = chat_template_parts(tok)   # raises if the Base tokenizer has no chat template
 print("chat template head:", repr(head), "tail:", repr(tail), "sha256:", chat_template_digest(tok))
 rec = materialize(load_records("evals/v7/decision-v7/development.jsonl")[0])
-text, n = chat_prompt(tok, rec, q=0, k=0)
-print(f"--- rendered chat prompt, decision-v7 development record 0, question 0, option 0 ({n} tokens; reward read at the last token) ---")
-print(text)
+for fmt, opts in (("chat", True), ("chat_pointwise", False)):
+    text, n = chat_prompt(tok, rec, q=0, k=0, options=opts)
+    print(f"--- rendered {fmt} prompt, decision-v7 development record 0, question 0, option 0 ({n} tokens; reward read at the last token) ---")
+    print(text)
 print("--- end ---")
 PY
 echo "setup done (extra: $TORCH_EXTRA). If kev/uv.lock was just generated, commit it from this machine: git add kev/uv.lock && git commit -m 'kev: lock py3.12 / torch 2.10'"

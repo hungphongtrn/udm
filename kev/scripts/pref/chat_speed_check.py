@@ -101,7 +101,7 @@ def line(label, seconds, total, rows=SUBSET_ROWS):
 def main():
     ap = argparse.ArgumentParser(description="The eager chat path against the graphed one, on the same rows.",
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("run", help="checkpoint dir or Hub id[@rev]: a chat-format checkpoint (arms C-F)")
+    ap.add_argument("run", help="checkpoint dir or Hub id[@rev]: a chat-format checkpoint (arms C D E F H HP)")
     ap.add_argument("--rows", help=f"the kit's rows file (default $DI_DIR/{SUBSET})")
     ap.add_argument("--suite", help="a kev suite directory to score instead (evals/decision-v7)")
     ap.add_argument("--split", default="development", help="the suite split to score (default development)")

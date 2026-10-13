@@ -21,7 +21,7 @@ from .checkpoint import Checkpoint, Meta, write_meta
 from .device import DEVICE_HELP, DEVICES, allocated_bytes, empty_cache, select, sync
 from .data import EVAL_ONLY, build, augment, load_records, materialize, none_pair, source_seed
 from .suite import SYNTHETIC_SOURCES, digest, load_split, read_json, read_manifest, validate_training, write_json
-from .model import HEAD_KINDS, INPUT_FORMATS, MAX_STATE, MAX_TRAIN_STATE, DecisionModel, fits, load_tokenizer, rows_of, training_context, user_tokens
+from .model import CHAT_FORMATS, HEAD_KINDS, INPUT_FORMATS, MAX_STATE, MAX_TRAIN_STATE, DecisionModel, fits, load_tokenizer, rows_of, training_context, user_tokens
 from .pref import REGS, bce_loss, preference_loss, reward_reg
 
 
@@ -426,7 +426,8 @@ def parse_args():
     ap.add_argument("--head", choices=HEAD_KINDS, default="pointer", help="pointer: Kev's query-key pointer over option states; scalar: one Linear(d, 1) reward per option")
     ap.add_argument("--input_format", choices=INPUT_FORMATS, default="kev", help="kev: Kev's delimiter format, read each option at its </opt>; chat: one plain-text user "
                                                                              "message per option rendered with the tokenizer's chat template (state, instruction, option list, 'Grade this option: o_k'), "
-                                                                             "reward read at the last token, prefix cached across the options (needs --head scalar)")
+                                                                             "reward read at the last token, prefix cached across the options (needs --head scalar); chat_pointwise: the same "
+                                                                             "without the option list, so an option's reward depends only on the state, the instruction and the option itself")
     ap.add_argument("--loss", choices=["ce", "pref"], default="ce", help="ce: Kev's cross-entropy (question_loss); pref: Bradley-Terry over label-derived pairs (kev.pref)")
     ap.add_argument("--reg", choices=REGS, default="none", help="reward regularizer per micro-batch over the preference pairs' rewards (kev.pref): bsr = mean^2, l2 = mean of squares")
     ap.add_argument("--reg_w", type=float, default=1e-3, help="weight of --reg")
@@ -476,10 +477,10 @@ def parse_args():
     a = ap.parse_args()
     if a.shared_prefix is None: a.shared_prefix = a.full_ft
     a.bce_types = sorted({t for t in a.bce_types.split(",") if t})   # a list: vars(a) is written to JSON
-    if a.input_format == "chat" and a.head != "scalar":
-        ap.error("--input_format chat reads one reward per option row: needs --head scalar")
-    if a.input_format == "chat" and (a.option_isolation or a.pass_tokens_max):
-        ap.error("--input_format chat: not with --option_isolation, nor --pass_tokens_max (its plan measures Kev-format rows)")
+    if a.input_format in CHAT_FORMATS and a.head != "scalar":
+        ap.error("--input_format chat / chat_pointwise read one reward per option row: needs --head scalar")
+    if a.input_format in CHAT_FORMATS and (a.option_isolation or a.pass_tokens_max):
+        ap.error("--input_format chat / chat_pointwise: not with --option_isolation, nor --pass_tokens_max (its plan measures Kev-format rows)")
     if a.loss == "pref" and (a.ord_w or a.label_smoothing or a.brier_w or a.focal_gamma):
         ap.error("--ord_w / --label_smoothing / --brier_w / --focal_gamma modify the CE loss; not with --loss pref")
     if a.reg != "none" and a.loss != "pref":

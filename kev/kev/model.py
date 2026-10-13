@@ -9,18 +9,29 @@ from transformers.cache_utils import LinearAttentionCacheLayerMixin
 # Reuse existing rarely-used Qwen special tokens as delimiters (state, q, opt, /opt, decide) so no
 # embedding rows need to be added/trained; LoRA adapts their meaning.
 SPECIAL = ["<|fim_prefix|>", "<|fim_middle|>", "<|box_start|>", "<|box_end|>", "<|fim_suffix|>"]
-# chat input format (--input_format chat): no delimiter tokens beyond what the tokenizer's own chat template emits. Per
-# (question, option k) one user message, rendered with the template and cut at the generation prompt:
-#   State:\n{state}\n\nInstruction: {instr}\n\nOptions:\n- {o_1}\n- {o_2}...\n\nGrade this option: {o_k}
-# and the reward is read at the last token of the rendered prompt (the template's tail). chat_splits lays it out.
-HEAD_KINDS, INPUT_FORMATS = ("pointer", "scalar"), ("kev", "chat")
-CHAT_FORMATS = ("chat",)   # INPUT_FORMATS laid out by chat_splits and served through enc["chat"]: kev.cuda_graphs.chat,
-                           # DecisionModel.chat_hidden. A future chat-shaped format joins here, not at each equality check.
+# chat input formats (--input_format chat / chat_pointwise): no delimiter tokens beyond what the tokenizer's own chat
+# template emits. Per (question, option k) one user message, rendered with the template and cut at the generation prompt:
+#   chat            State:\n{state}\n\nInstruction: {instr}\n\nOptions:\n- {o_1}\n- {o_2}...\n\nGrade this option: {o_k}
+#   chat_pointwise  State:\n{state}\n\nInstruction: {instr}\n\nGrade this option: {o_k}
+# and the reward is read at the last token of the rendered prompt (the template's tail). chat_splits lays it out; the
+# pointwise variant drops the listing, so an option's reward depends on nothing but the state, the instruction and the
+# option itself (the pointwise score Bradley-Terry assumes), at the cost of every relative cue the listing carries.
+HEAD_KINDS, INPUT_FORMATS = ("pointer", "scalar"), ("kev", "chat", "chat_pointwise")
+# everything that accepts the chat layout accepts the pointwise variant (checkpoint meta, eval, serving, arm scripts);
+# INPUT_FORMATS laid out by chat_splits and served through enc["chat"]: kev.cuda_graphs.chat, DecisionModel.chat_hidden.
+# A future chat-shaped format joins here, not at each equality check.
+CHAT_FORMATS = ("chat", "chat_pointwise")
 CHAT_SENTINEL = "@@KEV_CHAT_CONTENT@@"
 # a chat row (prefix + one option branch) may exceed the Kev row limit (state + question branch, max_branch) by this many
-# tokens: the template head/tail, "State:/Instruction:/Options:/Grade this option:" labels, "- " bullets and the option being graded
-# repeated once. Kev-format arms never see it; the Kev packed limit (max_packed) is unchanged and still admits the same records.
+# tokens: the template head/tail, "State:/Instruction:/Options:/Grade this option:" labels, "- " bullets, and (chat) the
+# option listing. Kev-format arms never see it; the Kev packed limit (max_packed) is unchanged and still admits the same records.
 CHAT_ROW_SLACK = 128
+
+
+def chat_lists_options(fmt):
+    """The one place a chat input format maps to its prefix layout: whether the prompt lists the question's options
+    (chat) or grades the option on its own (chat_pointwise)."""
+    return fmt == "chat"
 
 
 def chat_template_parts(tok):
@@ -120,12 +131,13 @@ def user_tokens(tok, text):
 OPT_NONE, OPT_DECIDE = -1, -2   # values of enc["opt"]: instruction/state tokens, and the <decide> token
 
 
-def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, option_isolation=False, chat=False):
+def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, option_isolation=False, chat=False, chat_listing=True):
     """Pack one record: [<state> ...] then per-question [<q> instr <opt> o </opt>... <decide>].
 
-    chat (chat format): also returns the usual Kev encoding (it sets the limits, the batching lengths and the labels), plus
-    enc["chat"] = chat_splits (the rows actually run) and enc["chat_row_max"], their longest row; a row over
-    max_branch + CHAT_ROW_SLACK raises ContextOverflow.
+    chat (a chat input format): also returns the usual Kev encoding (it sets the limits, the batching lengths and the labels),
+    plus enc["chat"] = chat_splits (the rows actually run; the option listing is in the prefix unless chat_listing is False,
+    --input_format chat_pointwise) and enc["chat_row_max"], their longest row; a row over max_branch + CHAT_ROW_SLACK raises
+    ContextOverflow.
 
     Returns ids, seg (0 = state, k = question k), pos (branch positions restart after state),
     decide_idx [Q], opt_idx [Q][K] (index of </opt> token for each option), opt (per-token option index within its
@@ -167,7 +179,7 @@ def encode(tok, rec, max_state=MAX_STATE, max_branch=MAX_BRANCH, strict=False, o
            "labels": [q["label"] for q in rec["questions"]], "state_tokens": len(state_tokens) + 1, "state_truncated": len(state_tokens) + 1 > max_state}
     if chat:
         if option_isolation: raise ValueError("the chat format does not take option_isolation")
-        enc["chat"] = chat_splits(tok, rec, state_tokens[: max_state - 1])
+        enc["chat"] = chat_splits(tok, rec, state_tokens[: max_state - 1], options=chat_listing)
         enc["chat_row_max"] = max(len(ids) + len(b["ids"]) for ids, _, bs in enc["chat"] for b in bs)
         if enc["chat_row_max"] > max_branch + CHAT_ROW_SLACK:
             raise ContextOverflow(f"chat row too long: {enc['chat_row_max']} tokens (row limit {max_branch} + {CHAT_ROW_SLACK})")
@@ -249,11 +261,14 @@ def rows_of(enc):
     return enc["ids"][:Ls], enc["pos"][:Ls], rows
 
 
-def chat_splits(tok, rec, state_ids):
+def chat_splits(tok, rec, state_ids, options=True):
     r"""Chat format: per question one shared prefix and K branches (kev.shared_prefix splits: (prefix ids, prefix positions,
-    [{"ids", "pos"}] per option)). With head, tail = chat_template_parts(tok):
+    [{"ids", "pos"}] per option)). With head, tail = chat_template_parts(tok) and options (the `chat` layout):
       prefix  = ids(head + "State:\n") + state_ids + ids("\n\nInstruction: {instr}\n\nOptions:\n- {o_1}\n- ...\n\nGrade this option: ")
       branch k = ids("{o_k}" + tail)          positions continue the prefix; the reward is read at the branch's last token.
+    Without options (`chat_pointwise`) the prefix carries no listing:
+      prefix  = ids(head + "State:\n") + state_ids + ids("\n\nInstruction: {instr}\n\nGrade this option: ")
+    so option k's reward depends on nothing but the state, the instruction and the option itself.
     Every piece is tokenized on its own (user text through user_tokens-style escaping), so the prefix ids are identical for
     all K options, in training and in evaluation. state_ids: the state's tokens, already cut to the state limit."""
     head, tail = chat_template_parts(tok)
@@ -262,8 +277,8 @@ def chat_splits(tok, rec, state_ids):
     top = enc(head + "State:\n")
     out = []
     for q in rec["questions"]:
-        listing = "\n".join(f"- {clean(o)}" for o in q["options"])
-        ids = top + list(state_ids) + enc(f"\n\nInstruction: {clean(q['instr'])}\n\nOptions:\n{listing}\n\nGrade this option: ")
+        listing = ("\n\nOptions:\n" + "\n".join(f"- {clean(o)}" for o in q["options"])) if options else ""
+        ids = top + list(state_ids) + enc(f"\n\nInstruction: {clean(q['instr'])}{listing}\n\nGrade this option: ")
         p0 = len(ids)
         branches = [enc(clean(o) + tail) for o in q["options"]]
         out.append((ids, list(range(p0)), [{"ids": b, "pos": list(range(p0, p0 + len(b)))} for b in branches]))
@@ -279,10 +294,10 @@ def chat_common(splits):
     return next((i for i in range(n) if any(S[i] != ids0[i] or Sp[i] != pos0[i] for S, Sp, _ in splits)), n)
 
 
-def chat_prompt(tok, rec, q=0, k=0, max_state=MAX_STATE):
+def chat_prompt(tok, rec, q=0, k=0, max_state=MAX_STATE, options=True):
     """-> (text, token count) of the chat row for option k of question q, decoded from the very ids the model reads (setup
-    check: tokenizer only)."""
-    ids, _, bs = chat_splits(tok, rec, user_tokens(tok, rec["state"])[: max_state - 1])[q]
+    check: tokenizer only). options=False: the chat_pointwise layout, without the option listing."""
+    ids, _, bs = chat_splits(tok, rec, user_tokens(tok, rec["state"])[: max_state - 1], options=options)[q]
     row = ids + bs[k]["ids"]
     return tok.decode(row, skip_special_tokens=False), len(row)
 
@@ -371,10 +386,10 @@ class DecisionModel(nn.Module):
         if self.hybrid and option_isolation: raise ValueError("option_isolation needs the packed mask; not available on hybrid backbones")
         self.option_isolation = option_isolation
         if input_format not in INPUT_FORMATS: raise ValueError(f"unknown input format {input_format!r}")
-        if input_format == "chat" and (head_kind != "scalar" or option_isolation):
-            raise ValueError("the chat format reads one reward per option row: it needs head_kind='scalar' and no option_isolation")
+        if input_format in CHAT_FORMATS and (head_kind != "scalar" or option_isolation):
+            raise ValueError("the chat formats read one reward per option row: they need head_kind='scalar' and no option_isolation")
         self.head_kind, self.input_format = head_kind, input_format
-        self.chat_template_sha256 = chat_template_digest(tok) if input_format == "chat" else None
+        self.chat_template_sha256 = chat_template_digest(tok) if input_format in CHAT_FORMATS else None
         if chat_template_sha256 and chat_template_sha256 != self.chat_template_sha256:
             raise ValueError(f"chat template mismatch: the checkpoint was trained with template {chat_template_sha256[:12]}, this tokenizer's renders {self.chat_template_sha256[:12]}")
         if lora:
@@ -408,7 +423,8 @@ class DecisionModel(nn.Module):
 
     def encode(self, tok, rec, **kw):
         """encode() with this model's option-isolation setting; use this from serving/eval code."""
-        return encode(tok, rec, option_isolation=self.option_isolation, chat=self.input_format == "chat", **kw)
+        return encode(tok, rec, option_isolation=self.option_isolation, chat=self.input_format in CHAT_FORMATS,
+                      chat_listing=chat_lists_options(self.input_format), **kw)
 
     def hidden(self, enc):
         return self.hidden_batch([enc])[0, : len(enc["ids"])]
@@ -484,10 +500,10 @@ class DecisionModel(nn.Module):
 
     @torch.no_grad()
     def chat_hidden(self, splits, chunk=None):
-        """Inference form of the chat format on a hybrid backbone (splits: one record's enc["chat"]). Every question's
+        """Inference form of the chat formats on a hybrid backbone (splits: one record's enc["chat"]). Every question's
         prefix starts with the same head + state tokens, so those run once into a cache; each question continues a copy of
-        it with its own instruction and option listing (alone: padding inside a continuation would decay the DeltaNet
-        state), and its K option rows continue that question's cache (_rows_hidden, `chunk` rows per pass if given). The
+        it with the rest of its own prefix (instruction, and the option listing for `chat`; alone: padding inside a
+        continuation would decay the DeltaNet state), and its K option rows continue that question's cache (_rows_hidden, `chunk` rows per pass if given). The
         rows see the same tokens at the same positions as branch_hidden's, so the rewards agree up to kernel rounding,
         while the state runs once per record instead of once per question and no pass holds more than one question's
         prefix. -> per question, per option, the row's hidden states [L, d] fp32. On CUDA self.graphs runs the same passes
@@ -539,7 +555,7 @@ class DecisionModel(nn.Module):
         return [self.head(None, torch.stack([h[-1] for h in rows])) for rows in self.chat_hidden(splits)]
 
     def forward_chat_batch(self, encs):
-        """Chat format (enc["chat"], chat_splits): the same nested [record][question] -> rewards [K] as forward_batch. A hybrid
+        """Chat formats (enc["chat"], chat_splits): the same nested [record][question] -> rewards [K] as forward_batch. A hybrid
         backbone runs each question's prefix once and its K option rows from it: with gradients through kev.shared_prefix
         (exact, gradients included), without them through the record's graphed passes on CUDA (self.graphs; the questions'
         prefixes run eagerly and unpadded there, as they must: their states are kept) or, where they do not fit,
@@ -567,7 +583,7 @@ class DecisionModel(nn.Module):
     def forward_batch(self, encs, shared_prefix=False):
         """List (per record) of lists (per question) of logits. Row form or packed block-causal mask, see rows_form
         (the packed mask already runs each state once; shared_prefix does that for the row form of a hybrid backbone)."""
-        if self.input_format == "chat": return self.forward_chat_batch(encs)
+        if self.input_format in CHAT_FORMATS: return self.forward_chat_batch(encs)
         if self.rows_form(encs): return self.forward_rows_batch(encs, shared_prefix and self.hybrid)
         hs = self.hidden_batch(encs)
         return [self._readout(hs[b], e) for b, e in enumerate(encs)]
@@ -577,7 +593,7 @@ class DecisionModel(nn.Module):
         """Probabilities per question. A record that runs as rows (every record on a hybrid backbone) takes the serving miss
         path: its state once, then the question rows from its cache. forward() keeps the row form, which re-runs the state
         per question; the two agree to fp32 rounding (#77)."""
-        if self.input_format == "chat": return [F.softmax(z, -1).cpu() for z in self.forward(enc)]
+        if self.input_format in CHAT_FORMATS: return [F.softmax(z, -1).cpu() for z in self.forward(enc)]
         if self.rows_form([enc]): return self.probs_and_prefix(enc)[0]
         return [F.softmax(z, -1).cpu() for z in self.forward(enc)]
 

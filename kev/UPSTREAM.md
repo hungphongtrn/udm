@@ -34,8 +34,10 @@ flash-attn is installed but unused by Kev (sdpa). Upstream `uv.lock` was deleted
 
 Defaults keep upstream behaviour bit-identical (`--head pointer`, `--input_format kev`, `--loss ce`).
 
-- `kev/model.py`: `ScalarHead` (one `Linear(d, 1)` reward per option) and `make_head`/`HEAD_KINDS`; `INPUT_FORMATS = ("kev", "chat")`,
-  `chat_template_parts` / `chat_template_digest` / `chat_splits` / `chat_prompt` (chat input layout built from the tokenizer's own
+- `kev/model.py`: `ScalarHead` (one `Linear(d, 1)` reward per option) and `make_head`/`HEAD_KINDS`; `INPUT_FORMATS = ("kev", "chat", "chat_pointwise")`
+  and `CHAT_FORMATS` (everything that accepts the chat layout, including the pointwise one: `chat_pointwise` drops the
+  `Options:` listing from the prefix, so a response is graded on its own),
+  `chat_template_parts` / `chat_template_digest` / `chat_lists_options` / `chat_splits` / `chat_prompt` (chat input layout built from the tokenizer's own
   chat template, no added tokens); `encode(chat=True)` adds `enc["chat"]`; `forward_chat_batch`;
   `_kev_format_only` guard on the pointer/Kev-only probability paths.
 - `kev/checkpoint.py`: `head_kind`, `input_format`, `chat_template_sha256` in checkpoint meta and `COMPAT_FIELDS`; the MLX backend

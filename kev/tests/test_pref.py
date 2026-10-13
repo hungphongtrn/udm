@@ -159,6 +159,36 @@ def test_chat_encoding_layout(tok_rec):
     assert n == len(enc["chat"][0][0]) + len(enc["chat"][0][2][0]["ids"]) and isinstance(text, str)
 
 
+def test_chat_pointwise_encoding_layout(tok_rec):
+    """Arm H's layout (chat_pointwise): the prefix carries no option text and is one prefix for all K options; the branches
+    and their lengths are the chat layout's, and their positions continue this prefix."""
+    tok, rec = tok_rec
+    pw, full = encode(tok, rec, chat=True, chat_listing=False), encode(tok, rec, chat=True)
+    head_ids = tok(HEAD + "State:\n", add_special_tokens=False).input_ids
+    state_ids = user_tokens(tok, rec["state"])
+    assert len(enc_chat := pw["chat"]) == len(rec["questions"])
+    for q, (p_ids, p_pos, p_rows), (ids, _, rows) in zip(rec["questions"], enc_chat, full["chat"]):
+        mid = f"\n\nInstruction: {q['instr']}"
+        assert p_ids == head_ids + state_ids + tok(f"{mid}\n\nGrade this option: ", add_special_tokens=False).input_ids
+        assert ids == head_ids + state_ids + tok(
+            f"{mid}\n\nOptions:\n" + "\n".join(f"- {o}" for o in q["options"]) + "\n\nGrade this option: ", add_special_tokens=False).input_ids
+        assert p_pos == list(range(len(p_ids))) and len(p_rows) == len(q["options"])
+        for k, (p, r) in enumerate(zip(p_rows, rows)):
+            assert p["ids"] == r["ids"]                          # the branch is the option + the template tail, listing or not
+            assert p["pos"] == list(range(len(p_ids), len(p_ids) + len(p["ids"])))
+        option_ids = {tok(o, add_special_tokens=False).input_ids[0] for o in q["options"]}
+        assert not option_ids & set(p_ids)                       # no option of this question in the prefix
+        assert option_ids <= set(ids)                            # the chat layout lists every one of them
+    text, n = chat_prompt(tok, rec, 0, 0, options=False)
+    assert n == len(pw["chat"][0][0]) + len(pw["chat"][0][2][0]["ids"]) and isinstance(text, str)
+    q0 = rec["questions"][0]
+    options0 = {tok(o, add_special_tokens=False).input_ids[0] for o in q0["options"]}
+    pw_row0 = pw["chat"][0][0] + pw["chat"][0][2][0]["ids"]          # the prompt read for the first option
+    full_row0 = full["chat"][0][0] + full["chat"][0][2][0]["ids"]
+    assert len(options0 & set(pw_row0)) == 1 and options0 <= set(full_row0)
+    assert pw["chat_row_max"] == max(len(ids) + len(r["ids"]) for ids, _, rows in pw["chat"] for r in rows)
+
+
 def test_chat_state_truncation_and_escaping(tok_rec):
     """The state is cut to max_state - 1 tokens (as Kev's encode does); delimiter-looking text in options cannot make tokens."""
     tok, rec = tok_rec
@@ -206,20 +236,22 @@ def test_chat_shared_prefix_matches_per_row(chat_model, tok_rec):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a CUDA device (kev.cuda_graphs)")
-def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec):
+@pytest.mark.parametrize("fmt", ["chat", "chat_pointwise"])
+def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec, fmt):
     """The graphed chat passes (kev.cuda_graphs.chat, what dindex_engine serves on CUDA) score a record as chat_hidden's
     eager passes do: the same tokens at the same positions, so the rewards differ by floating-point reassociation only
     (fp32 here: atol 1e-4, the tolerance the parity test above uses). Covers a record with several questions (state pass,
     one unpadded eager pass per question prefix, one graphed pass for the option rows), one whose six questions' prefixes
     have six distinct lengths and so cannot share one bucket (their continuations must run unpadded: a padded DeltaNet state
     has advanced past the prefix's last real token), and one whose single question is the state pass itself, both before any
-    capture and after (replays)."""
+    capture and after (replays) -- for both chat layouts: the pointwise prefix (no option listing) is the same tokens at the
+    same positions to these passes, which read the splits and never the listing."""
     from kev.cuda_graphs import CudaGraphs, bucket
     from kev.data import load_records, materialize
     tok, _ = tok_rec
     torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False   # as a LocalPredictor CUDA session runs (10-bit mantissa moves logits)
     torch.manual_seed(0)
-    model = DecisionModel(str(tiny_base / "base"), tok, "cuda", head_kind="scalar", input_format="chat").eval()
+    model = DecisionModel(str(tiny_base / "base"), tok, "cuda", head_kind="scalar", input_format=fmt).eval()
     model.graphs = CudaGraphs(model.lm, model.pad_id)
     records = [materialize(r) for r in load_records(tiny_base / "data.jsonl")[:2]]
     q0 = records[0]["questions"][0]
@@ -246,15 +278,63 @@ def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec):
 
 
 def test_chat_needs_scalar_head(tiny_base, tok_rec):
+
+
+@pytest.fixture(scope="module")
+def pointwise_model(tiny_base, tok_rec):
+    tok, _ = tok_rec
+    torch.manual_seed(0)
+    return DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="scalar", input_format="chat_pointwise")
+
+
+def one_option_record(model, tok, rec, k):
+    """The request that grades option k of the record's first question alone (what a pointwise model asks per response)."""
+    from kev.data import materialize
+    q = rec["questions"][0]
+    return model.encode(tok, materialize({"state": rec["state"], "questions": {"team": {
+        "type": "choice", "instructions": q["instr"], "criteria": {q["options"][k]: None}, "label": q["options"][k],
+        "src": "single_option"}}}))
+
+
+def test_chat_pointwise_reward_is_set_independent(pointwise_model, tok_rec):
+    """Arm H: an option's reward is the reward of the one-option prompt that grades it, so the score of a response does not
+    depend on the set it is scored in (the pointwise score Bradley-Terry assumes). Arm D's chat layout, which lists the
+    options, is not (the test below)."""
+    tok, rec = tok_rec
+    model = pointwise_model.eval()
+    enc = model.encode(tok, rec)
+    assert [len(bs) for _, _, bs in enc["chat"]] == [len(q["options"]) for q in rec["questions"]]
+    with torch.no_grad():
+        set_zs = model.forward(enc)[0]
+        alone = [model.forward(one_option_record(model, tok, rec, k))[0][0] for k in range(len(rec["questions"][0]["options"]))]
+    for k, z in enumerate(alone):
+        assert torch.allclose(set_zs[k], z.reshape(set_zs[k].shape), atol=1e-4)
+
+
+def test_chat_reward_moves_with_the_option_set(chat_model, tok_rec):
+    """The negative control for the test above: with the listing in the prefix (arm D), the same option's reward changes
+    when its siblings are not in the prompt."""
+    tok, rec = tok_rec
+    model = chat_model.eval()
+    enc = model.encode(tok, rec)
+    with torch.no_grad():
+        set_zs = model.forward(enc)[0]
+        alone = [model.forward(one_option_record(model, tok, rec, k))[0][0] for k in range(len(rec["questions"][0]["options"]))]
+    assert any(not torch.allclose(set_zs[k], z.reshape(set_zs[k].shape), atol=1e-4) for k, z in enumerate(alone))
+
+
+@pytest.mark.parametrize("fmt", ["chat", "chat_pointwise"])
+def test_chat_needs_scalar_head(tiny_base, tok_rec, fmt):
     tok, _ = tok_rec
     with pytest.raises(ValueError, match="scalar"):
-        DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="pointer", input_format="chat")
+        DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="pointer", input_format=fmt)
 
 
-def test_chat_template_mismatch_refused(tiny_base, tok_rec):
+@pytest.mark.parametrize("fmt", ["chat", "chat_pointwise"])
+def test_chat_template_mismatch_refused(tiny_base, tok_rec, fmt):
     tok, _ = tok_rec
     with pytest.raises(ValueError, match="chat template mismatch"):
-        DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="scalar", input_format="chat", chat_template_sha256="0" * 64)
+        DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="scalar", input_format=fmt, chat_template_sha256="0" * 64)
 
 
 # --- kev.train -----------------------------------------------------------------------------------------------------
@@ -267,6 +347,8 @@ def train_tiny(tiny_base, out, *args, monkeypatch):
 
 
 STAGE1 = ("--head", "scalar", "--input_format", "chat", "--loss", "pref", "--reg", "bsr", "--lora", "4", "--max_steps", "2")
+# arm H: arm D's recipe on the pointwise prompt (no option listing in the prefix)
+STAGE1_POINTWISE = ("--head", "scalar", "--input_format", "chat_pointwise", "--loss", "pref", "--reg", "bsr", "--lora", "4", "--max_steps", "2")
 
 
 def test_train_chat_pref_smoke(tiny_base, tmp_path, monkeypatch):
@@ -283,6 +365,25 @@ def test_train_chat_pref_smoke(tiny_base, tmp_path, monkeypatch):
     assert [len(z) for z in zs] == [len(q["options"]) for q in rec["questions"]] and all(z.ndim == 1 for z in zs)
 
 
+def test_train_chat_pointwise_smoke(tiny_base, tmp_path, monkeypatch):
+    """Arm H end to end: the pointwise format trains with the same recipe, the checkpoint records the format, and the
+    loaded model scores one reward per option from a prompt that carries no option text (nothing but state, instruction
+    and the graded option)."""
+    from kev.checkpoint import Checkpoint
+    from kev.data import load_records, materialize
+    train_tiny(tiny_base, tmp_path / "h", *STAGE1_POINTWISE, monkeypatch=monkeypatch)
+    ck = Checkpoint(tmp_path / "h")
+    tok, model = ck.load("cpu")
+    assert (ck.meta.head_kind, ck.meta.input_format, ck.meta.chat_template_sha256) == ("scalar", "chat_pointwise", chat_template_digest(tok))
+    assert model.input_format == "chat_pointwise"
+    for req in load_records(tiny_base / "data.jsonl"):
+        rec = materialize(req)
+        enc = model.encode(tok, rec)
+        assert [len(z) for z in model.forward(enc)] == [len(q["options"]) for q in rec["questions"]]
+        for q, (ids, _, _) in zip(rec["questions"], enc["chat"]):
+            assert not {tok(o, add_special_tokens=False).input_ids[0] for o in q["options"]} & set(ids)
+
+
 def test_train_stage2_warm_start_and_compat(tiny_base, tmp_path, monkeypatch):
     """Stage 2 (--init_from stage 1, + BCE) runs; a pointer head cannot warm-start from a scalar checkpoint."""
     train_tiny(tiny_base, tmp_path / "a", *STAGE1, monkeypatch=monkeypatch)
@@ -294,6 +395,7 @@ def test_train_stage2_warm_start_and_compat(tiny_base, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("args", [("--input_format", "chat", "--head", "pointer"),
+                                  ("--input_format", "chat_pointwise", "--head", "pointer"),
                                   ("--input_format", "chat", "--head", "scalar", "--option_isolation", "1"),
                                   ("--reg", "bsr", "--loss", "ce"),
                                   ("--loss", "pref", "--label_smoothing", "0.1")])

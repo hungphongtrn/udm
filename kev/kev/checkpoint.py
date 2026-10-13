@@ -62,7 +62,7 @@ class Meta:
     holdout: list = field(default_factory=list)
     weights: str = "lora"          # "lora": an adapter on the base; "full": the whole backbone is in the checkpoint (kev.train --full_ft)
     head_kind: str = "pointer"     # kev.model.HEAD_KINDS: "pointer" (Kev) or "scalar" (one Linear(d, 1) reward per option)
-    input_format: str = "kev"      # kev.model.INPUT_FORMATS: "kev" or "chat" (chat_splits)
+    input_format: str = "kev"      # kev.model.INPUT_FORMATS: "kev", or "chat" / "chat_pointwise" (chat_splits, with or without the option listing)
     chat_template_sha256: str | None = None   # sha256 of the chat template's head+tail strings a chat checkpoint was trained with
     extra: dict = field(default_factory=dict)
 
