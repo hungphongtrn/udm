@@ -146,6 +146,9 @@ Verify on the training machine before trusting a subset number:
 .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0                  # 20 DI subset rows, both paths, per-record ms + max |d reward|
 .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100          # more rows; --offset for another slice
 .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --suite evals/decision-v7 --split calibration
+# the fp32 reference (smaller graph buffers to fit 24 GB), then bf16 against it: is graphed further from it than eager?
+.venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100 --dtype fp32 --bank-width 1024 --graph-states 8 --graph-rows 8 --graph-tokens 8192 --dump fp32.json
+.venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100 --against fp32.json
 .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/H/seed0                  # the pointwise layout: same passes, no option listing in the prefix
 scripts/pref/dindex.sh subset runs/pref/D/seed0 graphed     # the default (graphed passes); NAME = a fresh out dir, so nothing is seeded
 GRAPHS=0 scripts/pref/dindex.sh subset runs/pref/D/seed0 eager   # the old eager path on the same rows, for the comparison
@@ -157,10 +160,14 @@ by the same rule (`input_format in kev.model.CHAT_FORMATS`, `GRAPHS=0` opts out)
 graphed, capturing buckets as the engine does), so a record that runs out of memory takes the engine's chunked path in its
 timing, as in a subset run, and prints per-record and per-second rates, the projected 15,000-row subset time for both paths,
 how many records each path chunked or refused, GPU memory after loading and at peak, max |d
-reward| (the head's logits) / max |d prob| and answer flips. Expected: rewards within a few 1e-3 (bf16; the same order as
-the training-to-serving differences the docstrings quote), probabilities tighter, no flips; and a graphed per-record time
-at or under the Kev format's subset average (~0.42 s against r10's 6,048 s), since the Kev format's row path recomputes the
-state for every option row while this one runs it once. The subset re-measure: the kit's `complete` event in
+reward| (the head's logits) / max |d prob| and answer flips, split by path (graphed / chunked / eager both ways) with the
+worst records and an eager rerun as the run-to-run floor. Measured on D seed 0, 100 subset rows, a 3090 (bf16): eager
+repeats to 0, graphed differs by up to 0.39 in reward / 0.077 in probability with 2 flips in 790 questions, the chunked
+path by 0.09 -- more than the ~1e-3 first expected, and not yet attributed to rounding or a bug: the fp32 pair above
+decides it (fp32 eager-vs-graphed should be ~1e-4; bf16 graphed should be no further from fp32 eager than bf16 eager is).
+Speed there: graphed 1.61x eager (5.7 h vs 9.1 h projected for that slice; mean 6x the median, long eager states
+dominate), not the ~2 h first targeted from the Kev format's subset average (~0.42 s against r10's 6,048 s).
+The subset re-measure: the kit's `complete` event in
 `RUN/dindex-0.3-sub$N/run.log` carries `elapsed_seconds` (per-row `total_wall_ms` is in `results.jsonl`); a subset run
 seeded from a `full` run of the same checkpoint copies that run's already-answered rows, so time a fresh `NAME` to see the
 new path's own speed.

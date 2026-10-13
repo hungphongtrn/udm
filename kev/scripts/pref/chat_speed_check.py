@@ -7,6 +7,9 @@ GPU time at a few ms each), so this is the same question on N rows of the same f
     .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100            # more rows, both paths
     .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --offset 100       # a different slice of the rows
     .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --suite evals/decision-v7 --split calibration
+    # which path is closer to the fp32 reference: an fp32 run (smaller graph buffers to fit 24 GB), then bf16 against it
+    .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100 --dtype fp32 --bank-width 1024 --graph-states 8 --graph-rows 8 --graph-tokens 8192 --dump fp32.json
+    .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100 --against fp32.json
 
 --rows defaults to $DI_DIR/subset-0.3-15000.jsonl.gz (DI_DIR: the kit checkout dindex.sh uses, ~/decision-index by
 default) and reads only `state` and `questions` from it, with the placeholder labels dindex_engine.KevEngine passes
@@ -19,12 +22,14 @@ Each phase prints how many records took the chunked path and how many were refus
 
 Numerical equivalence: both paths run the same tokens at the same positions -- the record's state once, each question's
 prefix once, its option rows continuing that (kev.cuda_graphs: the module docstring's passes; the prefixes run eagerly and
-unpadded there, one pass per distinct length). What differs is floating-point reassociation: the graphed passes pad rows to
-buckets and the DeltaNet scan is chunked over a different batch, so logits move by ~1e-3 in bf16 (the same order as the
-training-to-serving differences the docstrings quote) and probabilities by less; fp32 is orders of magnitude tighter.
-Answer flips should be none: report them if not. Records the graphed passes do not admit (kev.cuda_graphs.admits_chat: a
-state, a question prefix or an option row past the buffers) fall back to the eager passes in the graphed phase too -- the
-count is printed.
+unpadded there, one pass per distinct length). What differs is floating-point reassociation: the graphed passes pad
+states and rows to buckets, mask attention explicitly and chunk the DeltaNet scan at other offsets. In bf16 that moved D's
+rewards by up to 0.39 and flipped 2 of 790 answers on 100 subset rows (eager is repeatable to 0; the chunked path's kernel
+change alone moved them 0.09), so bf16 eager-vs-graphed alone cannot tell rounding from a bug. In fp32 both paths should
+agree to ~1e-4 (tests/test_pref.py::test_chat_graphs_match_chat_hidden's tolerance on a tiny model); --against then says
+whether bf16 graphed is further from the fp32 eager reference than bf16 eager is. Records the graphed passes do not admit
+(kev.cuda_graphs.admits_chat: a state, a question prefix or an option row past the buffers) fall back to the eager
+passes in the graphed phase too -- the count is printed; smaller buffers admit fewer.
 """
 import argparse
 import gzip
@@ -38,6 +43,7 @@ import torch
 
 from decision_index.engines import Unsupported
 from dindex_engine import KevEngine   # scripts/pref, this script's own directory (sys.path[0])
+from kev import cuda_graphs
 from kev.data import materialize
 from kev.device import sync
 from kev.model import ContextOverflow
@@ -148,8 +154,21 @@ def main():
     ap.add_argument("--offset", type=int, default=0, help="skip this many rows first (default 0)")
     ap.add_argument("--device", default="cuda", help="cuda (default), cpu or mps")
     ap.add_argument("--dtype", default="bf16", choices=("bf16", "fp32"), help="bf16 as dindex.sh runs (default) or fp32")
+    ap.add_argument("--bank-width", type=int, help=f"kev.cuda_graphs.BANK_WIDTH, positions per bank entry, a power of two (default {cuda_graphs.BANK_WIDTH})")
+    ap.add_argument("--graph-states", type=int, help=f"kev.cuda_graphs.GRAPH_STATES, bank entries (default {cuda_graphs.GRAPH_STATES})")
+    ap.add_argument("--graph-rows", type=int, help=f"kev.cuda_graphs.GRAPH_ROWS, rows per row pass (default {cuda_graphs.GRAPH_ROWS})")
+    ap.add_argument("--graph-tokens", type=int, help=f"kev.cuda_graphs.GRAPH_TOKENS, rows x positions per row pass (default {cuda_graphs.GRAPH_TOKENS})")
+    ap.add_argument("--dump", help="write both phases' answers and logits per record to this JSON file (for --against)")
+    ap.add_argument("--against", help="a --dump of the same rows (e.g. an fp32 run): print both phases' differences from its eager phase")
     args = ap.parse_args()
     if args.suite and args.rows: raise SystemExit("--rows and --suite are mutually exclusive: score one of them")
+    # smaller graph buffers (e.g. fp32 on a 24 GB card): the module's limits are read when CudaGraphs is built and on every pass
+    for flag, name in (("bank_width", "BANK_WIDTH"), ("graph_states", "GRAPH_STATES"), ("graph_rows", "GRAPH_ROWS"), ("graph_tokens", "GRAPH_TOKENS")):
+        if getattr(args, flag) is not None: setattr(cuda_graphs, name, getattr(args, flag))
+    if cuda_graphs.BANK_WIDTH & (cuda_graphs.BANK_WIDTH - 1) or cuda_graphs.GRAPH_STATES < 2 or cuda_graphs.GRAPH_ROWS < 1 \
+            or cuda_graphs.GRAPH_TOKENS < cuda_graphs.BANK_WIDTH + cuda_graphs.GRAPH_ROW:
+        raise SystemExit("graph buffers: --bank-width must be a power of two, --graph-states >= 2, --graph-rows >= 1, "
+                         f"--graph-tokens >= bank width + {cuda_graphs.GRAPH_ROW} (one admitted row pass must fit)")
 
     if args.suite:
         records, skipped = load_split(Path(args.suite), args.split)[args.offset:args.offset + args.n], 0
@@ -159,7 +178,8 @@ def main():
     if not records: raise SystemExit("no records selected")
     print(f"{len(records)} records" + (f" ({skipped} skipped: a question type the engine refuses)" if skipped else ""), flush=True)
 
-    print(f"loading {args.run} on {args.device} in {args.dtype} ...", flush=True)
+    print(f"loading {args.run} on {args.device} in {args.dtype} (graph buffers: bank {cuda_graphs.GRAPH_STATES} x {cuda_graphs.BANK_WIDTH}, "
+          f"rows {cuda_graphs.GRAPH_ROWS}, row tokens {cuda_graphs.GRAPH_TOKENS}) ...", flush=True)
     engine = KevEngine(args.run, dtype=args.dtype, device=args.device, graphs=args.device == "cuda")
     predictor = engine.predictor
     model, graphs = predictor.model, predictor.model.graphs
@@ -203,6 +223,19 @@ def main():
     print("\neager rerun of the worst records, against the eager phase (the run-to-run floor): "
           + ", ".join(f"record {args.offset + i} |d reward| {record_diff(ref[i], b, records[i])[0]:.2e}" + (" (chunked)" if b["chunk"] else "")
                       for i, b in zip(worst, again) if b is not None))
+    if args.dump:
+        Path(args.dump).write_text(json.dumps({"run": str(args.run), "dtype": args.dtype, "offset": args.offset,
+                                               "records": {str(args.offset + i): {"eager": a, "graphed": b} for i, (a, b) in enumerate(zip(ref, fast))}}))
+        print(f"wrote {args.dump}")
+    if args.against:
+        other = json.loads(Path(args.against).read_text())
+        print(f"\nagainst {args.against} ({other['dtype']}) eager phase, over the records both runs scored:")
+        for label, mine in (("eager", ref), ("graphed", fast)):
+            pairs = [(other["records"][str(args.offset + i)]["eager"], m, r) for i, (m, r) in enumerate(zip(mine, records))
+                     if m is not None and other["records"].get(str(args.offset + i), {}).get("eager") is not None]
+            per = [record_diff(*p) for p in pairs]
+            print(f"  {args.dtype} {label:<8} records {len(per):>4}  max |d reward| {max((p[0] for p in per), default=0.0):.2e}  "
+                  f"max |d prob| {max((p[1] for p in per), default=0.0):.2e}  flips {sum(p[2] for p in per)}/{sum(p[3] for p in per)}")
 
 
 if __name__ == "__main__":
