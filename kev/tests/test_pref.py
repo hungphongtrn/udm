@@ -8,7 +8,7 @@ import sys
 import pytest
 import torch
 import torch.nn.functional as F
-from kev.model import DecisionModel, SPECIAL, chat_prompt, chat_splits, chat_template_digest, chat_template_parts, encode, user_tokens
+from kev.model import DecisionModel, SPECIAL, chat_common, chat_prompt, chat_splits, chat_template_digest, chat_template_parts, encode, user_tokens
 from kev.pref import bce_loss, preference_loss, preference_pairs, reward_reg
 
 IM = ["<|im_start|>", "<|im_end|>"]
@@ -210,9 +210,11 @@ def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec):
     """The graphed chat passes (kev.cuda_graphs.chat, what dindex_engine serves on CUDA) score a record as chat_hidden's
     eager passes do: the same tokens at the same positions, so the rewards differ by floating-point reassociation only
     (fp32 here: atol 1e-4, the tolerance the parity test above uses). Covers a record with several questions (state pass,
-    one row pass for their prefixes, one for the option rows) and one whose single question is the state pass itself, both
-    before any capture and after (replays)."""
-    from kev.cuda_graphs import CudaGraphs
+    one unpadded eager pass per question prefix, one graphed pass for the option rows), one whose six questions' prefixes
+    have six distinct lengths and so cannot share one bucket (their continuations must run unpadded: a padded DeltaNet state
+    has advanced past the prefix's last real token), and one whose single question is the state pass itself, both before any
+    capture and after (replays)."""
+    from kev.cuda_graphs import CudaGraphs, bucket
     from kev.data import load_records, materialize
     tok, _ = tok_rec
     torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False   # as a LocalPredictor CUDA session runs (10-bit mantissa moves logits)
@@ -220,9 +222,14 @@ def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec):
     model = DecisionModel(str(tiny_base / "base"), tok, "cuda", head_kind="scalar", input_format="chat").eval()
     model.graphs = CudaGraphs(model.lm, model.pad_id)
     records = [materialize(r) for r in load_records(tiny_base / "data.jsonl")[:2]]
+    q0 = records[0]["questions"][0]
+    records.append({**records[0], "questions": [{**q0, "instr": q0["instr"] + " it" * j} for j in range(6)]})   # six prefixes, one token apart
     records.append({**records[0], "questions": records[0]["questions"][:1]})   # one question: no continuation row
     encs = [model.encode(tok, r) for r in records]
     assert all(model.graphs.admits_chat(e["chat"]) for e in encs)
+    grow = next(e["chat"] for e in encs if len(e["chat"]) == 6)
+    lens = [len(S) - chat_common(grow) for S, _, _ in grow]
+    assert len(set(lens)) == 6 and any(bucket(L) > L for L in lens), lens   # consecutive: a bucketed pass would pad some, shifting their state
 
     def check(enc):
         with torch.no_grad():

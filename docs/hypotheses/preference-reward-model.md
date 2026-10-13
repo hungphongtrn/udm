@@ -326,15 +326,20 @@ option, the state repeated in each, `forward_rows_batch`), a shape `kev.cuda_gra
 replicated per row chunk, plus one padded pass per `rows_per_pass` option rows.
 
 Changed: those same tokens now run as the same machinery's passes (`kev.cuda_graphs.chat`) -- the record's state into a
-bank entry, one row pass for all the questions' prefixes, one row pass for all their option rows -- and a single-question
-record's prefix *is* its state pass, so such a record costs the Kev format's one state pass plus one row pass. Questions
-share the state's keys/values (bank entry 0) instead of replicating them; `dindex_engine` turns it on for chat checkpoints
-on CUDA by default (`GRAPHS=0` opts out, and the ~3 GB of graph buffers are why the Kev format, whose row-form path never
-touches them, is left without them) and captures buckets between requests as `kev.serve` does, keeping the eager passes for
+bank entry, the questions' prefixes as eager unpadded row passes, one per distinct prefix length, then one graphed row pass
+for all their option rows -- and a single-question record's prefix *is* its state pass, so such a record costs the Kev
+format's one state pass plus one row pass. The prefixes stay eager (idea 2): the state each leaves is what its option rows
+run from, and a pass padded to a bucket leaves a DeltaNet state advanced past the prefix's last real token (the pad inputs
+are zeroed, but the decay still advances), so batching them under one bucket -- a first cut of this change did, before the
+review that caught it -- serves every option row of the shorter prefixes from a shifted state. Questions share the state's
+keys/values (bank entry 0) instead of replicating them; `dindex_engine` turns it on for chat checkpoints on CUDA by
+default (`GRAPHS=0` opts out, and the ~3 GB of graph buffers are why the Kev format, whose row-form path never touches
+them, is left without them) and captures buckets between requests as `kev.serve` does, keeping the eager passes for
 records the graphed buffers do not admit. Tokens, positions and readout are the eager path's, so rewards differ by
-floating-point reassociation only (batched and padded GEMM shapes, another chunking of the DeltaNet scan) -- the class of difference the
-Kev format's graphs already have [INFERENCE, unmeasured here: `kev/tests/test_pref.py::test_chat_graphs_match_chat_hidden`
-(CUDA-only) is the invariant and `kev/scripts/pref/chat_speed_check.py` the measurement].
+floating-point reassociation only (batched and padded GEMM shapes, another chunking of the DeltaNet scan) -- the class of
+difference the Kev format's graphs already have [INFERENCE, unmeasured here:
+`kev/tests/test_pref.py::test_chat_graphs_match_chat_hidden` (CUDA-only) is the invariant and
+`kev/scripts/pref/chat_speed_check.py` the measurement].
 
 Re-measure (not run yet; the check first, then the subset with a fresh NAME so nothing is seeded from a past `full` run):
 ```bash
@@ -344,32 +349,39 @@ GRAPHS=0 scripts/pref/dindex.sh subset runs/pref/D/seed0 eager
 ```
 [INFERENCE] expected: at or under the Kev format's ~0.40 s/request on the same rows -- its row path recomputes the whole
 state for *every* option row (the two-pass prefix cache is `kev.serve`'s, not the runner's), while the graphed chat record
-runs its state once and pays one extra pass for the question prefix; and D's subset well under 27,246 s. Many-option rows
-(banking77's 77, CLINC150's 151) still carry the option listing in every row's attention window, but their option rows now
-batch GRAPH_ROWS to a replay instead of one pass per `rows_per_pass` rows of a prefix that the eager path copies each time.
+runs its state once, pays one unpadded pass per distinct question prefix (idea 2) and batches all the option rows of a
+question group into replays; and D's subset well under 27,246 s. Many-option rows (banking77's 77, CLINC150's 151) still
+carry the option listing in every row's attention window, but their option rows now batch GRAPH_ROWS to a replay instead of
+one pass per `rows_per_pass` rows of a prefix that the eager path copies each time.
 Further ideas, ranked by expected gain over risk:
 
 1. Pointwise chat prompt without the option listing (arm H, `idea/pointwise-chat-input`): the listing is one pass per
    request either way, but it is in the attention window of every option row, so it costs rows x Sr -- the hypothesis's
    open banking77 loss (-5.8 on v7 dev) may be exactly this. [INFERENCE] largest win on many-option rows (their row count
    and window both shrink); risk: a different decision semantics, needs retraining and a fresh index run.
-2. Prefix-cache the state across requests (`kev.serve`'s cache): a repeated state then costs no state pass at all.
+2. Graph the questions' prefixes: they run eagerly, one pass per distinct prefix length (the module docstring's reason),
+   each ~2,000 launches. A graph keyed on the exact length instead of a bucket has no pad tokens at all, so the state it
+   leaves is the one the option rows must run from. [INFERENCE] the prefix passes are a record's second-largest cost after
+   its option rows, so a few tens of ms per many-question record; risk: a benchmark's questions have many distinct prefix
+   lengths, so the graph keys multiply (GRAPHS_KEPT evictions, a ~0.4 s capture each) -- worth it where lengths repeat.
+   Batching unequal lengths instead is item 6.
+3. Prefix-cache the state across requests (`kev.serve`'s cache): a repeated state then costs no state pass at all.
    [INFERENCE] ~0 on the DI subset (one state per row; the instruction repeats across a benchmark's rows but sits *after*
    the state, so it can only be cached with the state); large for a client asking many questions about one document, which
    the single-record path already shares.
-3. Batch several requests into one pass (what `kev.serve` does): GRAPH_STATES=16 states or GRAPH_ROWS=32 rows per replay.
+4. Batch several requests into one pass (what `kev.serve` does): GRAPH_STATES=16 states or GRAPH_ROWS=32 rows per replay.
    The DI runner is serial, so this is a serving-side gain only. [INFERENCE] sizable when many small records arrive
    together (states of one bucket in a single pass); risk: the bank's entries must be tracked per request (the bookkeeping
    `CudaGraphs.run` already does for the Kev format).
-4. One row pass for the option rows of several records at once (today's stage 3 covers one record): 8 four-option records
-   fill GRAPH_ROWS=32. [INFERENCE] ~10-30% if pass launches dominate the remaining time; risk: same bookkeeping as 3, plus
+5. One row pass for the option rows of several records at once (today's stage 3 covers one record): 8 four-option records
+   fill GRAPH_ROWS=32. [INFERENCE] ~10-30% if pass launches dominate the remaining time; risk: same bookkeeping as 4, plus
    records must share their row bucket to share a replay.
-5. varlen/flash kernels instead of padded rows: padding is bounded (bucket(Lb), Sr <= 2x the state) and masked positions
+6. varlen/flash kernels instead of padded rows: padding is bounded (bucket(Lb), Sr <= 2x the state) and masked positions
    still cost attention. [INFERENCE] a few percent; risk: dynamic shapes cannot be captured as graphs, so this trades
-   against the whole approach.
-6. int8/fp8 weights or KV cache: [INFERENCE] 1.5-2x on the memory-bound passes; risk: accuracy -- every arm's reported
+   against the whole approach -- unless only the prefixes go varlen, which is item 2's exact-length graphs in another form.
+7. int8/fp8 weights or KV cache: [INFERENCE] 1.5-2x on the memory-bound passes; risk: accuracy -- every arm's reported
    numbers, and the Kev-format comparisons, would have to be re-derived.
-7. Speculative early exit (score the option rows on their first layers, continue only the close ones): [INFERENCE] the
+8. Speculative early exit (score the option rows on their first layers, continue only the close ones): [INFERENCE] the
    largest of these in principle; risk: it changes the readouts, so it needs an accuracy study of its own, not a speed fix.
 
 Verdict: **inconclusive** (rule 5) on the pre-registered dev rule. Best scalar-pref arm D: 3-seed top1 v7 -0.79 vs A

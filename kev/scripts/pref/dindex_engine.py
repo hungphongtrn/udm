@@ -21,10 +21,11 @@ reworded, filtered or truncated.
 Chat-format checkpoints on a hybrid backbone (arms C-F) score through DecisionModel.chat_hidden's passes: the request's
 state runs once, each question continues it with its own instruction and option listing, and its K option rows continue
 that, rows per pass bounded by kev.model.rows_per_pass. On CUDA those same passes run as CUDA graphs by default
-(kev.cuda_graphs.chat, `graphs=0` opts out): the record's state into a bank entry, each question's prefix as one row pass
-continuing it (all questions at once), then its option rows -- three passes per record instead of one per question plus one
-per row chunk (two for a single-question request) -- and eagerly, with the original code, where a record does not fit the
-graphed buffers, which hold ~3 GB on a 4B hybrid. Either way the rows
+(kev.cuda_graphs.chat, `graphs=0` opts out): the record's state into a bank entry, each question's prefix continuing it as
+one eager, unpadded pass per distinct prefix length (the state it leaves is what the option rows run from, so it cannot be
+padded), then its option rows as a graphed pass per question group -- a handful of passes per record instead of one per
+question plus one per row chunk. Where a record does not fit the graphed buffers (which hold ~3 GB on a 4B hybrid), the
+original eager code runs. Either way the rows
 are branch_hidden's (training's) to kernel rounding: a graph replay and an eager pass differ by floating-point
 reassociation only. Out of memory anyway (CLINC150's 151 intents, API-Bank's 53 tools, ToolRet on a long state): the
 request is rerun with the option rows in chunks (64, 16, 4, 1) under the long-row kernels (kev.predictors.long_row_kernels:

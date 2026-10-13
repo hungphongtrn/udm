@@ -25,17 +25,22 @@ to count_bucket() (empty entries are masked). The padding is masked exactly:
   the same zeros its own padding supplies. The attention layers mask the pads as keys, and a pad query attends to itself
   so no row is fully masked (a NaN there would survive the zeroing: NaN * 0 = NaN). Real tokens keep their position ids.
 - question rows are right-padded (after every real token, as the eager path already does); a state's keys are
-  right-aligned in the bucket and the slots before them are masked.
+  right-aligned in the bucket and the slots before them are masked. Right padding is exact for what a row computes
+  (attention is causal: its tokens all precede the pads), but the pads still advance a DeltaNet layer's decay, so a state
+  that a row pass leaves behind for a later pass to continue is only exact when the pass is unpadded (see the chat format).
 So the results equal the eager passes up to floating-point reassociation (another chunking of the DeltaNet scan, other
 GEMM shapes), not bit for bit, and a request's answers do not depend on what else shares its batch.
 
-The chat input format (kev.model.chat_splits) runs as three such passes (chat), batched the same way: the state that every
+The chat input format (kev.model.chat_splits) runs through these passes (chat), batched the same way: the state that every
 question's prefix shares (the template's head and the state tokens) into bank entry 0, each question's own prefix as a row
-continuing it (one pass for all of them) whose result is kept in a bank entry of its own, then the question's option rows
-continuing that. A record with one question shares its whole prefix, so its state pass is that prefix and only the option
-rows follow: the two passes the Kev format runs. The row tokens and positions are the eager chat path's
-(DecisionModel.chat_hidden) exactly; what changes is the batching (the shared state and each question's prefix run once for
-the record, where the Kev format's row form repeats the whole state for every option row).
+continuing it, its result kept in a bank entry of its own, then the question's option rows continuing that. A record with one
+question shares its whole prefix, so its state pass is that prefix and only the option rows follow: the two passes the Kev
+format runs. The row tokens and positions are the eager chat path's (DecisionModel.chat_hidden) exactly; what changes is the
+batching (the shared state and each question's prefix run once for the record, where the Kev format's row form repeats the
+whole state for every option row). The continuations, whose states the option rows run from, run eagerly, unpadded, one pass
+per distinct prefix length (_prefix_states): their state is kept, and right padding would leave it advanced past the row's
+last real token -- the reason chat_hidden runs them alone too. The state pass (left-padded, its state still zero at the pads)
+and the option rows (their states dropped) keep graphs.
 
 Capturing a graph costs ~0.4 s (an H100, Kev-4B), so the first pass of a new bucket runs the same code eagerly from the
 same buffers and the bucket joins `pending`; capture_pending() captures them later (kev.serve does it when no request is
@@ -347,12 +352,21 @@ class CudaGraphs:
                 if is_attention(layer): buf[entry, :, BANK_WIDTH - S:].copy_(t[0, :, t.shape[-2] - S:])
                 else: buf[entry].copy_(t[0])
 
-    def _parts(self, rows):
+    def _parts(self, rows, exact=False):
         """The row passes `rows` (_Row) run as, as (their indices, Sr, Lb): rows grouped by length (length_groups), then
         split to fit the buffers. Sr is the longest state in a group rounded up to a power of two (it only lengthens
-        attention) and each row names its own state's bank entry, so a group may mix them."""
-        for idx in length_groups([len(r.ids) for r in rows], GRAPH_ROWS):
-            Lb, Sr = bucket(max(len(rows[i].ids) for i in idx)), pow2(max(16, max(rows[i].state_len for i in idx)))
+        attention) and each row names its own state's bank entry, so a group may mix them. Lb is the group's bucket, which
+        pads its shorter rows to it; `exact` groups rows of one length only and takes Lb as that length, for the passes
+        whose state is kept (a padded DeltaNet state has advanced past the row's last real token)."""
+        if exact:
+            by_len = {}
+            for i in sorted(range(len(rows)), key=lambda i: len(rows[i].ids)): by_len.setdefault(len(rows[i].ids), []).append(i)
+            grouped = list(by_len.values())
+        else:
+            grouped = length_groups([len(r.ids) for r in rows], GRAPH_ROWS)
+        for idx in grouped:
+            longest = max(len(rows[i].ids) for i in idx)
+            Lb, Sr = (longest if exact else bucket(longest)), pow2(max(16, max(rows[i].state_len for i in idx)))
             group = min(GRAPH_ROWS, GRAPH_TOKENS // (Sr + Lb))
             group = max(n for n in range(1, group + 1) if count_bucket(n) <= group)   # the most rows whose padded count fits
             for start in range(0, len(idx), group): yield idx[start:start + group], Sr, Lb
@@ -369,9 +383,10 @@ class CudaGraphs:
             src, dst = torch.tensor([src, dst]).to(self.device, non_blocking=True)
             out.index_copy_(0, dst, h.flatten(0, 1).index_select(0, src).float())   # only the wanted positions leave the pass buffer
 
-    def _row_pass(self, rows, Sr, Lb):
-        """One row pass; -> the pass buffer [rows, Lb, d] (valid until the next pass)."""
-        Nb, T = count_bucket(len(rows)), Sr + Lb
+    def _row_pass(self, rows, Sr, Lb, eager=False):
+        """One row pass; -> the pass buffer [rows, Lb, d] (valid until the next pass). A pass runs `eager` (no graph, no
+        bucket: Nb = its rows, so no filler row and no pad position) where what it leaves is kept -- see _prefix_states."""
+        Nb, T = (len(rows) if eager else count_bucket(len(rows))), Sr + Lb
         hidden = self.hidden[:Nb * Lb * self.lm.config.hidden_size].view(Nb, Lb, -1)
 
         def body(buf):   # buf rows = [ids | positions | row length | state length | bank entry]
@@ -388,10 +403,14 @@ class CudaGraphs:
             hidden.copy_(self._forward(buf[:, :Lb], buf[:, Lb:2 * Lb], self._mask(allow), linear, self._cache(views, Sr, True)))
 
         uploads = [list(r.ids) + [self.pad_id] * (Lb - len(r.ids)) + list(r.pos) + [0] * (Lb - len(r.pos)) + [len(r.ids), r.state_len, r.entry] for r in rows]
-        self._replay(("rows", Nb, Lb, Sr), body, uploads + [[self.pad_id] * Lb + [0] * Lb + [0, 0, 0]] * (Nb - len(rows)))
+        if eager:   # the same body, its rows alone: a kept state must end at its row's last real token (the module docstring)
+            body(torch.tensor(uploads, dtype=torch.long, device=self.device))
+        else:
+            self._replay(("rows", Nb, Lb, Sr), body, uploads + [[self.pad_id] * Lb + [0] * Lb + [0, 0, 0]] * (Nb - len(rows)))
         return hidden[:len(rows)]
 
-    # The chat input format (kev.model.chat_splits): a whole record's passes at once (three for several questions, two for one)
+    # The chat input format (kev.model.chat_splits): a whole record's passes at once -- its state, an eager unpadded pass per
+    # distinct question prefix, then its option rows (two passes for a single-question record, whose prefix is the state pass)
 
     @staticmethod
     def admits_chat(splits):
@@ -407,11 +426,11 @@ class CudaGraphs:
     def chat(self, splits):
         """A chat record's splits (kev.model.chat_splits) -> the hidden state of every option row's last token, fp32
         [sum of the questions' options, d] in question, then option order. The module docstring's passes: the record's
-        state into bank entry 0, each question's own prefix as a row continuing it (its result kept in a bank entry of its
-        own), the question's option rows continuing that. A record with one question shares its whole prefix, so its state
-        pass is that question's prefix and no row continues it -- the passes the Kev format runs. Questions run in groups
-        of GRAPH_STATES - 1 (the bank holds the state and one entry per question). admits_chat says whether the record
-        fits: call it first."""
+        state into bank entry 0, each question's own prefix as a row continuing it (eagerly, one pass per distinct prefix
+        length: that state is kept, so the pass cannot pad it) into a bank entry of its own, the question's option rows
+        continuing that. A record with one question shares its whole prefix, so its state pass is that question's prefix and
+        no row continues it -- the passes the Kev format runs. Questions run in groups of GRAPH_STATES - 1 (the bank holds
+        the state and one entry per question). admits_chat says whether the record fits: call it first."""
         c = len(splits[0][0]) if len(splits) == 1 else chat_common(splits)   # one question: the state pass runs its whole prefix
         ids, pos = list(splits[0][0][:c]), list(splits[0][1][:c])
         if bucket(c) <= GRAPH_STATE: self.states([(ids, pos, False)], bucket(c))   # the passes the Kev format uses
@@ -420,7 +439,7 @@ class CudaGraphs:
         at = 0
         for first in range(0, len(splits), GRAPH_STATES - 1):
             group = list(range(first, min(first + GRAPH_STATES - 1, len(splits))))
-            if len(splits[group[0]][0]) > c:   # the questions' own tokens, one row pass for the group (nothing to continue otherwise)
+            if len(splits[group[0]][0]) > c:   # the questions' own tokens: unpadded, one eager pass per distinct length (nothing to continue otherwise)
                 self._prefix_states([_Row(list(splits[q][0][c:]), list(splits[q][1][c:]), 0, c, [], 0) for q in group],
                                     list(range(1, 1 + len(group))))
             entry = 1 if len(splits[group[0]][0]) > c else 0   # without a continuation row a lone question's prefix is entry 0 itself
@@ -444,11 +463,13 @@ class CudaGraphs:
         """Row passes for rows that each continue the same state -- the chat format's per-question prefixes, continuing the
         record's state in entry 0 -- then, per row, the state it leaves behind copied into bank entry entries[i]: without
         that, every option row of the question would run the question's prefix again (or read the row buffer, which the next
-        pass overwrites)."""
-        for idx, Sr, Lb in self._parts(rows):
+        pass overwrites). The states here are kept, so the passes run eagerly and unpadded (_parts(exact=True): one pass per
+        distinct prefix length): a bucketed pass leaves a DeltaNet state advanced past the row's last real token (the pads
+        do not change the row's own picked hidden states, only the state it leaves behind)."""
+        for idx, Sr, Lb in self._parts(rows, exact=True):
             part = [rows[i] for i in idx]
-            self._row_pass(part, Sr, Lb)
-            views = self.rowbuf.views(count_bucket(len(part)), Sr + Lb)
+            self._row_pass(part, Sr, Lb, eager=True)
+            views = self.rowbuf.views(len(part), Sr + Lb)
             for i, j in enumerate(idx):
                 r, entry = rows[j], entries[j]
                 p = r.state_len + len(r.ids)   # the state left behind: the one the row continued plus the row's own tokens

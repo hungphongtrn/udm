@@ -15,12 +15,13 @@ kev.predictors.LocalPredictor at the serving context, bf16 and the checkpoint's 
 dindex_engine builds it (device cuda, graphs on).
 
 Numerical equivalence: both paths run the same tokens at the same positions -- the record's state once, each question's
-prefix once, its option rows continuing that (kev.cuda_graphs: the module docstring's three passes). What differs is
-floating-point reassociation: the graphed passes pad rows to buckets and the DeltaNet scan is chunked over a different
-batch, so logits move by ~1e-3 in bf16 (the same order as the training-to-serving differences the docstrings quote) and
-probabilities by less; fp32 is orders of magnitude tighter. Answer flips should be none: report them if not. Records the
-graphed passes do not admit (kev.cuda_graphs.admits_chat: a state, a question prefix or an option row past the buffers)
-fall back to the eager passes in the graphed phase too -- the count is printed.
+prefix once, its option rows continuing that (kev.cuda_graphs: the module docstring's passes; the prefixes run eagerly and
+unpadded there, one pass per distinct length). What differs is floating-point reassociation: the graphed passes pad rows to
+buckets and the DeltaNet scan is chunked over a different batch, so logits move by ~1e-3 in bf16 (the same order as the
+training-to-serving differences the docstrings quote) and probabilities by less; fp32 is orders of magnitude tighter.
+Answer flips should be none: report them if not. Records the graphed passes do not admit (kev.cuda_graphs.admits_chat: a
+state, a question prefix or an option row past the buffers) fall back to the eager passes in the graphed phase too -- the
+count is printed.
 """
 import argparse
 import gzip

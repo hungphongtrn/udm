@@ -79,7 +79,9 @@ Chat checkpoints on the hybrid backbone score through `DecisionModel.chat_hidden
 request, each question continues it with its instruction and option listing, and its option rows continue that (the old path
 reran the state per question). On CUDA those passes are replayed as CUDA graphs (`kev.cuda_graphs.chat`, on by default;
 `GRAPHS=0` opts out, see "Chat checkpoints: inference speed" below), and eagerly where a record does not fit the graphed
-buffers. Either way the rows are the same tokens at the same positions, so rewards differ by kernel rounding only and rows
+buffers. The questions' prefixes stay single unpadded passes there, as in `chat_hidden`: their states are what the option
+rows run from, and a pass padded to a bucket would leave a DeltaNet one advanced past the prefix's last token (the pad inputs
+are zeroed, but the decay still advances). Either way the rows are the same tokens at the same positions, so rewards differ by kernel rounding only and rows
 scored before the change stay valid for a resume. Requests that still run out of memory (many options: CLINC150, API-Bank,
 ToolRet) are rerun with the option rows in chunks (exact per option up to kernel rounding; the sample run's
 `raw_output.fallback_chunk` shows it, `full` runs `--compact` and keeps no raw output). A resume keeps `unsupported` rows; to retry them, drop them from
@@ -92,9 +94,11 @@ one (arm D 27,246 s vs r10 6,048 s / v7-base 7,367 s, 15,000 requests, one 3090,
 (`DecisionModel.chat_hidden`) ran the record's state once and then, per question, a pass over that question's own prefix
 plus one padded pass per `kev.model.rows_per_pass` option rows, each pass issuing its ~2,000 kernels from Python, with the
 question's cached prefix replicated per row chunk. The same tokens now run as graphed passes over the Kev format's own
-buffers (`kev.cuda_graphs.chat`: the state into a bank entry, one row pass for all the questions' prefixes, one row pass
-for all their option rows; a single-question record's prefix *is* its state pass), one launch per pass and no prefix
-replication. `dindex_engine` turns it on for chat checkpoints on CUDA (as `kev.serve` does for the requests it replays);
+buffers (`kev.cuda_graphs.chat`: the state into a bank entry, the questions' prefixes as eager unpadded row passes, one per
+distinct prefix length -- their states are kept, so they cannot be batched under one bucket, each a few hundred tokens
+against the option rows -- then one graphed row pass for all their option rows; a single-question record's prefix *is* its
+state pass). No prefix replication, and the option rows -- the bulk -- cost one launch instead of one padded pass per row
+chunk per question. `dindex_engine` turns it on for chat checkpoints on CUDA (as `kev.serve` does for the requests it replays);
 `GRAPHS=0` opts out, Kev-format checkpoints keep their row-form path (which never touches the graphs, so this engine leaves
 them without the ~3 GB of buffers), and a record the graphed buffers do not admit (state, a question's own tokens or an
 option row past the buckets) falls back to the eager passes inside the same run.

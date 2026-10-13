@@ -491,8 +491,9 @@ class DecisionModel(nn.Module):
         rows see the same tokens at the same positions as branch_hidden's, so the rewards agree up to kernel rounding,
         while the state runs once per record instead of once per question and no pass holds more than one question's
         prefix. -> per question, per option, the row's hidden states [L, d] fp32. On CUDA self.graphs runs the same passes
-        as graphs instead (kev.cuda_graphs.chat, batched, one pass per record stage); this is the fallback for the shapes
-        they do not admit, and every path the graphs cannot be built on."""
+        as graphs instead (kev.cuda_graphs.chat, batched, one pass per record stage; the questions' prefixes stay
+        unpadded there too); this is the fallback for the shapes they do not admit, and every path the graphs cannot be
+        built on."""
         ids0, pos0, _ = splits[0]
         c = chat_common(splits)   # every question keeps at least one token of its own
         run = lambda ids, pos, cache: self.lm(input_ids=torch.tensor([ids], device=self.device), position_ids=torch.tensor([pos], device=self.device),
@@ -530,8 +531,9 @@ class DecisionModel(nn.Module):
 
     def _chat_logits(self, splits):
         """One record's chat logits [K] per question, the head applied (its temperature included): the graphed chat passes
-        where the record fits them (self.graphs, CUDA: a state pass and one row pass per question group instead of one
-        eager pass per question plus one per row chunk), chat_hidden's eager passes otherwise."""
+        where the record fits them (self.graphs, CUDA: a state pass and one row pass per question group, with the
+        questions' prefixes -- whose states the option rows run from -- eager and unpadded, kev.cuda_graphs -- instead of
+        one eager pass per question plus one per row chunk), chat_hidden's eager passes otherwise."""
         if self.graphs is not None and self.graphs.admits_chat(splits):
             return list(self.head(None, self.graphs.chat(splits)).split([len(gs) for _, _, gs in splits]))
         return [self.head(None, torch.stack([h[-1] for h in rows])) for rows in self.chat_hidden(splits)]
@@ -539,8 +541,9 @@ class DecisionModel(nn.Module):
     def forward_chat_batch(self, encs):
         """Chat format (enc["chat"], chat_splits): the same nested [record][question] -> rewards [K] as forward_batch. A hybrid
         backbone runs each question's prefix once and its K option rows from it: with gradients through kev.shared_prefix
-        (exact, gradients included), without them through the record's three graphed passes on CUDA (self.graphs) or, where
-        they do not fit, chat_hidden's eager passes. An attention-only one runs prefix + branch as one causal row per option."""
+        (exact, gradients included), without them through the record's graphed passes on CUDA (self.graphs; the questions'
+        prefixes run eagerly and unpadded there, as they must: their states are kept) or, where they do not fit,
+        chat_hidden's eager passes. An attention-only one runs prefix + branch as one causal row per option."""
         splits = [s for e in encs for s in e["chat"]]
         if self.hybrid and not torch.is_grad_enabled():
             return [self._chat_logits(e["chat"]) for e in encs]
