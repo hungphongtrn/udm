@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # Pack every pref run's logs, training metrics and eval outputs (no weights) for download. Usage: scripts/pref/pack_results.sh [OUT.tgz]
-# Prints, per run, which eval splits are complete (report.json + reward_report.json) and how many calibration rows G was fit on.
+# Also packs the data manifests (runs/pref/data/*.manifest.json, the provenance of the --data files: dataset revision,
+# admission counts, sha256) and the RewardBench 2 results (rewardbench2.json). Prints, per run, which eval splits are
+# complete (report.json + reward_report.json) and how many calibration rows G was fit on.
 set -euo pipefail
 cd "$(dirname "$0")/../.."            # kev/
 OUT=${1:-pref-results-$(date +%Y%m%d-%H%M).tgz}
 git rev-parse HEAD > runs/pref/COMMIT
 LIST=$(mktemp)
 find runs/pref -name .ipynb_checkpoints -prune -o -type f \( -name COMMIT -o -name '*.train.log' -o -path '*/seed*/train.log' \
-  -o -path '*/seed*/training_*.json' -o -path '*/eval/*' \) -print | sort > "$LIST"
+  -o -path '*/seed*/training_*.json' -o -path '*/eval/*' -o -name '*.manifest.json' -o -name rewardbench2.json \) -print | sort > "$LIST"
 tar czf "$OUT" -T "$LIST"
 for run in runs/pref/*/seed*/; do
   for split in "$run"eval/*/; do

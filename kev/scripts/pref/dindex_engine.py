@@ -8,9 +8,10 @@ Options (--option key=value):
     temperature  None = the checkpoint's own temperature; a number overrides it (1.0 = raw logits)
     dtype        bf16 (default) | fp32. fp32 is kev's exact path but leaves no room for long states on a 24 GB card.
     device       cuda (default) | cpu | mps
-    graphs       None = CUDA graphs on a CUDA device for a chat-format checkpoint (the serving default: kev.cuda_graphs
-                 replays the chat format's passes per record instead of one eager pass per question plus one per row
-                 chunk); 0 = the eager path (DecisionModel.chat_hidden), every chat number reported before the graphs. The
+    graphs       None = CUDA graphs on a CUDA device for a chat-format checkpoint (chat or chat_pointwise; the serving
+                 default: kev.cuda_graphs replays the chat format's passes per record instead of one eager pass per
+                 question plus one per row chunk); 0 = the eager path (DecisionModel.chat_hidden), every chat number
+                 reported before the graphs. The
                  Kev format's path in this engine runs the row form, which never touches the graphs, so it is left without
                  them (their buffers are ~3 GB on a 4B hybrid).
 
@@ -27,7 +28,9 @@ padded), then its option rows as a graphed pass per question group -- a handful 
 question plus one per row chunk. Where a record does not fit the graphed buffers (which hold ~3 GB on a 4B hybrid), the
 original eager code runs. Either way the rows
 are branch_hidden's (training's) to kernel rounding: a graph replay and an eager pass differ by floating-point
-reassociation only. Out of memory anyway (CLINC150's 151 intents, API-Bank's 53 tools, ToolRet on a long state): the
+reassociation only. Out of memory on the graphed path with graphs kept: their memory pool, which grows over a run
+of mixed shapes, is released (CudaGraphs.release) and the request rerun once, the graphs then captured again as their
+buckets recur. Out of memory anyway (CLINC150's 151 intents, API-Bank's 53 tools, ToolRet on a long state): the
 request is rerun with the option rows in chunks (64, 16, 4, 1) under the long-row kernels (kev.predictors.long_row_kernels:
 flash / memory-efficient SDPA). Rows never see each other and the scalar head scores each option on its own, so chunking
 changes no option's reward; the kernels round differently from the math kernel (measured on Kev-4B: max |dp| 6e-4,
@@ -97,17 +100,13 @@ class KevEngine(Engine):
             # LocalPredictor reads a label and src per question (kev.data.materialize); placeholders, never used for scoring
             label = next(iter(q["criteria"])) if q["type"] == "choice" else False
             record["questions"][qid] = {**q, "label": label, "src": "decision-index"}
-        out = None
-        try:
-            out = self.predictor(record)
-        except ContextOverflow as exc:
-            raise Unsupported(f"context: {exc}") from None
-        except torch.cuda.OutOfMemoryError:
-            pass   # leave the except block first: its traceback holds the failed pass's tensors
-        except ValidationError as exc:   # request outside the API's capacity (kev.api: e.g. more than 255 options); other errors surface as `error`
-            raise Unsupported(f"request: {exc}") from None
+        out = self._predict(record)
+        if out is None and self.graphs is not None and self.graphs.graphs:   # the graphs' pool holds the memory: free it, retry
+            kept = len(self.graphs.graphs)
+            self.graphs.release()
+            print(f"kev.cuda_graphs: out of memory with {kept} graphs kept: released them, request rerun ({self.graphs.stats()})", flush=True)
+            out = self._predict(record)
         if out is None:
-            torch.cuda.empty_cache()
             out = self._chunked(record, questions, state)
         else:
             self._capture()
@@ -122,11 +121,24 @@ class KevEngine(Engine):
                **({"fallback_chunk": out["fallback_chunk"]} if "fallback_chunk" in out else {})}
         return {"model": self.provenance["run"], "answers": answers}, raw
 
+    def _predict(self, record):
+        """The predictor's output, None on out of memory; a request past the serving context or the API's limits -> Unsupported."""
+        try:
+            return self.predictor(record)
+        except ContextOverflow as exc:
+            raise Unsupported(f"context: {exc}") from None
+        except torch.cuda.OutOfMemoryError:
+            pass   # leave the except block first: its traceback holds the failed pass's tensors
+        except ValidationError as exc:   # request outside the API's capacity (kev.api: e.g. more than 255 options); other errors surface as `error`
+            raise Unsupported(f"request: {exc}") from None
+        torch.cuda.empty_cache()
+        return None
+
     def _capture(self):
         """After a request that scored normally, capture one pending CUDA graph: a bucket that keeps running eagerly
         (kev.cuda_graphs.HOT_BUCKET) is worth its ~0.4 s capture, and with one request at a time nothing else is on the
         device (kev.serve captures off its request path the same way). Never on the chunked path: that one just ran out of
-        memory, and a failed capture is remembered as permanent."""
+        memory, and a failed capture stays failed until an out-of-memory request releases the graphs (CudaGraphs.release)."""
         if self.graphs is not None and self.graphs.capture_due(idle=False): self.graphs.capture_pending(limit=1)
 
     @torch.no_grad()
@@ -134,7 +146,7 @@ class KevEngine(Engine):
         """The out-of-memory path (module docstring): option rows in chunks of CHUNKS until one fits."""
         p, m = self.predictor, self.predictor.model
         size = f"{len(questions)} questions, state {len(str(state))} chars"
-        if m.input_format != "chat" or not m.hybrid or self.device != "cuda":
+        if m.input_format not in CHAT_FORMATS or not m.hybrid or self.device != "cuda":
             raise Unsupported(f"CUDA out of memory ({size})")
         rec = materialize(record)
         enc = m.encode(p.tok, rec, max_state=p.context["max_state"], max_branch=p.context["max_branch"], strict=True)

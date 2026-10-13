@@ -13,9 +13,14 @@ per question). On top of it, per micro-batch:
                                                              so a chosen option counts once per pair it is in)
   --reg l2    lambda * mean(cat(r_chosen, r_rejected)^2)   (same pair members, squared)
   --bce_w w   w * mean_i BCE(sigmoid(r_i), [i == y])       (Stage 2 absolute supervision, hard-label questions only)
+
+kev.train --loss bce replaces both with balanced_bce_loss: a class-balanced per-option BCE (positives and negatives each
+half of a question's weight, soft targets as partial credit, none-of-the-above rows left out), optionally plus
+--ce_w x Kev's softmax cross-entropy over the options (the listwise term; the BCE stays the anchor of the scale).
 """
 import torch
 import torch.nn.functional as F
+from .data import NONE_TEXTS
 
 REGS = ("none", "bsr", "l2")
 
@@ -48,6 +53,25 @@ def bce_loss(z, q, dev, types):
     if q.get("target") is not None or q["qtype"] not in types: return None
     y = F.one_hot(torch.tensor(q["label"], device=dev), len(z)).to(z.dtype)
     return F.binary_cross_entropy_with_logits(z, y)
+
+
+def balanced_bce_loss(z, q, dev):
+    """--loss bce, one question: -0.5 * sum_i t_i log s_i / sum_i t_i - 0.5 * sum_i (1 - t_i) log(1 - s_i) / sum_i (1 - t_i),
+    s_i = sigmoid(r_i), t_i = [i == label] or the question's soft target (partial credit; a uniform target asks for s = 0.5).
+    Positives and negatives each carry half the question's weight, so the 1/k prior of a k-option question (which the task
+    reveals even when the row hides k) is no shortcut: r_i estimates the log likelihood ratio of "right" vs "wrong", and a
+    deployment prior pi is the offset logit(pi). A half with no weight (every kept option wrong) contributes 0. Options
+    whose text is a none-of-the-above wording (kev.data.NONE_TEXTS) are left out: graded alone, the same row is right or
+    wrong depending on options it cannot see. None when every option is left out."""
+    keep = [i for i, o in enumerate(q["options"]) if o not in NONE_TEXTS]
+    if not keep: return None
+    t = torch.tensor(q["target"], device=dev, dtype=z.dtype) if q.get("target") is not None else F.one_hot(torch.tensor(q["label"], device=dev), len(z)).to(z.dtype)
+    idx = torch.tensor(keep, device=dev); z, t = z[idx], t[idx]
+    loss = z.sum() * 0.0
+    for w, y in ((t, 1.0), (1 - t, 0.0)):
+        if w.sum() > 0:
+            loss = loss + 0.5 * (w * F.binary_cross_entropy_with_logits(z, torch.full_like(z, y), reduction="none")).sum() / w.sum()
+    return loss
 
 
 def reward_reg(kind, rw, rl):

@@ -3,13 +3,16 @@ Run: .venv/bin/python -m pytest tests/test_pref.py -q   (on the training machine
 """
 import inspect
 import json
+import math
 import sys
+from pathlib import Path
 
 import pytest
 import torch
 import torch.nn.functional as F
 from kev.model import DecisionModel, SPECIAL, chat_common, chat_prompt, chat_splits, chat_template_digest, chat_template_parts, encode, user_tokens
-from kev.pref import bce_loss, preference_loss, preference_pairs, reward_reg
+from kev.data import NONE_TEXTS
+from kev.pref import balanced_bce_loss, bce_loss, preference_loss, preference_pairs, reward_reg
 
 IM = ["<|im_start|>", "<|im_end|>"]
 CHATML = ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
@@ -84,6 +87,23 @@ def test_bce_loss_hard_labels_only():
     assert torch.allclose(bce_loss(z, q, "cpu", ("choice",)), want)
 
 
+def test_balanced_bce_ignores_option_count_and_none_rows():
+    """Positives and negatives each weigh half whatever k is (so the 1/k prior is no shortcut: all-zero rewards cost log 2 at
+    k = 2 and k = 50 alike, and the loss is minimised at r = 0 for a uniform target); none wordings are left out, so a
+    question whose correct option is a none row trains its other options as wrong only."""
+    q = lambda k, y: {"options": [f"opt{i}" for i in range(k)], "label": y, "qtype": "choice"}
+    for k in (2, 50):
+        assert torch.isclose(balanced_bce_loss(torch.zeros(k), q(k, 0), "cpu"), torch.tensor(math.log(2)))
+    z = torch.zeros(4, requires_grad=True)
+    balanced_bce_loss(z, {**q(4, 0), "target": [0.25] * 4}, "cpu").backward()
+    assert torch.allclose(z.grad, torch.zeros(4))
+    none = sorted(NONE_TEXTS)[0]
+    z = torch.tensor([3.0, -1.0, 5.0])
+    got = balanced_bce_loss(z, {"options": ["a", "b", none], "label": 2, "qtype": "choice"}, "cpu")
+    assert torch.isclose(got, 0.5 * F.binary_cross_entropy_with_logits(z[:2], torch.zeros(2)))
+    assert balanced_bce_loss(z[:1], {"options": [none], "label": 0, "qtype": "choice"}, "cpu") is None
+
+
 def test_single_option_question_has_no_pairs():
     assert preference_loss(torch.tensor([0.3]), {"label": 0}, "cpu") is None
 
@@ -138,7 +158,7 @@ def test_chat_encoding_layout(tok_rec):
     positions continue the prefix; every row ends with the tail's last token. The Kev format carries no chat splits."""
     tok, rec = tok_rec
     assert "chat" not in encode(tok, rec)
-    enc = encode(tok, rec, chat=True)
+    enc = encode(tok, rec, chat="chat")
     head_ids = tok(HEAD + "State:\n", add_special_tokens=False).input_ids
     tail_ids = tok(TAIL, add_special_tokens=False).input_ids
     state_ids = user_tokens(tok, rec["state"])
@@ -159,10 +179,55 @@ def test_chat_encoding_layout(tok_rec):
     assert n == len(enc["chat"][0][0]) + len(enc["chat"][0][2][0]["ids"]) and isinstance(text, str)
 
 
+def test_chat_pointwise_encoding_layout(tok_rec):
+    """Arm H's layout (chat_pointwise): the prefix carries no option text and is one prefix for all K options; the branches
+    and their lengths are the chat layout's, and their positions continue this prefix."""
+    tok, rec = tok_rec
+    pw, full = encode(tok, rec, chat="chat_pointwise"), encode(tok, rec, chat="chat")
+    head_ids = tok(HEAD + "State:\n", add_special_tokens=False).input_ids
+    state_ids = user_tokens(tok, rec["state"])
+    assert len(enc_chat := pw["chat"]) == len(rec["questions"])
+    for q, (p_ids, p_pos, p_rows), (ids, _, rows) in zip(rec["questions"], enc_chat, full["chat"]):
+        mid = f"\n\nInstruction: {q['instr']}"
+        assert p_ids == head_ids + state_ids + tok(f"{mid}\n\nGrade this option: ", add_special_tokens=False).input_ids
+        assert ids == head_ids + state_ids + tok(
+            f"{mid}\n\nOptions:\n" + "\n".join(f"- {o}" for o in q["options"]) + "\n\nGrade this option: ", add_special_tokens=False).input_ids
+        assert p_pos == list(range(len(p_ids))) and len(p_rows) == len(q["options"])
+        for k, (p, r) in enumerate(zip(p_rows, rows)):
+            assert p["ids"] == r["ids"]                          # the branch is the option + the template tail, listing or not
+            assert p["pos"] == list(range(len(p_ids), len(p_ids) + len(p["ids"])))
+        option_ids = {tok(o, add_special_tokens=False).input_ids[0] for o in q["options"]}
+        assert not option_ids & set(p_ids)                       # no option of this question in the prefix
+        assert option_ids <= set(ids)                            # the chat layout lists every one of them
+    text, n = chat_prompt(tok, rec, 0, 0, fmt="chat_pointwise")
+    assert n == len(pw["chat"][0][0]) + len(pw["chat"][0][2][0]["ids"]) and isinstance(text, str)
+    q0 = rec["questions"][0]
+    options0 = {tok(o, add_special_tokens=False).input_ids[0] for o in q0["options"]}
+    pw_row0 = pw["chat"][0][0] + pw["chat"][0][2][0]["ids"]          # the prompt read for the first option
+    full_row0 = full["chat"][0][0] + full["chat"][0][2][0]["ids"]
+    assert len(options0 & set(pw_row0)) == 1 and options0 <= set(full_row0)
+    assert pw["chat_row_max"] == max(len(ids) + len(r["ids"]) for ids, _, rows in pw["chat"] for r in rows)
+
+
+def test_chat_yesno_encoding_layout(tok_rec):
+    """Arm HB's layout (chat_yesno): pointwise like chat_pointwise, the prefix ends at 'Option: ', and each branch is the
+    option, then the Yes/No question, then the template tail, so the row's last token is where the answer would start."""
+    tok, rec = tok_rec
+    yn = encode(tok, rec, chat="chat_yesno")
+    head_ids = tok(HEAD + "State:\n", add_special_tokens=False).input_ids
+    tail_ids = tok(TAIL, add_special_tokens=False).input_ids
+    state_ids = user_tokens(tok, rec["state"])
+    for q, (ids, pos, rows) in zip(rec["questions"], yn["chat"]):
+        assert ids == head_ids + state_ids + tok(f"\n\nInstruction: {q['instr']}\n\nOption: ", add_special_tokens=False).input_ids
+        for o, r in zip(q["options"], rows):
+            assert r["ids"] == tok(o + "\n\nIs this option a correct answer? Answer Yes or No." + TAIL, add_special_tokens=False).input_ids
+            assert r["ids"][-len(tail_ids):] == tail_ids and r["pos"] == list(range(len(ids), len(ids) + len(r["ids"])))
+
+
 def test_chat_state_truncation_and_escaping(tok_rec):
     """The state is cut to max_state - 1 tokens (as Kev's encode does); delimiter-looking text in options cannot make tokens."""
     tok, rec = tok_rec
-    enc = encode(tok, rec, chat=True, max_state=4)
+    enc = encode(tok, rec, chat="chat", max_state=4)
     assert enc["state_truncated"]
     head_ids = tok(HEAD + "State:\n", add_special_tokens=False).input_ids
     assert enc["chat"][0][0][len(head_ids):len(head_ids) + 3] == user_tokens(tok, rec["state"])[:3]
@@ -206,20 +271,23 @@ def test_chat_shared_prefix_matches_per_row(chat_model, tok_rec):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a CUDA device (kev.cuda_graphs)")
-def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec):
+@pytest.mark.parametrize("fmt", ["chat", "chat_pointwise"])
+def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec, fmt):
     """The graphed chat passes (kev.cuda_graphs.chat, what dindex_engine serves on CUDA) score a record as chat_hidden's
     eager passes do: the same tokens at the same positions, so the rewards differ by floating-point reassociation only
     (fp32 here: atol 1e-4, the tolerance the parity test above uses). Covers a record with several questions (state pass,
     one unpadded eager pass per question prefix, one graphed pass for the option rows), one whose six questions' prefixes
     have six distinct lengths and so cannot share one bucket (their continuations must run unpadded: a padded DeltaNet state
     has advanced past the prefix's last real token), and one whose single question is the state pass itself, both before any
-    capture and after (replays)."""
+    capture and after (replays), and again after CudaGraphs.release (what dindex_engine does on out of memory) and a new
+    capture in the new pool -- for both chat layouts: the pointwise prefix (no option listing) is the same tokens at the
+    same positions to these passes, which read the splits and never the listing."""
     from kev.cuda_graphs import CudaGraphs, bucket
     from kev.data import load_records, materialize
     tok, _ = tok_rec
     torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False   # as a LocalPredictor CUDA session runs (10-bit mantissa moves logits)
     torch.manual_seed(0)
-    model = DecisionModel(str(tiny_base / "base"), tok, "cuda", head_kind="scalar", input_format="chat").eval()
+    model = DecisionModel(str(tiny_base / "base"), tok, "cuda", head_kind="scalar", input_format=fmt).eval()
     model.graphs = CudaGraphs(model.lm, model.pad_id)
     records = [materialize(r) for r in load_records(tiny_base / "data.jsonl")[:2]]
     q0 = records[0]["questions"][0]
@@ -243,18 +311,69 @@ def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec):
     model.graphs.capture_pending()       # dindex_engine captures the same way between requests
     assert model.graphs.stats()["kept"] > 0, model.graphs.stats()
     for enc in encs: check(enc)          # replayed graphs
+    model.graphs.release()
+    assert model.graphs.stats()["kept"] == 0, model.graphs.stats()
+    for enc in encs: check(enc)          # eager again, from the same buffers
+    model.graphs.capture_pending()
+    assert model.graphs.stats()["kept"] > 0, model.graphs.stats()
+    for enc in encs: check(enc)          # replays of graphs captured in the new pool
 
 
-def test_chat_needs_scalar_head(tiny_base, tok_rec):
+@pytest.fixture(scope="module")
+def pointwise_model(tiny_base, tok_rec):
+    tok, _ = tok_rec
+    torch.manual_seed(0)
+    return DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="scalar", input_format="chat_pointwise")
+
+
+def one_option_record(model, tok, rec, k):
+    """The request that grades option k of the record's first question alone (what a pointwise model asks per response)."""
+    from kev.data import materialize
+    q = rec["questions"][0]
+    return model.encode(tok, materialize({"state": rec["state"], "questions": {"team": {
+        "type": "choice", "instructions": q["instr"], "criteria": {q["options"][k]: None}, "label": q["options"][k],
+        "src": "single_option"}}}))
+
+
+def test_chat_pointwise_reward_is_set_independent(pointwise_model, tok_rec):
+    """Arm H: an option's reward is the reward of the one-option prompt that grades it, so the score of a response does not
+    depend on the set it is scored in (the pointwise score Bradley-Terry assumes). Arm D's chat layout, which lists the
+    options, is not (the test below)."""
+    tok, rec = tok_rec
+    model = pointwise_model.eval()
+    enc = model.encode(tok, rec)
+    assert [len(bs) for _, _, bs in enc["chat"]] == [len(q["options"]) for q in rec["questions"]]
+    with torch.no_grad():
+        set_zs = model.forward(enc)[0]
+        alone = [model.forward(one_option_record(model, tok, rec, k))[0][0] for k in range(len(rec["questions"][0]["options"]))]
+    for k, z in enumerate(alone):
+        assert torch.allclose(set_zs[k], z.reshape(set_zs[k].shape), atol=1e-4)
+
+
+def test_chat_reward_moves_with_the_option_set(chat_model, tok_rec):
+    """The negative control for the test above: with the listing in the prefix (arm D), the same option's reward changes
+    when its siblings are not in the prompt."""
+    tok, rec = tok_rec
+    model = chat_model.eval()
+    enc = model.encode(tok, rec)
+    with torch.no_grad():
+        set_zs = model.forward(enc)[0]
+        alone = [model.forward(one_option_record(model, tok, rec, k))[0][0] for k in range(len(rec["questions"][0]["options"]))]
+    assert any(not torch.allclose(set_zs[k], z.reshape(set_zs[k].shape), atol=1e-4) for k, z in enumerate(alone))
+
+
+@pytest.mark.parametrize("fmt", ["chat", "chat_pointwise"])
+def test_chat_needs_scalar_head(tiny_base, tok_rec, fmt):
     tok, _ = tok_rec
     with pytest.raises(ValueError, match="scalar"):
-        DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="pointer", input_format="chat")
+        DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="pointer", input_format=fmt)
 
 
-def test_chat_template_mismatch_refused(tiny_base, tok_rec):
+@pytest.mark.parametrize("fmt", ["chat", "chat_pointwise"])
+def test_chat_template_mismatch_refused(tiny_base, tok_rec, fmt):
     tok, _ = tok_rec
     with pytest.raises(ValueError, match="chat template mismatch"):
-        DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="scalar", input_format="chat", chat_template_sha256="0" * 64)
+        DecisionModel(str(tiny_base / "base"), tok, "cpu", head_kind="scalar", input_format=fmt, chat_template_sha256="0" * 64)
 
 
 # --- kev.train -----------------------------------------------------------------------------------------------------
@@ -267,6 +386,8 @@ def train_tiny(tiny_base, out, *args, monkeypatch):
 
 
 STAGE1 = ("--head", "scalar", "--input_format", "chat", "--loss", "pref", "--reg", "bsr", "--lora", "4", "--max_steps", "2")
+# arm H: arm D's recipe on the pointwise prompt (no option listing in the prefix)
+STAGE1_POINTWISE = ("--head", "scalar", "--input_format", "chat_pointwise", "--loss", "pref", "--reg", "bsr", "--lora", "4", "--max_steps", "2")
 
 
 def test_train_chat_pref_smoke(tiny_base, tmp_path, monkeypatch):
@@ -283,6 +404,25 @@ def test_train_chat_pref_smoke(tiny_base, tmp_path, monkeypatch):
     assert [len(z) for z in zs] == [len(q["options"]) for q in rec["questions"]] and all(z.ndim == 1 for z in zs)
 
 
+def test_train_chat_pointwise_smoke(tiny_base, tmp_path, monkeypatch):
+    """Arm H end to end: the pointwise format trains with the same recipe, the checkpoint records the format, and the
+    loaded model scores one reward per option from a prompt that carries no option text (nothing but state, instruction
+    and the graded option)."""
+    from kev.checkpoint import Checkpoint
+    from kev.data import load_records, materialize
+    train_tiny(tiny_base, tmp_path / "h", *STAGE1_POINTWISE, monkeypatch=monkeypatch)
+    ck = Checkpoint(tmp_path / "h")
+    tok, model = ck.load("cpu")
+    assert (ck.meta.head_kind, ck.meta.input_format, ck.meta.chat_template_sha256) == ("scalar", "chat_pointwise", chat_template_digest(tok))
+    assert model.input_format == "chat_pointwise"
+    for req in load_records(tiny_base / "data.jsonl"):
+        rec = materialize(req)
+        enc = model.encode(tok, rec)
+        assert [len(z) for z in model.forward(enc)] == [len(q["options"]) for q in rec["questions"]]
+        for q, (ids, _, _) in zip(rec["questions"], enc["chat"]):
+            assert not {tok(o, add_special_tokens=False).input_ids[0] for o in q["options"]} & set(ids)
+
+
 def test_train_stage2_warm_start_and_compat(tiny_base, tmp_path, monkeypatch):
     """Stage 2 (--init_from stage 1, + BCE) runs; a pointer head cannot warm-start from a scalar checkpoint."""
     train_tiny(tiny_base, tmp_path / "a", *STAGE1, monkeypatch=monkeypatch)
@@ -294,6 +434,7 @@ def test_train_stage2_warm_start_and_compat(tiny_base, tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("args", [("--input_format", "chat", "--head", "pointer"),
+                                  ("--input_format", "chat_pointwise", "--head", "pointer"),
                                   ("--input_format", "chat", "--head", "scalar", "--option_isolation", "1"),
                                   ("--reg", "bsr", "--loss", "ce"),
                                   ("--loss", "pref", "--label_smoothing", "0.1")])
@@ -306,3 +447,83 @@ def test_train_pointer_pref_smoke(tiny_base, tmp_path, monkeypatch):
     """Arm B: the default pointer head in the Kev format trains under the preference loss."""
     train_tiny(tiny_base, tmp_path / "b", "--loss", "pref", "--lora", "4", "--max_steps", "1", monkeypatch=monkeypatch)
     assert (tmp_path / "b" / "head.pt").exists()
+
+
+# --- RewardBench 2 aggregation (scripts/pref/rewardbench2.py) -------------------------------------------------------
+
+def rewardbench2():
+    """The script, imported by path (scripts/ is not a package): the aggregation over score rows is pure, so its
+    unsupported policy is testable without a checkpoint, a GPU or the benchmark."""
+    pytest.importorskip("datasets")
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts/pref/rewardbench2.py"
+    spec = importlib.util.spec_from_file_location("rewardbench2", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_prompt_credit_zeroes_unsupported_prompts():
+    """A prompt with any unscoreable candidate earns 0 (not its chosen response's rank among the candidates that fit)."""
+    rb = rewardbench2()
+    row = {"id": "1", "scores": [1.0, 0.5, 0.4, 0.3], "unsupported": [False, False, True, False]}
+    assert rb.prompt_credit(row) == 0.0
+    assert rb.prompt_credit({**row, "unsupported": [False] * 4}) == 1.0
+    shared_top = {**row, "scores": [1.0, 1.0, 0.0, 0.0], "unsupported": [False] * 4}
+    assert rb.prompt_credit(shared_top) == 0.5             # credit shared at a tied top, as reroll_and_score_dataset scores
+    assert rb.prompt_credit({**shared_top, "unsupported": [True, False, False, False]}) == 0.0
+
+
+def test_ties_score_zeroes_unsupported_rows_but_keeps_denominators():
+    """An unsupported Ties row stays in every denominator and contributes nothing: its accuracy flag is False, its pair is
+    never a preferred/hard success, and its margin term is 0."""
+    rb = rewardbench2()
+    def row(kind, pid, num_correct, scores, unsupported=False):
+        return {"id": f"{kind}:{pid}", "num_correct": num_correct, "scores": scores, "unsupported": [unsupported] * len(scores)}
+    # ref:0 -> correct [3], wrong [2,1,0]: accurate, margin 3-2 = 1      tied:0 -> correct [3,2], wrong [1,0]: margin 2-1 = 1, diff 1
+    # ref:1 -> correct [0,1], wrong [2,3]: not accurate, margin 0-3 = -3   tied:1 -> correct [4,3], wrong [0,0]: margin 3-0 = 3, diff 1
+    # margin terms: pair 0 tanh(min(1, 1) / 1 - 1) = tanh(0), pair 1 tanh(min(-3, 3) / 1 - 1) = tanh(-4)
+    base = [row("ref", 0, 1, [3, 2, 1, 0]), row("tied", 0, 2, [3, 2, 1, 0]),
+            row("ref", 1, 2, [0, 1, 2, 3]), row("tied", 1, 2, [4, 3, 0, 0])]
+    clean, details = rb.ties_score(base)
+    assert clean == pytest.approx(0.30 * 1.0 + 0.30 * 0.5 + 0.20 * 0.5 + 0.01 * (math.tanh(0.0) + math.tanh(-4.0)) / 2)
+    assert details["tied_accuracy"] == 1.0 and details["ref_accuracy"] == 0.5      # tied:0, tied:1 accurate; ref:0 only
+    assert details["correctness_preferred"] == 0.5 and details["correctness_preferred_hard"] == 0.0
+    assert details["correctness_margin_score"] == pytest.approx((math.tanh(0.0) + math.tanh(-4.0)) / 2)
+    # one unsupported ref row: pair 1 scores nothing (preferred, hard, margin), both pairs stay in the denominators
+    zeroed, zdet = rb.ties_score([base[0], base[1], row("ref", 1, 2, [0, 1, 2, 3], unsupported=True), base[3]])
+    assert zdet == {"prompts": 4, "pairs": 2, "unsupported_rows": 1, "tied_accuracy": 1.0, "ref_accuracy": 0.5,
+                    "correctness_preferred": 0.0, "correctness_preferred_hard": 0.0, "correctness_margin_score": pytest.approx(0.0)}
+    assert zeroed == pytest.approx(0.30 * 1.0 + 0.30 * 0.5) and zeroed < clean
+    # both rows of pair 0 unsupported: that pair's accuracy flags and margin are gone, pair 1 still scores
+    both, bdet = rb.ties_score([row("ref", 0, 1, [3, 2, 1, 0], unsupported=True), row("tied", 0, 2, [3, 2, 1, 0], unsupported=True),
+                                base[2], base[3]])
+    assert (bdet["prompts"], bdet["pairs"], bdet["unsupported_rows"]) == (4, 2, 2)
+    assert (bdet["tied_accuracy"], bdet["ref_accuracy"]) == (0.5, 0.0)
+    assert (bdet["correctness_preferred"], bdet["correctness_preferred_hard"]) == (0.5, 0.0)
+    assert bdet["correctness_margin_score"] == pytest.approx((0.0 + math.tanh(-4.0)) / 2)
+    assert both == pytest.approx(0.30 * 0.5 + 0.20 * 0.5 + 0.01 * math.tanh(-4.0) / 2)
+
+
+def test_set_relative_scorer_shuffles_candidates_and_maps_scores_back():
+    """The dataset lists the chosen response first. A set-relative checkpoint that only prefers the first option it is
+    shown must not win every prompt; one that scores by content must get its scores back in the dataset's order."""
+    rb = rewardbench2()
+    class Predictor:
+        device = "cpu"
+        def __init__(self, score): self.score, self.shown = score, []
+        def __call__(self, req):
+            crit = req["questions"][rb.QID]["criteria"]
+            self.shown.append(list(crit.values()))
+            return {"logits": {rb.QID: {k: self.score(i, text) for i, (k, text) in enumerate(crit.items())}}, "input_tokens": 1}
+    cands = ["chosen", "r1", "r2", "r3"]
+    content = {"chosen": 4.0, "r1": 3.0, "r2": 2.0, "r3": 1.0}
+    by_content = rb.Scorer(Predictor(lambda i, text: content[text]), pointwise=False, order_seed=0)
+    for pid in range(20):
+        assert by_content.scores("s", cands, pid)[0] == [4.0, 3.0, 2.0, 1.0]
+    first_wins = rb.Scorer(Predictor(lambda i, text: -float(i)), pointwise=False, order_seed=0)
+    credit = [rb.prompt_credit({"scores": first_wins.scores("s", cands, pid)[0], "unsupported": [False] * 4}) for pid in range(40)]
+    assert 0 < sum(credit) < 40                            # the chosen response is shown first only on some prompts
+    dataset_order = rb.Scorer(Predictor(lambda i, text: -float(i)), pointwise=False, order_seed=-1)
+    assert all(rb.prompt_credit({"scores": dataset_order.scores("s", cands, pid)[0], "unsupported": [False] * 4}) == 1.0
+               for pid in range(5))                         # -1 reproduces the old runs' order, where position 0 wins

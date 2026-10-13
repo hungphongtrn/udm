@@ -186,7 +186,7 @@ class CudaGraphs:
         self.pending = {}             # key -> (pass body, input buffer): buckets that ran eagerly, not captured yet
         self.eager_runs = {}          # key -> how many passes of a pending bucket ran eagerly
         self.failed = {}              # key -> (why its capture failed, input buffer); the bucket keeps running eagerly
-        self.captures = 0
+        self.captures = self.releases = 0
         probe = DynamicCache(config=lm.config)   # learn the cache layout (layer kinds, state shapes, dtypes) from one eager pass
         with torch.no_grad():
             lm(input_ids=torch.full((1, 16), pad_id, device=self.device), past_key_values=probe, use_cache=True)
@@ -275,7 +275,21 @@ class CudaGraphs:
         return bool(runs) and (idle or max(runs) >= HOT_BUCKET)
 
     def stats(self):
-        return {"captured": self.captures, "kept": len(self.graphs), "pending": len(self.pending), "failed": len(self.failed)}
+        return {"captured": self.captures, "kept": len(self.graphs), "pending": len(self.pending), "failed": len(self.failed),
+                "released": self.releases}
+
+    @torch.no_grad()
+    def release(self):
+        """Drop every graph (captured, pending, failed) and start a new memory pool; the bank and row buffers stay. The
+        graphs' pool holds its blocks while any graph lives and torch.cuda.empty_cache cannot return them, so over a long
+        run of mixed shapes it took the memory eager passes need (a DI 0.3 subset run of arm D: out-of-memory refusals
+        from request ~2,200 on, ~90 per 1,000 by the end, small requests included). Call it on out of memory, then
+        empty_cache; the buckets run eagerly again and are captured again as they recur."""
+        torch.cuda.synchronize(self.device)
+        self.graphs.clear(); self.pending.clear(); self.eager_runs.clear(); self.failed.clear()
+        self.pool = torch.cuda.graph_pool_handle()
+        self.releases += 1
+        torch.cuda.empty_cache()
 
     # Serving: which requests the graphed passes take, and one batch of them
 

@@ -13,6 +13,9 @@ Run from the kit checkout (dindex.sh does), with the kit installed:
   compare OUT ENGINE           a scored subset run (OUT) vs a board entrant's published 0.3 per-benchmark results
                                (ENGINE: its board id, e.g. kev-4b-r10); writes OUT/board-compare-ENGINE.json
   pair OUT_A OUT_B             two scored subset runs side by side: index, areas, benchmarks (B - A)
+  flips OUT_A OUT_B            the same two runs request by request: per benchmark, the questions both answered and how
+                               many changed answer (choice: the top option; noul: which side of 0.5), and the largest
+                               probability change; CPU only
   retemper ROWS OUT T..        rescore a subset run (OUT) at other temperatures, without rerunning the model: each
                                T -> OUT/T<T>/ (results.jsonl + the kit's scores), OUT/best -> the best T's dir; prints
                                the index per T
@@ -101,6 +104,30 @@ def pair(a, b):
             print(f"{'    benchmark ' + n:<34} {x['raw']:>24.4f} {y['raw']:>24.4f} {y['raw'] - x['raw']:>+8.4f}")
 
 
+def flips(a, b):
+    """Per dataset: questions answered (ok) in both runs, answers that differ, max |d probability|."""
+    from collections import defaultdict
+    load = lambda o: {r["run_id"]: r for r in map(json.loads, (o / "results.jsonl").read_text(encoding="utf-8").splitlines()) if r["status"] == "ok"}
+    ra, rb = load(a), load(b)
+    stats = defaultdict(lambda: [0, 0, 0.0])   # dataset -> [questions, flips, max |dp|]
+    for rid in ra.keys() & rb.keys():
+        s = stats[ra[rid]["dataset"]]
+        qa, qb = ra[rid]["response"]["answers"], rb[rid]["response"]["answers"]
+        for q, x in qa.items():
+            y = qb[q]
+            if x["type"] == "noul":
+                s[1] += (x["noul"] >= 0.5) != (y["noul"] >= 0.5); dp = abs(x["noul"] - y["noul"])
+            else:
+                s[1] += x["choice"] != y["choice"]; dp = max(abs(p - y["probabilities"][k]) for k, p in x["probabilities"].items())
+            s[0] += 1; s[2] = max(s[2], dp)
+    print(f"{len(ra.keys() & rb.keys())} requests ok in both ({len(ra)} in A, {len(rb)} in B)")
+    print(f"{'dataset':<40} {'questions':>9} {'flips':>6} {'%':>6} {'max |dp|':>9}")
+    for n, (q, f, dp) in sorted(stats.items(), key=lambda kv: -kv[1][1]):
+        print(f"{n[:40]:<40} {q:>9} {f:>6} {100 * f / q:>6.2f} {dp:>9.2e}")
+    q, f = sum(s[0] for s in stats.values()), sum(s[1] for s in stats.values())
+    print(f"{'total':<40} {q:>9} {f:>6} {100 * f / q:>6.2f} {max(s[2] for s in stats.values()):>9.2e}")
+
+
 def retempered(answer, ratio):
     """An answer served at T_run, at T = T_run / ratio."""
     if answer["type"] == "noul":
@@ -171,6 +198,8 @@ def main(cmd, *args):
         compare(pathlib.Path(args[0]), args[1])
     elif cmd == "pair":
         pair(pathlib.Path(args[0]), pathlib.Path(args[1]))
+    elif cmd == "flips":
+        flips(pathlib.Path(args[0]), pathlib.Path(args[1]))
     elif cmd == "retemper":
         retemper(args[0], pathlib.Path(args[1]), [float(t) for t in args[2:]])
     else:

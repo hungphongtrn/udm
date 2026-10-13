@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import random
 from datasets import load_dataset
-from .api import SystemOneRequest, to_record
+from .api import SystemOneRequest, option_text, to_record
 
 
 REPOS = {"banking77": "legacy-datasets/banking77", "boolq": "google/boolq", "agnews": "fancyzhx/ag_news",
@@ -53,6 +53,10 @@ NONE_OPTIONS = [("other", "None of the above"), ("other", "A reason that fits no
                 ("other", "A category that fits none of the above"), ("other", "None of the listed options apply"),
                 ("unknown", "Cannot be determined from the options given"), ("other", "Other"), ("none", None),
                 ("other", "An answer not covered by the other options"), ("no_match", "No option matches")]
+# the rendered option texts of every none-of-the-above wording augment / none_pair can insert (none_pair's fallback
+# included): kev.pref.balanced_bce_loss leaves them out, since graded alone such a row is right or wrong depending on
+# options it cannot see
+NONE_TEXTS = frozenset(option_text(k, v) for k, v in NONE_OPTIONS + [("none_of_these", None)])
 DISTRACTORS = {"weather": "Bad weather caused it", "purple": "The colour purple", "pancakes": "A recipe for pancakes", "taxes": "Unrelated: quarterly tax filing"}
 
 AG = {"world": "World news: politics, international affairs, conflicts", "sports": "Sports: games, athletes, teams, results",

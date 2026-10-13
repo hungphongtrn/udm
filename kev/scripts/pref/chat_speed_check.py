@@ -7,21 +7,29 @@ GPU time at a few ms each), so this is the same question on N rows of the same f
     .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100            # more rows, both paths
     .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --offset 100       # a different slice of the rows
     .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --suite evals/decision-v7 --split calibration
+    # which path is closer to the fp32 reference: an fp32 run (smaller graph buffers to fit 24 GB), then bf16 against it
+    .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100 --dtype fp32 --bank-width 1024 --graph-states 8 --graph-rows 8 --graph-tokens 8192 --dump fp32.json
+    .venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100 --against fp32.json
 
 --rows defaults to $DI_DIR/subset-0.3-15000.jsonl.gz (DI_DIR: the kit checkout dindex.sh uses, ~/decision-index by
 default) and reads only `state` and `questions` from it, with the placeholder labels dindex_engine.KevEngine passes
-(labels are never scored). --suite scores records of a kev suite split instead. Both go through
-kev.predictors.LocalPredictor at the serving context, bf16 and the checkpoint's own temperature, exactly as
-dindex_engine builds it (device cuda, graphs on).
+(labels are never scored). --suite scores records of a kev suite split instead. Every record goes through
+dindex_engine.KevEngine itself -- kev.predictors.LocalPredictor at the serving context, bf16 and the checkpoint's own
+temperature -- so a record that runs out of memory takes the engine's chunked path (option rows in chunks of 64, 16, 4, 1;
+on a 24 GB card the graphed buffers leave the eager passes less room) and is timed with it, and one the engine refuses
+(Unsupported: past the serving context, out of memory at one row, another question type) is left out of both phases.
+Each phase prints how many records took the chunked path and how many were refused.
 
 Numerical equivalence: both paths run the same tokens at the same positions -- the record's state once, each question's
 prefix once, its option rows continuing that (kev.cuda_graphs: the module docstring's passes; the prefixes run eagerly and
-unpadded there, one pass per distinct length). What differs is floating-point reassociation: the graphed passes pad rows to
-buckets and the DeltaNet scan is chunked over a different batch, so logits move by ~1e-3 in bf16 (the same order as the
-training-to-serving differences the docstrings quote) and probabilities by less; fp32 is orders of magnitude tighter.
-Answer flips should be none: report them if not. Records the graphed passes do not admit (kev.cuda_graphs.admits_chat: a
-state, a question prefix or an option row past the buffers) fall back to the eager passes in the graphed phase too -- the
-count is printed.
+unpadded there, one pass per distinct length). What differs is floating-point reassociation: the graphed passes pad
+states and rows to buckets, mask attention explicitly and chunk the DeltaNet scan at other offsets. In bf16 that moved D's
+rewards by up to 0.39 and flipped 2 of 790 answers on 100 subset rows (eager is repeatable to 0; the chunked path's kernel
+change alone moved them 0.09), so bf16 eager-vs-graphed alone cannot tell rounding from a bug. In fp32 both paths should
+agree to ~1e-4 (tests/test_pref.py::test_chat_graphs_match_chat_hidden's tolerance on a tiny model); --against then says
+whether bf16 graphed is further from the fp32 eager reference than bf16 eager is. Records the graphed passes do not admit
+(kev.cuda_graphs.admits_chat: a state, a question prefix or an option row past the buffers) fall back to the eager
+passes in the graphed phase too -- the count is printed; smaller buffers admit fewer.
 """
 import argparse
 import gzip
@@ -33,10 +41,12 @@ from pathlib import Path
 
 import torch
 
-from kev.checkpoint import LoadOptions
+from decision_index.engines import Unsupported
+from dindex_engine import KevEngine   # scripts/pref, this script's own directory (sys.path[0])
+from kev import cuda_graphs
 from kev.data import materialize
 from kev.device import sync
-from kev.predictors import LocalPredictor
+from kev.model import ContextOverflow
 from kev.suite import SERVING_CONTEXT, load_split
 
 SUBSET = "subset-0.3-15000.jsonl.gz"   # dindex.sh's shared comparison subset (N=15000 rows), in the kit checkout
@@ -61,35 +71,51 @@ def di_records(path, n, offset):
     return rows, skipped
 
 
-def score(predictor, records, graphs, device):
+def score(engine, records, graphs, device):
     """Score every record, one at a time, as the kit's runner does (single-request batches; the graphs batch within a
-    record) -> (the predictor's outputs, per-record seconds). `graphs` None is the eager path (model.graphs is what
-    DecisionModel._chat_logits dispatches on); otherwise capture runs as dindex_engine.KevEngine runs it, one bucket after
-    each request. A capture's time is in the phase's clock, not in the record's own time below."""
-    predictor.model.graphs = graphs
-    out, seconds = [], []
-    for rec in records:
+    record) -> (per record {"answers", "logits"} or None when refused, per-record seconds of the scored ones, how many
+    took the chunked out-of-memory path, the refusals). `graphs` None is the eager path (model.graphs is what
+    DecisionModel._chat_logits dispatches on); otherwise capture runs as KevEngine._capture runs it, one bucket after
+    each request that scored without the chunked path. A capture's time is in the phase's clock, not in the record's own
+    time below (engine.graphs is None, so the engine itself never captures)."""
+    engine.predictor.model.graphs = graphs
+    out, seconds, chunked, refused = [], [], 0, []
+    for i, rec in enumerate(records):
         sync(device); start = time.perf_counter()
-        out.append(predictor(rec))
+        try:
+            response, raw = engine(rec["state"], rec["questions"])
+        except Unsupported as e:
+            out.append(None); refused.append((i, str(e))); continue
         sync(device); seconds.append(time.perf_counter() - start)
-        if graphs is not None and graphs.capture_due(idle=False): graphs.capture_pending(limit=1)
-    return out, seconds
+        out.append({"answers": response["answers"], "logits": raw["logits"], "chunk": raw.get("fallback_chunk")})
+        if "fallback_chunk" in raw: chunked += 1
+        elif graphs is not None and graphs.capture_due(idle=False): graphs.capture_pending(limit=1)
+    return out, seconds, chunked, refused
 
 
-def differences(ref, got, records):
-    """-> (max |d probability|, max |d reward| (the head's logits, kev.predictors' `logits`), answer flips, questions
-    compared). A flip is a choice question whose argmax moved (the engine answers choice with an argmax); noul answers are
-    a probability, so their argmax is not an answer."""
-    dp = dl = 0.0
-    flips = questions = 0
-    for a, b, rec in zip(ref, got, records):
-        for qid, q in rec["questions"].items():
-            pa, pb, za, zb = a["probabilities"][qid], b["probabilities"][qid], a["logits"][qid], b["logits"][qid]
-            dp = max(dp, max(abs(pa[k] - pb[k]) for k in pa))
-            dl = max(dl, max(abs(za[k] - zb[k]) for k in za))
-            questions += 1
-            if q["type"] == "choice" and max(pa, key=pa.get) != max(pb, key=pb.get): flips += 1
-    return dp, dl, flips, questions
+def probabilities(answer):
+    return answer["probabilities"] if answer["type"] == "choice" else {"true": answer["noul"]}
+
+
+def record_diff(a, b, rec):
+    """One record both phases scored -> (max |d reward| (the head's logits, the engine's raw `logits`), max |d
+    probability|, answer flips, questions). A flip is a choice question whose argmax moved (the engine answers choice with
+    an argmax); noul answers are P(true), so their argmax is not an answer."""
+    dl = dp = 0.0
+    flips = 0
+    for qid, q in rec["questions"].items():
+        pa, pb = probabilities(a["answers"][qid]), probabilities(b["answers"][qid])
+        za, zb = a["logits"][qid], b["logits"][qid]
+        dp = max(dp, max(abs(pa[k] - pb[k]) for k in pa))
+        dl = max(dl, max(abs(za[k] - zb[k]) for k in za))
+        if q["type"] == "choice" and max(pa, key=pa.get) != max(pb, key=pb.get): flips += 1
+    return dl, dp, flips, len(rec["questions"])
+
+
+def path(a, b, admitted):
+    """Which passes produced the graphed phase's answer for one record, against the eager phase's."""
+    if a["chunk"] or b["chunk"]: return f"chunked (eager {a['chunk'] or '-'}, graphed {b['chunk'] or '-'})"
+    return "graphed" if admitted else "eager both (not admitted)"
 
 
 def line(label, seconds, total, rows=SUBSET_ROWS):
@@ -98,10 +124,29 @@ def line(label, seconds, total, rows=SUBSET_ROWS):
             f"{total / len(seconds) * rows / 3600:>15.1f}")
 
 
+def attribution(ref, fast, records, admitted, tokens, offset):
+    """Per path, the records' max |d reward| / |d prob| and flips, then the worst records: where the differences come from."""
+    rows = []
+    for i, (a, b, rec) in enumerate(zip(ref, fast, records)):
+        if a is None or b is None: continue
+        dl, dp, flips, nq = record_diff(a, b, rec)
+        k = max(len(q.get("criteria") or ()) for q in rec["questions"].values())
+        rows.append((dl, dp, flips, nq, i, path(a, b, admitted[i]), tokens[i], k))
+    print(f"\n{'path':<34} {'records':>8} {'max |d reward|':>15} {'max |d prob|':>13} {'flips':>6}")
+    for name in sorted({r[5] for r in rows}):
+        group = [r for r in rows if r[5] == name]
+        print(f"{name:<34} {len(group):>8} {max(r[0] for r in group):>15.2e} {max(r[1] for r in group):>13.2e} {sum(r[2] for r in group):>6}")
+    print(f"\nworst records: {'record':>7} {'tokens':>7} {'questions':>9} {'max options':>11} {'|d reward|':>11} {'|d prob|':>9} {'flips':>6}  path")
+    worst = sorted(rows, reverse=True)[:10]
+    for dl, dp, flips, nq, i, name, tok, k in worst:
+        print(f"{'':<14} {offset + i:>7} {tok if tok is not None else '-':>7} {nq:>9} {k:>11} {dl:>11.2e} {dp:>9.2e} {flips:>6}  {name}")
+    return [r[4] for r in worst[:5]]
+
+
 def main():
     ap = argparse.ArgumentParser(description="The eager chat path against the graphed one, on the same rows.",
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("run", help="checkpoint dir or Hub id[@rev]: a chat-format checkpoint (arms C-F)")
+    ap.add_argument("run", help="checkpoint dir or Hub id[@rev]: a chat-format checkpoint (arms C D E F H HP)")
     ap.add_argument("--rows", help=f"the kit's rows file (default $DI_DIR/{SUBSET})")
     ap.add_argument("--suite", help="a kev suite directory to score instead (evals/decision-v7)")
     ap.add_argument("--split", default="development", help="the suite split to score (default development)")
@@ -109,8 +154,21 @@ def main():
     ap.add_argument("--offset", type=int, default=0, help="skip this many rows first (default 0)")
     ap.add_argument("--device", default="cuda", help="cuda (default), cpu or mps")
     ap.add_argument("--dtype", default="bf16", choices=("bf16", "fp32"), help="bf16 as dindex.sh runs (default) or fp32")
+    ap.add_argument("--bank-width", type=int, help=f"kev.cuda_graphs.BANK_WIDTH, positions per bank entry, a power of two (default {cuda_graphs.BANK_WIDTH})")
+    ap.add_argument("--graph-states", type=int, help=f"kev.cuda_graphs.GRAPH_STATES, bank entries (default {cuda_graphs.GRAPH_STATES})")
+    ap.add_argument("--graph-rows", type=int, help=f"kev.cuda_graphs.GRAPH_ROWS, rows per row pass (default {cuda_graphs.GRAPH_ROWS})")
+    ap.add_argument("--graph-tokens", type=int, help=f"kev.cuda_graphs.GRAPH_TOKENS, rows x positions per row pass (default {cuda_graphs.GRAPH_TOKENS})")
+    ap.add_argument("--dump", help="write both phases' answers and logits per record to this JSON file (for --against)")
+    ap.add_argument("--against", help="a --dump of the same rows (e.g. an fp32 run): print both phases' differences from its eager phase")
     args = ap.parse_args()
     if args.suite and args.rows: raise SystemExit("--rows and --suite are mutually exclusive: score one of them")
+    # smaller graph buffers (e.g. fp32 on a 24 GB card): the module's limits are read when CudaGraphs is built and on every pass
+    for flag, name in (("bank_width", "BANK_WIDTH"), ("graph_states", "GRAPH_STATES"), ("graph_rows", "GRAPH_ROWS"), ("graph_tokens", "GRAPH_TOKENS")):
+        if getattr(args, flag) is not None: setattr(cuda_graphs, name, getattr(args, flag))
+    if cuda_graphs.BANK_WIDTH & (cuda_graphs.BANK_WIDTH - 1) or cuda_graphs.GRAPH_STATES < 2 or cuda_graphs.GRAPH_ROWS < 1 \
+            or cuda_graphs.GRAPH_TOKENS < cuda_graphs.BANK_WIDTH + cuda_graphs.GRAPH_ROW:
+        raise SystemExit("graph buffers: --bank-width must be a power of two, --graph-states >= 2, --graph-rows >= 1, "
+                         f"--graph-tokens >= bank width + {cuda_graphs.GRAPH_ROW} (one admitted row pass must fit)")
 
     if args.suite:
         records, skipped = load_split(Path(args.suite), args.split)[args.offset:args.offset + args.n], 0
@@ -120,30 +178,72 @@ def main():
     if not records: raise SystemExit("no records selected")
     print(f"{len(records)} records" + (f" ({skipped} skipped: a question type the engine refuses)" if skipped else ""), flush=True)
 
-    print(f"loading {args.run} on {args.device} in {args.dtype} ...", flush=True)
-    dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
-    predictor = LocalPredictor(args.run, args.device, LoadOptions(dtype=dtype, cuda_graphs=args.device == "cuda"), context=SERVING_CONTEXT)
+    print(f"loading {args.run} on {args.device} in {args.dtype} (graph buffers: bank {cuda_graphs.GRAPH_STATES} x {cuda_graphs.BANK_WIDTH}, "
+          f"rows {cuda_graphs.GRAPH_ROWS}, row tokens {cuda_graphs.GRAPH_TOKENS}) ...", flush=True)
+    engine = KevEngine(args.run, dtype=args.dtype, device=args.device, graphs=args.device == "cuda")
+    predictor = engine.predictor
+    if args.dtype == "fp32" and predictor.model.dtype != "float32" and predictor.model.graphs is not None:
+        # a checkpoint trained on a bf16 backbone (meta.weights_dtype bf16, the 3090 chat arms) loads in bf16 whatever dtype
+        # is asked (kev.checkpoint._adapted_torch): upcast it here -- the same weights computed in fp32, the adapter stays
+        # the fp32 one -- and rebuild the graph buffers, which take the backbone's dtype
+        predictor.model.graphs = None
+        predictor.model.lm.float()
+        torch.cuda.empty_cache()
+        predictor.model.graphs = cuda_graphs.CudaGraphs(predictor.model.lm, predictor.model.pad_id)
     model, graphs = predictor.model, predictor.model.graphs
     if graphs is None:
         raise SystemExit(f"{args.run} got no graphed chat passes: they need the chat input format on a hybrid backbone on CUDA")
-    encs = [model.encode(predictor.tok, materialize(r), max_state=SERVING_CONTEXT["max_state"], max_branch=SERVING_CONTEXT["max_branch"], strict=True) for r in records]
-    fallbacks = sum(not graphs.admits_chat(e["chat"]) for e in encs)
-    tokens = [len(e["ids"]) for e in encs]
+    engine.graphs = None   # score() captures, outside the records' own times
+    admitted, tokens = [], []
+    for r in records:
+        try: enc = model.encode(predictor.tok, materialize(r), max_state=SERVING_CONTEXT["max_state"], max_branch=SERVING_CONTEXT["max_branch"], strict=True)
+        except ContextOverflow: admitted.append(False); tokens.append(None); continue   # the engine refuses it (counted below)
+        admitted.append(graphs.admits_chat(enc["chat"])); tokens.append(len(enc["ids"]))
+    fallbacks = sum(t is not None and not a for a, t in zip(admitted, tokens))
+    known = [t for t in tokens if t is not None]
+    if torch.cuda.is_available() and args.device == "cuda":
+        print(f"GPU memory after loading (weights + graph buffers): {torch.cuda.memory_allocated() / 2**30:.1f} GiB allocated "
+              f"of {torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GiB", flush=True)
     print(f"model: {model.dtype} {type(model.lm).__name__}, head {model.head_kind}, temperature {predictor.temperature}, "
-          f"tokens/record {statistics.mean(tokens):.0f} avg {max(tokens)} max, "
+          f"tokens/record {statistics.mean(known):.0f} avg {max(known)} max, "
           f"records the graphs do not admit (eager both ways): {fallbacks}", flush=True)
 
-    t = time.perf_counter(); ref, ref_s = score(predictor, records, None, args.device); ref_total = time.perf_counter() - t
-    t = time.perf_counter(); fast, fast_s = score(predictor, records, graphs, args.device); fast_total = time.perf_counter() - t
-    dp, dl, flips, questions = differences(ref, fast, records)
+    t = time.perf_counter(); ref, ref_s, ref_chunked, ref_refused = score(engine, records, None, args.device); ref_total = time.perf_counter() - t
+    t = time.perf_counter(); fast, fast_s, fast_chunked, fast_refused = score(engine, records, graphs, args.device); fast_total = time.perf_counter() - t
+    scored = [(a, b, r) for a, b, r in zip(ref, fast, records) if a is not None and b is not None]
+    per = [record_diff(*s) for s in scored]
+    dl, dp = max((p[0] for p in per), default=0.0), max((p[1] for p in per), default=0.0)
+    flips, questions = sum(p[2] for p in per), sum(p[3] for p in per)
 
-    columns = f"{'path':<10} {'mean ms':>9} {'median ms':>10} {'records/s':>11} {'projected subset h':>19}"
+    columns = f"{'path':<10} {'mean ms':>9} {'median ms':>10} {'records/s':>11} {'projected subset h':>19} {'chunked':>8} {'refused':>8}"
     print(f"\n{columns}   (the subset: {SUBSET_ROWS} rows; per-record times exclude captures)")
-    print(line("eager", ref_s, ref_total))
-    print(line("graphed", fast_s, fast_total))
+    print(line("eager", ref_s, ref_total) + f" {ref_chunked:>8} {len(ref_refused):>8}")
+    print(line("graphed", fast_s, fast_total) + f" {fast_chunked:>8} {len(fast_refused):>8}")
+    for label, refused in (("eager", ref_refused), ("graphed", fast_refused)):
+        for i, why in refused: print(f"  {label} refused record {args.offset + i}: {why}")
     print(f"\nspeedup {ref_total / fast_total:.2f}x ({ref_total:.1f} s vs {fast_total:.1f} s over {len(records)} records); "
           f"max |d reward| {dl:.2e} (the head's logits), max |d prob| {dp:.2e}, answer flips {flips}/{questions} questions")
     print(f"{graphs.captures} graphs captured ({fast_total - sum(fast_s):.1f} s of the graphed clock), stats {graphs.stats()}")
+    if args.device == "cuda": print(f"peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB allocated")
+    worst = attribution(ref, fast, records, admitted, tokens, args.offset)
+    # the floor: the worst records scored eagerly once more, against the eager phase (is the eager path itself repeatable?)
+    again, _, _, _ = score(engine, [records[i] for i in worst], None, args.device)
+    print("\neager rerun of the worst records, against the eager phase (the run-to-run floor): "
+          + ", ".join(f"record {args.offset + i} |d reward| {record_diff(ref[i], b, records[i])[0]:.2e}" + (" (chunked)" if b["chunk"] else "")
+                      for i, b in zip(worst, again) if b is not None))
+    if args.dump:
+        Path(args.dump).write_text(json.dumps({"run": str(args.run), "dtype": args.dtype, "offset": args.offset,
+                                               "records": {str(args.offset + i): {"eager": a, "graphed": b} for i, (a, b) in enumerate(zip(ref, fast))}}))
+        print(f"wrote {args.dump}")
+    if args.against:
+        other = json.loads(Path(args.against).read_text())
+        print(f"\nagainst {args.against} ({other['dtype']}) eager phase, over the records both runs scored:")
+        for label, mine in (("eager", ref), ("graphed", fast)):
+            pairs = [(other["records"][str(args.offset + i)]["eager"], m, r) for i, (m, r) in enumerate(zip(mine, records))
+                     if m is not None and other["records"].get(str(args.offset + i), {}).get("eager") is not None]
+            per = [record_diff(*p) for p in pairs]
+            print(f"  {args.dtype} {label:<8} records {len(per):>4}  max |d reward| {max((p[0] for p in per), default=0.0):.2e}  "
+                  f"max |d prob| {max((p[1] for p in per), default=0.0):.2e}  flips {sum(p[2] for p in per)}/{sum(p[3] for p in per)}")
 
 
 if __name__ == "__main__":
