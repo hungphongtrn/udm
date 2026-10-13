@@ -15,6 +15,7 @@ HP also reads the preference pairs that `convert_pref_data.py` writes (see "Poin
 | G | no training: temperature + Platt fitted on the calibration split (done inside `reward_report.py`) |
 | H | D + `--input_format chat_pointwise`: each option is graded on its own, the `Options:` listing is gone |
 | HP | H + open human preference pairs (`--data $PREF_DATA --replay 12576`) |
+| HL | H with `--loss ce`: softmax CE over a question's option rewards (reranker loss) instead of BT + BSR; probabilities via G's fitted T |
 
 H and HP belong to branch `idea/pointwise-chat-input` (pre-registered in
 [`docs/hypotheses/pointwise-chat-input.md`](../../docs/hypotheses/pointwise-chat-input.md), which also holds the rule and

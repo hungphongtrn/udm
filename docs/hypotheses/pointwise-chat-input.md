@@ -27,6 +27,7 @@ response. Two claims, one per arm:
 |---|---|
 | **H** (format) | Removing the listing keeps dev top1 within 1 point of D on both dev sets, and makes the reward of a response independent of the set it is scored in (exactly, by construction — including the option order, which `kev.benchmark`'s permutation probe measures for D). |
 | **HP** (data) | H plus open human preference pairs (RewardBench 2's own task: ranking a prompt's candidates) is strictly better than H and D at ranking (RewardBench 2 overall), at dev top1 within 1 point of H. The pairs are the only difference from H. |
+| **HL** (loss) | H's grader trained as a reranker (RankLLaMA's objective: softmax CE over a question's option rewards) instead of Bradley-Terry + BSR, with probabilities from the softmax at G's fitted temperature, generalizes at least as well as H (transfer-v4 top1) and is better calibrated (G NLL). The loss is the only difference from H. |
 
 The released Kev recipe (arm A: pointer head, CE, Kev format) has no reward-model prompt at all: it is the reference arm
 for RewardBench 2, not a comparator for the format.
@@ -38,9 +39,11 @@ for RewardBench 2, not a comparator for the format.
 | D | parent study, scalar head + pref + BSR 1e-3, chat format (`Options:` list) | `--head scalar --input_format chat --loss pref --reg bsr --reg_w 1e-3` |
 | **H** | D with the listing removed: scalar head + pref + BSR 1e-3, `chat_pointwise` | `--head scalar --input_format chat_pointwise --loss pref --reg bsr --reg_w 1e-3` |
 | **HP** | H plus the converted preference pairs | H + `--data PREF_DATA --replay 12576` |
+| **HL** | H with Kev's CE loss over the option rewards (added after the A/D RewardBench 2 run, before any H result) | `--head scalar --input_format chat_pointwise --loss ce` |
 | A | parent study baseline, Kev pointer head + CE (reference for RewardBench 2 only) | `--head pointer --input_format kev --loss ce` |
 
 H and D differ in exactly one flag. HP and H differ in exactly one pair of flags (the data file and the replay count).
+HL and H differ in the loss (`--loss ce` and no `--reg`, which only regularizes preference pairs).
 Exact strings live in `kev/scripts/pref/arms.sh` (source of truth if it differs from this table; update here).
 D's seed-0 number is arithmetically unchanged by this branch: `chat`'s layout is byte-identical (the branch keeps
 `chat_lists_options("chat") == True`, and `kev/tests/test_pref.py` pins the chat prefix).
@@ -196,6 +199,10 @@ Set before any run.
      **inconclusive** in between.
    - The idea note's H-vs-D rule (within 1 point on both dev sets, plus a visible gain) is rule 1 + rule 3 and is not
      re-scored on RB2; RB2 is the ranking test the note did not have.
+   - Loss claim (HL vs H, seed 0) is **supported** if HL's top1 is >= H's + 1 on transfer-v4 development and not more
+     than 1 point below on decision-v7 development, or within 1 point on both with a lower G NLL (softmax at fitted T)
+     on both; **refuted** if HL is more than 1 point below H on either dev set; **inconclusive** otherwise. Seeds 1-2 as
+     in rule 2 if it passes at seed 0.
 6. **Secondary, not in the verdict:** H's DI 0.3 subset index vs D's 36.91 and v7-base's 33.60 (already measured), and
    the per-subset RB2 pattern (Safety / Precise IF where the pairs should help most).
 
