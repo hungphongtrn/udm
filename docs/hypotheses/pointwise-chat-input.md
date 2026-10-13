@@ -208,11 +208,13 @@ inside the shared prefix, so the saving is small]:
   with a ~300-900-token prompt), ~5-8 h per arm, plus the 64-prompt probe (6 requests each) ~10 min. All four arms
   ~15-20 h. D and H/HP run the graphed chat passes by the serving default, so these are the fast-path estimates;
   `chat_speed_check.py runs/pref/H/seed0` measures H's before the rest.
-- DI 0.3 subset (H only): D's 7.6 h was the old eager chat path; the graphed path (on by default since `4668509`) targets
-  the Kev format's ~2 h. Measured on D seed 0 (3090): its graphs' memory pool grew until eager passes ran out of memory,
-  586 of 15,000 requests refused as unsupported (0 in the first 2,000, ~90 per 1,000 at the end; API-Bank 237,
-  POP909-CL 221, CLINC150 80), index 34.42 against the eager run's 36.91. dindex_engine now releases the graphs on out of
-  memory and reruns the request (CudaGraphs.release); rerun those 586 rows before trusting a graphed index. `GRAPHS=0`
+- DI 0.3 subset (H only): D's 7.6 h (27,246 s) was the old eager chat path. Graphed (on by default since `4668509`),
+  D seed 0 on a 3090: the first run's graphs' memory pool grew until eager passes ran out of memory, 586 of 15,000
+  requests refused (0 in the first 2,000, ~90 per 1,000 at the end; API-Bank 237, POP909-CL 221, CLINC150 80; index
+  34.42), 15,154 s. dindex_engine now releases the graphs on out of memory and reruns the request (CudaGraphs.release,
+  `2efe65f`); those 586 rows rerun with it took 3,450 s (5.9 s each: the suite's most-option requests). Result: index
+  37.01, 15,000 ok, against eager's 36.91 (kernel rounding). Graphed wall time ~15-18.6k s (the refused rows' failed
+  attempts are in the 15,154 s), so ~4.2-5.2 h: 1.5-1.8x eager, still 2-3x the Kev format's 6,048-7,367 s. `GRAPHS=0`
   runs the old eager path.
 - Total for the seed-0 path (H, HP, RB2 on A/D/H/HP, DI on H): ~35-40 h of one 3090; the seed screen adds ~18 h.
 
