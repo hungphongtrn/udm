@@ -10,9 +10,12 @@ GPU time at a few ms each), so this is the same question on N rows of the same f
 
 --rows defaults to $DI_DIR/subset-0.3-15000.jsonl.gz (DI_DIR: the kit checkout dindex.sh uses, ~/decision-index by
 default) and reads only `state` and `questions` from it, with the placeholder labels dindex_engine.KevEngine passes
-(labels are never scored). --suite scores records of a kev suite split instead. Both go through
-kev.predictors.LocalPredictor at the serving context, bf16 and the checkpoint's own temperature, exactly as
-dindex_engine builds it (device cuda, graphs on).
+(labels are never scored). --suite scores records of a kev suite split instead. Every record goes through
+dindex_engine.KevEngine itself -- kev.predictors.LocalPredictor at the serving context, bf16 and the checkpoint's own
+temperature -- so a record that runs out of memory takes the engine's chunked path (option rows in chunks of 64, 16, 4, 1;
+on a 24 GB card the graphed buffers leave the eager passes less room) and is timed with it, and one the engine refuses
+(Unsupported: past the serving context, out of memory at one row, another question type) is left out of both phases.
+Each phase prints how many records took the chunked path and how many were refused.
 
 Numerical equivalence: both paths run the same tokens at the same positions -- the record's state once, each question's
 prefix once, its option rows continuing that (kev.cuda_graphs: the module docstring's passes; the prefixes run eagerly and
@@ -33,10 +36,11 @@ from pathlib import Path
 
 import torch
 
-from kev.checkpoint import LoadOptions
+from decision_index.engines import Unsupported
+from dindex_engine import KevEngine   # scripts/pref, this script's own directory (sys.path[0])
 from kev.data import materialize
 from kev.device import sync
-from kev.predictors import LocalPredictor
+from kev.model import ContextOverflow
 from kev.suite import SERVING_CONTEXT, load_split
 
 SUBSET = "subset-0.3-15000.jsonl.gz"   # dindex.sh's shared comparison subset (N=15000 rows), in the kit checkout
@@ -61,30 +65,43 @@ def di_records(path, n, offset):
     return rows, skipped
 
 
-def score(predictor, records, graphs, device):
+def score(engine, records, graphs, device):
     """Score every record, one at a time, as the kit's runner does (single-request batches; the graphs batch within a
-    record) -> (the predictor's outputs, per-record seconds). `graphs` None is the eager path (model.graphs is what
-    DecisionModel._chat_logits dispatches on); otherwise capture runs as dindex_engine.KevEngine runs it, one bucket after
-    each request. A capture's time is in the phase's clock, not in the record's own time below."""
-    predictor.model.graphs = graphs
-    out, seconds = [], []
-    for rec in records:
+    record) -> (per record {"answers", "logits"} or None when refused, per-record seconds of the scored ones, how many
+    took the chunked out-of-memory path, the refusals). `graphs` None is the eager path (model.graphs is what
+    DecisionModel._chat_logits dispatches on); otherwise capture runs as KevEngine._capture runs it, one bucket after
+    each request that scored without the chunked path. A capture's time is in the phase's clock, not in the record's own
+    time below (engine.graphs is None, so the engine itself never captures)."""
+    engine.predictor.model.graphs = graphs
+    out, seconds, chunked, refused = [], [], 0, []
+    for i, rec in enumerate(records):
         sync(device); start = time.perf_counter()
-        out.append(predictor(rec))
+        try:
+            response, raw = engine(rec["state"], rec["questions"])
+        except Unsupported as e:
+            out.append(None); refused.append((i, str(e))); continue
         sync(device); seconds.append(time.perf_counter() - start)
-        if graphs is not None and graphs.capture_due(idle=False): graphs.capture_pending(limit=1)
-    return out, seconds
+        out.append({"answers": response["answers"], "logits": raw["logits"]})
+        if "fallback_chunk" in raw: chunked += 1
+        elif graphs is not None and graphs.capture_due(idle=False): graphs.capture_pending(limit=1)
+    return out, seconds, chunked, refused
+
+
+def probabilities(answer):
+    return answer["probabilities"] if answer["type"] == "choice" else {"true": answer["noul"]}
 
 
 def differences(ref, got, records):
-    """-> (max |d probability|, max |d reward| (the head's logits, kev.predictors' `logits`), answer flips, questions
-    compared). A flip is a choice question whose argmax moved (the engine answers choice with an argmax); noul answers are
-    a probability, so their argmax is not an answer."""
+    """-> (max |d probability|, max |d reward| (the head's logits, the engine's raw `logits`), answer flips, questions
+    compared), over the records both phases scored. A flip is a choice question whose argmax moved (the engine answers
+    choice with an argmax); noul answers are P(true), so their argmax is not an answer."""
     dp = dl = 0.0
     flips = questions = 0
     for a, b, rec in zip(ref, got, records):
+        if a is None or b is None: continue
         for qid, q in rec["questions"].items():
-            pa, pb, za, zb = a["probabilities"][qid], b["probabilities"][qid], a["logits"][qid], b["logits"][qid]
+            pa, pb = probabilities(a["answers"][qid]), probabilities(b["answers"][qid])
+            za, zb = a["logits"][qid], b["logits"][qid]
             dp = max(dp, max(abs(pa[k] - pb[k]) for k in pa))
             dl = max(dl, max(abs(za[k] - zb[k]) for k in za))
             questions += 1
@@ -121,29 +138,39 @@ def main():
     print(f"{len(records)} records" + (f" ({skipped} skipped: a question type the engine refuses)" if skipped else ""), flush=True)
 
     print(f"loading {args.run} on {args.device} in {args.dtype} ...", flush=True)
-    dtype = torch.bfloat16 if args.dtype == "bf16" else torch.float32
-    predictor = LocalPredictor(args.run, args.device, LoadOptions(dtype=dtype, cuda_graphs=args.device == "cuda"), context=SERVING_CONTEXT)
+    engine = KevEngine(args.run, dtype=args.dtype, device=args.device, graphs=args.device == "cuda")
+    predictor = engine.predictor
     model, graphs = predictor.model, predictor.model.graphs
     if graphs is None:
         raise SystemExit(f"{args.run} got no graphed chat passes: they need the chat input format on a hybrid backbone on CUDA")
-    encs = [model.encode(predictor.tok, materialize(r), max_state=SERVING_CONTEXT["max_state"], max_branch=SERVING_CONTEXT["max_branch"], strict=True) for r in records]
+    engine.graphs = None   # score() captures, outside the records' own times
+    encs = []
+    for r in records:
+        try: encs.append(model.encode(predictor.tok, materialize(r), max_state=SERVING_CONTEXT["max_state"], max_branch=SERVING_CONTEXT["max_branch"], strict=True))
+        except ContextOverflow: pass   # the engine refuses it (counted below)
     fallbacks = sum(not graphs.admits_chat(e["chat"]) for e in encs)
     tokens = [len(e["ids"]) for e in encs]
+    if torch.cuda.is_available() and args.device == "cuda":
+        print(f"GPU memory after loading (weights + graph buffers): {torch.cuda.memory_allocated() / 2**30:.1f} GiB allocated "
+              f"of {torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GiB", flush=True)
     print(f"model: {model.dtype} {type(model.lm).__name__}, head {model.head_kind}, temperature {predictor.temperature}, "
           f"tokens/record {statistics.mean(tokens):.0f} avg {max(tokens)} max, "
           f"records the graphs do not admit (eager both ways): {fallbacks}", flush=True)
 
-    t = time.perf_counter(); ref, ref_s = score(predictor, records, None, args.device); ref_total = time.perf_counter() - t
-    t = time.perf_counter(); fast, fast_s = score(predictor, records, graphs, args.device); fast_total = time.perf_counter() - t
+    t = time.perf_counter(); ref, ref_s, ref_chunked, ref_refused = score(engine, records, None, args.device); ref_total = time.perf_counter() - t
+    t = time.perf_counter(); fast, fast_s, fast_chunked, fast_refused = score(engine, records, graphs, args.device); fast_total = time.perf_counter() - t
     dp, dl, flips, questions = differences(ref, fast, records)
 
-    columns = f"{'path':<10} {'mean ms':>9} {'median ms':>10} {'records/s':>11} {'projected subset h':>19}"
+    columns = f"{'path':<10} {'mean ms':>9} {'median ms':>10} {'records/s':>11} {'projected subset h':>19} {'chunked':>8} {'refused':>8}"
     print(f"\n{columns}   (the subset: {SUBSET_ROWS} rows; per-record times exclude captures)")
-    print(line("eager", ref_s, ref_total))
-    print(line("graphed", fast_s, fast_total))
+    print(line("eager", ref_s, ref_total) + f" {ref_chunked:>8} {len(ref_refused):>8}")
+    print(line("graphed", fast_s, fast_total) + f" {fast_chunked:>8} {len(fast_refused):>8}")
+    for label, refused in (("eager", ref_refused), ("graphed", fast_refused)):
+        for i, why in refused: print(f"  {label} refused record {args.offset + i}: {why}")
     print(f"\nspeedup {ref_total / fast_total:.2f}x ({ref_total:.1f} s vs {fast_total:.1f} s over {len(records)} records); "
           f"max |d reward| {dl:.2e} (the head's logits), max |d prob| {dp:.2e}, answer flips {flips}/{questions} questions")
     print(f"{graphs.captures} graphs captured ({fast_total - sum(fast_s):.1f} s of the graphed clock), stats {graphs.stats()}")
+    if args.device == "cuda": print(f"peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB allocated")
 
 
 if __name__ == "__main__":

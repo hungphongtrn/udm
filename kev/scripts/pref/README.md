@@ -153,8 +153,10 @@ GRAPHS=0 scripts/pref/dindex.sh subset runs/pref/D/seed0 eager   # the old eager
 `chat_pointwise` (arms H / HP) is the same layout minus the `Options:` listing: the graphed passes read `chat_splits`'
 prefix and branch ids, so the pointwise prefix flows through them unchanged and `dindex_engine` turns the graphs on for it
 by the same rule (`input_format in kev.model.CHAT_FORMATS`, `GRAPHS=0` opts out). `rewardbench2.py` follows the same rule.
-`chat_speed_check.py` scores each record twice with one loaded model (eager first, then graphed, capturing buckets as the
-engine does) and prints per-record and per-second rates, the projected 15,000-row subset time for both paths, max |d
+`chat_speed_check.py` scores each record twice through `dindex_engine.KevEngine` with one loaded model (eager first, then
+graphed, capturing buckets as the engine does), so a record that runs out of memory takes the engine's chunked path in its
+timing, as in a subset run, and prints per-record and per-second rates, the projected 15,000-row subset time for both paths,
+how many records each path chunked or refused, GPU memory after loading and at peak, max |d
 reward| (the head's logits) / max |d prob| and answer flips. Expected: rewards within a few 1e-3 (bf16; the same order as
 the training-to-serving differences the docstrings quote), probabilities tighter, no flips; and a graphed per-record time
 at or under the Kev format's subset average (~0.42 s against r10's 6,048 s), since the Kev format's row path recomputes the
