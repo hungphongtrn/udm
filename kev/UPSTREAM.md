@@ -16,7 +16,7 @@ non-vendored `playground/scripts/jev-evaluate.mjs`). `experiment.py`'s `EVALUATO
 Comments that mention `kev.serve` etc. are upstream history. `pyproject.toml` deps other than torch/kernels are untouched; `uv.lock` was deleted (see Environment).
 
 Not vendored: `runs/`, other evals, playground, space, `modal_app`, docs. Upstream tests were removed (they need
-unvendored files) and replaced by `tests/test_pref.py`.
+unvendored files) and replaced by `tests/test_pref.py` and `tests/test_allwrong.py`.
 
 This is its own uv project, separate from udm's.
 
@@ -46,6 +46,9 @@ Defaults keep upstream behaviour bit-identical (`--head pointer`, `--input_forma
 - `tests/test_pref.py` (new): CPU tests of the pref losses, chat layout and checkpoint round-trip.
 - `scripts/pref/` (new): setup, arm definitions, run/eval/wave scripts and reward report for the preference study
   (see `scripts/pref/README.md`).
+- `scripts/abstain/` and `tests/test_allwrong.py` (new, branch `idea/allwrong-abstention`): all-wrong minimal pairs from a
+  frozen suite, their benchmark passes and the cross-arm detection / risk-coverage report
+  (see `docs/hypotheses/allwrong-abstention.md`).
 
 ## Reproduce the diff
 
