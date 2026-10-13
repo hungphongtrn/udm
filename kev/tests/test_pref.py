@@ -279,9 +279,6 @@ def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec, fmt):
     for enc in encs: check(enc)          # replayed graphs
 
 
-def test_chat_needs_scalar_head(tiny_base, tok_rec):
-
-
 @pytest.fixture(scope="module")
 def pointwise_model(tiny_base, tok_rec):
     tok, _ = tok_rec
