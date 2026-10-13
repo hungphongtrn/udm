@@ -81,7 +81,7 @@ def score(engine, records, graphs, device):
         except Unsupported as e:
             out.append(None); refused.append((i, str(e))); continue
         sync(device); seconds.append(time.perf_counter() - start)
-        out.append({"answers": response["answers"], "logits": raw["logits"]})
+        out.append({"answers": response["answers"], "logits": raw["logits"], "chunk": raw.get("fallback_chunk")})
         if "fallback_chunk" in raw: chunked += 1
         elif graphs is not None and graphs.capture_due(idle=False): graphs.capture_pending(limit=1)
     return out, seconds, chunked, refused
@@ -91,28 +91,50 @@ def probabilities(answer):
     return answer["probabilities"] if answer["type"] == "choice" else {"true": answer["noul"]}
 
 
-def differences(ref, got, records):
-    """-> (max |d probability|, max |d reward| (the head's logits, the engine's raw `logits`), answer flips, questions
-    compared), over the records both phases scored. A flip is a choice question whose argmax moved (the engine answers
-    choice with an argmax); noul answers are P(true), so their argmax is not an answer."""
-    dp = dl = 0.0
-    flips = questions = 0
-    for a, b, rec in zip(ref, got, records):
-        if a is None or b is None: continue
-        for qid, q in rec["questions"].items():
-            pa, pb = probabilities(a["answers"][qid]), probabilities(b["answers"][qid])
-            za, zb = a["logits"][qid], b["logits"][qid]
-            dp = max(dp, max(abs(pa[k] - pb[k]) for k in pa))
-            dl = max(dl, max(abs(za[k] - zb[k]) for k in za))
-            questions += 1
-            if q["type"] == "choice" and max(pa, key=pa.get) != max(pb, key=pb.get): flips += 1
-    return dp, dl, flips, questions
+def record_diff(a, b, rec):
+    """One record both phases scored -> (max |d reward| (the head's logits, the engine's raw `logits`), max |d
+    probability|, answer flips, questions). A flip is a choice question whose argmax moved (the engine answers choice with
+    an argmax); noul answers are P(true), so their argmax is not an answer."""
+    dl = dp = 0.0
+    flips = 0
+    for qid, q in rec["questions"].items():
+        pa, pb = probabilities(a["answers"][qid]), probabilities(b["answers"][qid])
+        za, zb = a["logits"][qid], b["logits"][qid]
+        dp = max(dp, max(abs(pa[k] - pb[k]) for k in pa))
+        dl = max(dl, max(abs(za[k] - zb[k]) for k in za))
+        if q["type"] == "choice" and max(pa, key=pa.get) != max(pb, key=pb.get): flips += 1
+    return dl, dp, flips, len(rec["questions"])
+
+
+def path(a, b, admitted):
+    """Which passes produced the graphed phase's answer for one record, against the eager phase's."""
+    if a["chunk"] or b["chunk"]: return f"chunked (eager {a['chunk'] or '-'}, graphed {b['chunk'] or '-'})"
+    return "graphed" if admitted else "eager both (not admitted)"
 
 
 def line(label, seconds, total, rows=SUBSET_ROWS):
     per = statistics.mean(seconds)
     return (f"{label:<10} {1000 * per:>9.1f} {1000 * statistics.median(seconds):>10.1f} {1 / per:>11.2f} "
             f"{total / len(seconds) * rows / 3600:>15.1f}")
+
+
+def attribution(ref, fast, records, admitted, tokens, offset):
+    """Per path, the records' max |d reward| / |d prob| and flips, then the worst records: where the differences come from."""
+    rows = []
+    for i, (a, b, rec) in enumerate(zip(ref, fast, records)):
+        if a is None or b is None: continue
+        dl, dp, flips, nq = record_diff(a, b, rec)
+        k = max(len(q.get("criteria") or ()) for q in rec["questions"].values())
+        rows.append((dl, dp, flips, nq, i, path(a, b, admitted[i]), tokens[i], k))
+    print(f"\n{'path':<34} {'records':>8} {'max |d reward|':>15} {'max |d prob|':>13} {'flips':>6}")
+    for name in sorted({r[5] for r in rows}):
+        group = [r for r in rows if r[5] == name]
+        print(f"{name:<34} {len(group):>8} {max(r[0] for r in group):>15.2e} {max(r[1] for r in group):>13.2e} {sum(r[2] for r in group):>6}")
+    print(f"\nworst records: {'record':>7} {'tokens':>7} {'questions':>9} {'max options':>11} {'|d reward|':>11} {'|d prob|':>9} {'flips':>6}  path")
+    worst = sorted(rows, reverse=True)[:10]
+    for dl, dp, flips, nq, i, name, tok, k in worst:
+        print(f"{'':<14} {offset + i:>7} {tok if tok is not None else '-':>7} {nq:>9} {k:>11} {dl:>11.2e} {dp:>9.2e} {flips:>6}  {name}")
+    return [r[4] for r in worst[:5]]
 
 
 def main():
@@ -144,22 +166,26 @@ def main():
     if graphs is None:
         raise SystemExit(f"{args.run} got no graphed chat passes: they need the chat input format on a hybrid backbone on CUDA")
     engine.graphs = None   # score() captures, outside the records' own times
-    encs = []
+    admitted, tokens = [], []
     for r in records:
-        try: encs.append(model.encode(predictor.tok, materialize(r), max_state=SERVING_CONTEXT["max_state"], max_branch=SERVING_CONTEXT["max_branch"], strict=True))
-        except ContextOverflow: pass   # the engine refuses it (counted below)
-    fallbacks = sum(not graphs.admits_chat(e["chat"]) for e in encs)
-    tokens = [len(e["ids"]) for e in encs]
+        try: enc = model.encode(predictor.tok, materialize(r), max_state=SERVING_CONTEXT["max_state"], max_branch=SERVING_CONTEXT["max_branch"], strict=True)
+        except ContextOverflow: admitted.append(False); tokens.append(None); continue   # the engine refuses it (counted below)
+        admitted.append(graphs.admits_chat(enc["chat"])); tokens.append(len(enc["ids"]))
+    fallbacks = sum(t is not None and not a for a, t in zip(admitted, tokens))
+    known = [t for t in tokens if t is not None]
     if torch.cuda.is_available() and args.device == "cuda":
         print(f"GPU memory after loading (weights + graph buffers): {torch.cuda.memory_allocated() / 2**30:.1f} GiB allocated "
               f"of {torch.cuda.get_device_properties(0).total_memory / 2**30:.1f} GiB", flush=True)
     print(f"model: {model.dtype} {type(model.lm).__name__}, head {model.head_kind}, temperature {predictor.temperature}, "
-          f"tokens/record {statistics.mean(tokens):.0f} avg {max(tokens)} max, "
+          f"tokens/record {statistics.mean(known):.0f} avg {max(known)} max, "
           f"records the graphs do not admit (eager both ways): {fallbacks}", flush=True)
 
     t = time.perf_counter(); ref, ref_s, ref_chunked, ref_refused = score(engine, records, None, args.device); ref_total = time.perf_counter() - t
     t = time.perf_counter(); fast, fast_s, fast_chunked, fast_refused = score(engine, records, graphs, args.device); fast_total = time.perf_counter() - t
-    dp, dl, flips, questions = differences(ref, fast, records)
+    scored = [(a, b, r) for a, b, r in zip(ref, fast, records) if a is not None and b is not None]
+    per = [record_diff(*s) for s in scored]
+    dl, dp = max((p[0] for p in per), default=0.0), max((p[1] for p in per), default=0.0)
+    flips, questions = sum(p[2] for p in per), sum(p[3] for p in per)
 
     columns = f"{'path':<10} {'mean ms':>9} {'median ms':>10} {'records/s':>11} {'projected subset h':>19} {'chunked':>8} {'refused':>8}"
     print(f"\n{columns}   (the subset: {SUBSET_ROWS} rows; per-record times exclude captures)")
@@ -171,6 +197,12 @@ def main():
           f"max |d reward| {dl:.2e} (the head's logits), max |d prob| {dp:.2e}, answer flips {flips}/{questions} questions")
     print(f"{graphs.captures} graphs captured ({fast_total - sum(fast_s):.1f} s of the graphed clock), stats {graphs.stats()}")
     if args.device == "cuda": print(f"peak GPU memory {torch.cuda.max_memory_allocated() / 2**30:.1f} GiB allocated")
+    worst = attribution(ref, fast, records, admitted, tokens, args.offset)
+    # the floor: the worst records scored eagerly once more, against the eager phase (is the eager path itself repeatable?)
+    again, _, _, _ = score(engine, [records[i] for i in worst], None, args.device)
+    print("\neager rerun of the worst records, against the eager phase (the run-to-run floor): "
+          + ", ".join(f"record {args.offset + i} |d reward| {record_diff(ref[i], b, records[i])[0]:.2e}" + (" (chunked)" if b["chunk"] else "")
+                      for i, b in zip(worst, again) if b is not None))
 
 
 if __name__ == "__main__":
