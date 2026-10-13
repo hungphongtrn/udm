@@ -14,6 +14,8 @@ SPECIAL = ["<|fim_prefix|>", "<|fim_middle|>", "<|box_start|>", "<|box_end|>", "
 #   State:\n{state}\n\nInstruction: {instr}\n\nOptions:\n- {o_1}\n- {o_2}...\n\nGrade this option: {o_k}
 # and the reward is read at the last token of the rendered prompt (the template's tail). chat_splits lays it out.
 HEAD_KINDS, INPUT_FORMATS = ("pointer", "scalar"), ("kev", "chat")
+CHAT_FORMATS = ("chat",)   # INPUT_FORMATS laid out by chat_splits and served through enc["chat"]: kev.cuda_graphs.chat,
+                           # DecisionModel.chat_hidden. A future chat-shaped format joins here, not at each equality check.
 CHAT_SENTINEL = "@@KEV_CHAT_CONTENT@@"
 # a chat row (prefix + one option branch) may exceed the Kev row limit (state + question branch, max_branch) by this many
 # tokens: the template head/tail, "State:/Instruction:/Options:/Grade this option:" labels, "- " bullets and the option being graded
@@ -268,6 +270,15 @@ def chat_splits(tok, rec, state_ids):
     return out
 
 
+def chat_common(splits):
+    """The tokens every question's prefix shares (the template head and the state's tokens) as a length: the longest common
+    prefix of the questions' prefixes that leaves each of them at least one token of its own. The state pass of both chat
+    serving paths (chat_hidden, kev.cuda_graphs.chat) runs it once per record instead of once per question."""
+    ids0, pos0, _ = splits[0]
+    n = min(len(S) for S, _, _ in splits) - 1
+    return next((i for i in range(n) if any(S[i] != ids0[i] or Sp[i] != pos0[i] for S, Sp, _ in splits)), n)
+
+
 def chat_prompt(tok, rec, q=0, k=0, max_state=MAX_STATE):
     """-> (text, token count) of the chat row for option k of question q, decoded from the very ids the model reads (setup
     check: tokenizer only)."""
@@ -479,10 +490,11 @@ class DecisionModel(nn.Module):
         state), and its K option rows continue that question's cache (_rows_hidden, `chunk` rows per pass if given). The
         rows see the same tokens at the same positions as branch_hidden's, so the rewards agree up to kernel rounding,
         while the state runs once per record instead of once per question and no pass holds more than one question's
-        prefix. -> per question, per option, the row's hidden states [L, d] fp32."""
+        prefix. -> per question, per option, the row's hidden states [L, d] fp32. On CUDA self.graphs runs the same passes
+        as graphs instead (kev.cuda_graphs.chat, batched, one pass per record stage); this is the fallback for the shapes
+        they do not admit, and every path the graphs cannot be built on."""
         ids0, pos0, _ = splits[0]
-        n = min(len(S) for S, _, _ in splits) - 1   # every question keeps at least one token of its own
-        c = next((i for i in range(n) if any(S[i] != ids0[i] or Sp[i] != pos0[i] for S, Sp, _ in splits)), n)
+        c = chat_common(splits)   # every question keeps at least one token of its own
         run = lambda ids, pos, cache: self.lm(input_ids=torch.tensor([ids], device=self.device), position_ids=torch.tensor([pos], device=self.device),
                                               past_key_values=cache, use_cache=True)
         common = DynamicCache(config=self.lm.config)
@@ -516,14 +528,22 @@ class DecisionModel(nn.Module):
             out[b].append(self.head(h[d], h[torch.tensor(oi, device=self.device)]))
         return out
 
+    def _chat_logits(self, splits):
+        """One record's chat logits [K] per question, the head applied (its temperature included): the graphed chat passes
+        where the record fits them (self.graphs, CUDA: a state pass and one row pass per question group instead of one
+        eager pass per question plus one per row chunk), chat_hidden's eager passes otherwise."""
+        if self.graphs is not None and self.graphs.admits_chat(splits):
+            return list(self.head(None, self.graphs.chat(splits)).split([len(gs) for _, _, gs in splits]))
+        return [self.head(None, torch.stack([h[-1] for h in rows])) for rows in self.chat_hidden(splits)]
+
     def forward_chat_batch(self, encs):
         """Chat format (enc["chat"], chat_splits): the same nested [record][question] -> rewards [K] as forward_batch. A hybrid
         backbone runs each question's prefix once and its K option rows from it: with gradients through kev.shared_prefix
-        (exact, gradients included), without them through chat_hidden (the record's state once, then per question). An
-        attention-only one runs prefix + branch as one causal row per option."""
+        (exact, gradients included), without them through the record's three graphed passes on CUDA (self.graphs) or, where
+        they do not fit, chat_hidden's eager passes. An attention-only one runs prefix + branch as one causal row per option."""
         splits = [s for e in encs for s in e["chat"]]
         if self.hybrid and not torch.is_grad_enabled():
-            hs = [h for e in encs for h in self.chat_hidden(e["chat"])]
+            return [self._chat_logits(e["chat"]) for e in encs]
         elif self.hybrid:
             from .shared_prefix import branch_hidden
             hs = branch_hidden(self.lm, splits, self.pad_id, self.device)

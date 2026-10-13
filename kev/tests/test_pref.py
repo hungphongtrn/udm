@@ -205,6 +205,39 @@ def test_chat_shared_prefix_matches_per_row(chat_model, tok_rec):
         model.zero_grad(); model.eval()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a CUDA device (kev.cuda_graphs)")
+def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec):
+    """The graphed chat passes (kev.cuda_graphs.chat, what dindex_engine serves on CUDA) score a record as chat_hidden's
+    eager passes do: the same tokens at the same positions, so the rewards differ by floating-point reassociation only
+    (fp32 here: atol 1e-4, the tolerance the parity test above uses). Covers a record with several questions (state pass,
+    one row pass for their prefixes, one for the option rows) and one whose single question is the state pass itself, both
+    before any capture and after (replays)."""
+    from kev.cuda_graphs import CudaGraphs
+    from kev.data import load_records, materialize
+    tok, _ = tok_rec
+    torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False   # as a LocalPredictor CUDA session runs (10-bit mantissa moves logits)
+    torch.manual_seed(0)
+    model = DecisionModel(str(tiny_base / "base"), tok, "cuda", head_kind="scalar", input_format="chat").eval()
+    model.graphs = CudaGraphs(model.lm, model.pad_id)
+    records = [materialize(r) for r in load_records(tiny_base / "data.jsonl")[:2]]
+    records.append({**records[0], "questions": records[0]["questions"][:1]})   # one question: no continuation row
+    encs = [model.encode(tok, r) for r in records]
+    assert all(model.graphs.admits_chat(e["chat"]) for e in encs)
+
+    def check(enc):
+        with torch.no_grad():
+            fast = model._chat_logits(enc["chat"])
+            want = [model.head(None, torch.stack([h[-1] for h in rows])) for rows in model.chat_hidden(enc["chat"])]
+        assert len(fast) == len(want)
+        for got, w in zip(fast, want):
+            assert got.shape == w.shape and torch.allclose(got.detach(), w, atol=1e-4), (got - w).abs().max()
+
+    for enc in encs: check(enc)          # the first pass per bucket runs the graph's code eagerly (kev.cuda_graphs._replay)
+    model.graphs.capture_pending()       # dindex_engine captures the same way between requests
+    assert model.graphs.stats()["kept"] > 0, model.graphs.stats()
+    for enc in encs: check(enc)          # replayed graphs
+
+
 def test_chat_needs_scalar_head(tiny_base, tok_rec):
     tok, _ = tok_rec
     with pytest.raises(ValueError, match="scalar"):

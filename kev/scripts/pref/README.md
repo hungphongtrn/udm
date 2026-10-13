@@ -75,14 +75,47 @@ says it fits Decision Index, so `check` pairs D with v7-base three ways: shipped
 1.47 = seed 0's G), raw (both T = 1), and the best T of `TGRID` for each, chosen on the subset itself (optimistic). If
 the winner changes across the three, temperature decides it, not the training loss. Compare D with `v7-base`, not with
 the board's Kev-4B (r10 adds three training stages after the base recipe and T = 2.41).
-Chat checkpoints on the hybrid backbone score through `DecisionModel.chat_hidden`: the state runs once per request, each
-question continues it with its instruction and option listing, and its option rows continue that (the old path reran the
-state per question; the rows are the same tokens at the same positions, so rewards differ by bf16 kernel rounding only and
-rows scored before the change stay valid for a resume). Requests that still run out of memory (many options: CLINC150,
-API-Bank, ToolRet) are rerun with the option rows in chunks (exact per option up to kernel rounding; the sample run's
+Chat checkpoints on the hybrid backbone score through `DecisionModel.chat_hidden`'s passes: the state runs once per
+request, each question continues it with its instruction and option listing, and its option rows continue that (the old path
+reran the state per question). On CUDA those passes are replayed as CUDA graphs (`kev.cuda_graphs.chat`, on by default;
+`GRAPHS=0` opts out, see "Chat checkpoints: inference speed" below), and eagerly where a record does not fit the graphed
+buffers. Either way the rows are the same tokens at the same positions, so rewards differ by kernel rounding only and rows
+scored before the change stay valid for a resume. Requests that still run out of memory (many options: CLINC150, API-Bank,
+ToolRet) are rerun with the option rows in chunks (exact per option up to kernel rounding; the sample run's
 `raw_output.fallback_chunk` shows it, `full` runs `--compact` and keeps no raw output). A resume keeps `unsupported` rows; to retry them, drop them from
 `results.jsonl` first (backup kept):
 `.venv/bin/python -c "import json,shutil,sys; f=sys.argv[1]; shutil.copy(f,f+'.bak'); open(f,'w').writelines(l for l in open(f+'.bak') if l.endswith('\n') and json.loads(l)['status']!='unsupported')" runs/pref/D/seed0/dindex-0.3/results.jsonl`
+
+## Chat checkpoints: inference speed
+The chat format's serving cost was its one drawback: on the DI subset a chat checkpoint was 3.7x slower than a Kev-format
+one (arm D 27,246 s vs r10 6,048 s / v7-base 7,367 s, 15,000 requests, one 3090, bf16). The eager chat path
+(`DecisionModel.chat_hidden`) ran the record's state once and then, per question, a pass over that question's own prefix
+plus one padded pass per `kev.model.rows_per_pass` option rows, each pass issuing its ~2,000 kernels from Python, with the
+question's cached prefix replicated per row chunk. The same tokens now run as graphed passes over the Kev format's own
+buffers (`kev.cuda_graphs.chat`: the state into a bank entry, one row pass for all the questions' prefixes, one row pass
+for all their option rows; a single-question record's prefix *is* its state pass), one launch per pass and no prefix
+replication. `dindex_engine` turns it on for chat checkpoints on CUDA (as `kev.serve` does for the requests it replays);
+`GRAPHS=0` opts out, Kev-format checkpoints keep their row-form path (which never touches the graphs, so this engine leaves
+them without the ~3 GB of buffers), and a record the graphed buffers do not admit (state, a question's own tokens or an
+option row past the buckets) falls back to the eager passes inside the same run.
+
+Verify on the training machine before trusting a subset number:
+```bash
+.venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0                  # 20 DI subset rows, both paths, per-record ms + max |d reward|
+.venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --n 100          # more rows; --offset for another slice
+.venv/bin/python scripts/pref/chat_speed_check.py runs/pref/D/seed0 --suite evals/decision-v7 --split calibration
+scripts/pref/dindex.sh subset runs/pref/D/seed0 graphed     # the default (graphed passes); NAME = a fresh out dir, so nothing is seeded
+GRAPHS=0 scripts/pref/dindex.sh subset runs/pref/D/seed0 eager   # the old eager path on the same rows, for the comparison
+```
+`chat_speed_check.py` scores each record twice with one loaded model (eager first, then graphed, capturing buckets as the
+engine does) and prints per-record and per-second rates, the projected 15,000-row subset time for both paths, max |d
+reward| (the head's logits) / max |d prob| and answer flips. Expected: rewards within a few 1e-3 (bf16; the same order as
+the training-to-serving differences the docstrings quote), probabilities tighter, no flips; and a graphed per-record time
+at or under the Kev format's subset average (~0.42 s against r10's 6,048 s), since the Kev format's row path recomputes the
+state for every option row while this one runs it once. The subset re-measure: the kit's `complete` event in
+`RUN/dindex-0.3-sub$N/run.log` carries `elapsed_seconds` (per-row `total_wall_ms` is in `results.jsonl`); a subset run
+seeded from a `full` run of the same checkpoint copies that run's already-answered rows, so time a fresh `NAME` to see the
+new path's own speed.
 
 ## Env vars
 - `PYTORCH_ALLOC_CONF`: run_arm.sh defaults it to `expandable_segments:True` (allocator fragmentation on the chat-format arms; no effect on results).
@@ -90,6 +123,7 @@ API-Bank, ToolRet) are rerun with the option rows in chunks (exact per option up
 - `BATCH_FALLBACK=1`: halves every arm's microbatch (Kev 2 x 4, chat 1 x 8) if the defaults still run out of memory.
 - `FORCE=1`: delete an existing `runs/pref/ARM/seedN` and retrain it (applies to every arm a wave1.sh run touches). Without it run_arm.sh evaluates a trained run (head.pt) only and refuses an unfinished one.
 - `BCE_W` (default 0.5), `F_EPOCHS` (default 1): arm F.
+- `GRAPHS=0`: dindex.sh, the eager chat path instead of `kev.cuda_graphs` (unset: on for a chat checkpoint on CUDA). A set value joins the engine options, so a subset run will not seed from a `full` run made without it.
 - `SEEDS`, `RUN_C0`, `RUN_F`: wave1.sh. `TEST=1`: eval on the locked test split.
 
 ## Outputs

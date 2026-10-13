@@ -18,7 +18,8 @@
 # RUN: a checkpoint dir (runs/pref/D/seed0) or a Hub id (jaredpalmer/kev-4b@v7-base: the published base-recipe comparator).
 # NAME: output dir name override (needed for Hub ids): out goes to runs/dindex/NAME[-sample] instead.
 # env: DI_DIR (kit checkout, default ~/decision-index), TEMP (default: checkpoint's own; e.g. 1.47 = D seed0's G),
-#      DTYPE (bf16 default | fp32), CUDA_VISIBLE_DEVICES.
+#      DTYPE (bf16 default | fp32), GRAPHS (0 = no CUDA graphs, the eager chat path; unset = the engine default, on for a
+#      chat-format checkpoint on CUDA), CUDA_VISIBLE_DEVICES.
 # Resume: rerun the same command; the kit keeps answered rows and retries only `error` rows.
 set -euo pipefail
 cd "$(dirname "$0")/../.."            # kev/
@@ -79,6 +80,7 @@ elif [ -d "$RUN" ]; then OUT=$RUN/dindex-0.3
 else echo "a Hub id needs NAME (3rd arg)" >&2; exit 1; fi
 optv=("run=$RUN" "dtype=${DTYPE:-bf16}")
 [ -n "${TEMP:-}" ] && optv+=("temperature=$TEMP")
+[ -n "${GRAPHS:-}" ] && optv+=("graphs=$GRAPHS")   # unset = the engine's default (CUDA graphs on for the chat format); a set value is part of the run's options for dindex_subset.py seed
 opts=(--engine dindex_engine:KevEngine)
 for o in "${optv[@]}"; do opts+=(--option "$o"); done
 cd "$DI_DIR"

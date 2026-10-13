@@ -29,6 +29,14 @@ to count_bucket() (empty entries are masked). The padding is masked exactly:
 So the results equal the eager passes up to floating-point reassociation (another chunking of the DeltaNet scan, other
 GEMM shapes), not bit for bit, and a request's answers do not depend on what else shares its batch.
 
+The chat input format (kev.model.chat_splits) runs as three such passes (chat), batched the same way: the state that every
+question's prefix shares (the template's head and the state tokens) into bank entry 0, each question's own prefix as a row
+continuing it (one pass for all of them) whose result is kept in a bank entry of its own, then the question's option rows
+continuing that. A record with one question shares its whole prefix, so its state pass is that prefix and only the option
+rows follow: the two passes the Kev format runs. The row tokens and positions are the eager chat path's
+(DecisionModel.chat_hidden) exactly; what changes is the batching (the shared state and each question's prefix run once for
+the record, where the Kev format's row form repeats the whole state for every option row).
+
 Capturing a graph costs ~0.4 s (an H100, Kev-4B), so the first pass of a new bucket runs the same code eagerly from the
 same buffers and the bucket joins `pending`; capture_pending() captures them later (kev.serve does it when no request is
 waiting). Replays run one at a time (kev.serve has one model thread), each refills what it reads, and its results are
@@ -40,6 +48,8 @@ from typing import NamedTuple
 import torch
 from transformers import DynamicCache
 from transformers.cache_utils import DynamicLayer, LinearAttentionLayer
+
+from .model import chat_common
 
 # Limits of the graphed passes (not the model's context: that is kev.model.MAX_STATE / SERVE_MAX_STATE)
 GRAPH_TOKENS = 32768   # rows x positions one row pass may hold in the attention buffers (about 1 GB on Kev-4B and 9B)
@@ -337,20 +347,27 @@ class CudaGraphs:
                 if is_attention(layer): buf[entry, :, BANK_WIDTH - S:].copy_(t[0, :, t.shape[-2] - S:])
                 else: buf[entry].copy_(t[0])
 
-    def rows(self, rows, out):
-        """Row passes for question rows (_Row), each continuing its state in the bank; each row's picked hidden states land
-        in out[row.at:]. The rows see the last Sr positions of the bank, Sr the longest state rounded up to a power of two
-        (it only lengthens attention). Rows are grouped by length (length_groups), then split to fit the buffers."""
+    def _parts(self, rows):
+        """The row passes `rows` (_Row) run as, as (their indices, Sr, Lb): rows grouped by length (length_groups), then
+        split to fit the buffers. Sr is the longest state in a group rounded up to a power of two (it only lengthens
+        attention) and each row names its own state's bank entry, so a group may mix them."""
         for idx in length_groups([len(r.ids) for r in rows], GRAPH_ROWS):
             Lb, Sr = bucket(max(len(rows[i].ids) for i in idx)), pow2(max(16, max(rows[i].state_len for i in idx)))
             group = min(GRAPH_ROWS, GRAPH_TOKENS // (Sr + Lb))
             group = max(n for n in range(1, group + 1) if count_bucket(n) <= group)   # the most rows whose padded count fits
-            for start in range(0, len(idx), group):
-                part = [rows[i] for i in idx[start:start + group]]
-                h = self._row_pass(part, Sr, Lb)
-                src, dst = zip(*[(n * Lb + p, r.at + j) for n, r in enumerate(part) for j, p in enumerate(r.picks)])
-                src, dst = torch.tensor([src, dst]).to(self.device, non_blocking=True)
-                out.index_copy_(0, dst, h.flatten(0, 1).index_select(0, src).float())   # only the wanted positions leave the pass buffer
+            for start in range(0, len(idx), group): yield idx[start:start + group], Sr, Lb
+
+    def rows(self, rows, out):
+        """Row passes for question rows (_Row), each continuing its state in the bank; each row's picked hidden states land
+        in out[row.at:]. The rows see the last Sr positions of the bank, Sr the longest state rounded up to a power of two
+        (it only lengthens attention; the mask hides what Sr gathers beyond the row's own state). Rows are grouped by
+        length, then split to fit the buffers (see _parts)."""
+        for idx, Sr, Lb in self._parts(rows):
+            part = [rows[i] for i in idx]
+            h = self._row_pass(part, Sr, Lb)
+            src, dst = zip(*[(n * Lb + p, r.at + j) for n, r in enumerate(part) for j, p in enumerate(r.picks)])
+            src, dst = torch.tensor([src, dst]).to(self.device, non_blocking=True)
+            out.index_copy_(0, dst, h.flatten(0, 1).index_select(0, src).float())   # only the wanted positions leave the pass buffer
 
     def _row_pass(self, rows, Sr, Lb):
         """One row pass; -> the pass buffer [rows, Lb, d] (valid until the next pass)."""
@@ -373,3 +390,70 @@ class CudaGraphs:
         uploads = [list(r.ids) + [self.pad_id] * (Lb - len(r.ids)) + list(r.pos) + [0] * (Lb - len(r.pos)) + [len(r.ids), r.state_len, r.entry] for r in rows]
         self._replay(("rows", Nb, Lb, Sr), body, uploads + [[self.pad_id] * Lb + [0] * Lb + [0, 0, 0]] * (Nb - len(rows)))
         return hidden[:len(rows)]
+
+    # The chat input format (kev.model.chat_splits): a whole record's passes at once (three for several questions, two for one)
+
+    @staticmethod
+    def admits_chat(splits):
+        """Whether a chat record's passes fit the graphed buffers: its state and each question's prefix (the state plus the
+        question's own tokens) fit one bank entry, and every row -- a question's own tokens, or one of its option rows --
+        fits a row pass. A record that does not runs the eager chat path (DecisionModel.chat_hidden)."""
+        c = chat_common(splits)
+        return 0 < c <= BANK_WIDTH and all(
+            len(S) <= BANK_WIDTH and bucket(len(S) - c) <= GRAPH_ROW and bucket(max(len(g["ids"]) for g in gs)) <= GRAPH_ROW
+            for S, _, gs in splits)
+
+    @torch.no_grad()
+    def chat(self, splits):
+        """A chat record's splits (kev.model.chat_splits) -> the hidden state of every option row's last token, fp32
+        [sum of the questions' options, d] in question, then option order. The module docstring's passes: the record's
+        state into bank entry 0, each question's own prefix as a row continuing it (its result kept in a bank entry of its
+        own), the question's option rows continuing that. A record with one question shares its whole prefix, so its state
+        pass is that question's prefix and no row continues it -- the passes the Kev format runs. Questions run in groups
+        of GRAPH_STATES - 1 (the bank holds the state and one entry per question). admits_chat says whether the record
+        fits: call it first."""
+        c = len(splits[0][0]) if len(splits) == 1 else chat_common(splits)   # one question: the state pass runs its whole prefix
+        ids, pos = list(splits[0][0][:c]), list(splits[0][1][:c])
+        if bucket(c) <= GRAPH_STATE: self.states([(ids, pos, False)], bucket(c))   # the passes the Kev format uses
+        else: self.state_eager(ids, pos)                                          # a longer state gains nothing from a graph (GRAPH_STATE)
+        out = torch.empty((sum(len(gs) for _, _, gs in splits), self.lm.config.hidden_size), dtype=torch.float32, device=self.device)
+        at = 0
+        for first in range(0, len(splits), GRAPH_STATES - 1):
+            group = list(range(first, min(first + GRAPH_STATES - 1, len(splits))))
+            if len(splits[group[0]][0]) > c:   # the questions' own tokens, one row pass for the group (nothing to continue otherwise)
+                self._prefix_states([_Row(list(splits[q][0][c:]), list(splits[q][1][c:]), 0, c, [], 0) for q in group],
+                                    list(range(1, 1 + len(group))))
+            entry = 1 if len(splits[group[0]][0]) > c else 0   # without a continuation row a lone question's prefix is entry 0 itself
+            rows = []
+            for n, q in enumerate(group):
+                for g in splits[q][2]:
+                    rows.append(_Row(g["ids"], g["pos"], entry + n, len(splits[q][0]), [len(g["ids"]) - 1], at))
+                    at += 1
+            self.rows(rows, out)
+        return out
+
+    @torch.no_grad()
+    def state_eager(self, ids, pos):
+        """One state pass run eagerly into bank entry 0: what a state longer than GRAPH_STATE takes (the pad tokens and the
+        explicit mask cost more than the launches the graph saves). The eager prefix pass's code, its cache copied in."""
+        out = self.lm(input_ids=torch.tensor([ids], device=self.device), position_ids=torch.tensor([pos], device=self.device),
+                      past_key_values=DynamicCache(config=self.lm.config), use_cache=True)
+        self.load_state(0, out.past_key_values, len(ids))
+
+    def _prefix_states(self, rows, entries):
+        """Row passes for rows that each continue the same state -- the chat format's per-question prefixes, continuing the
+        record's state in entry 0 -- then, per row, the state it leaves behind copied into bank entry entries[i]: without
+        that, every option row of the question would run the question's prefix again (or read the row buffer, which the next
+        pass overwrites)."""
+        for idx, Sr, Lb in self._parts(rows):
+            part = [rows[i] for i in idx]
+            self._row_pass(part, Sr, Lb)
+            views = self.rowbuf.views(count_bucket(len(part)), Sr + Lb)
+            for i, j in enumerate(idx):
+                r, entry = rows[j], entries[j]
+                p = r.state_len + len(r.ids)   # the state left behind: the one the row continued plus the row's own tokens
+                for (attention, *_), row, bank in zip(self.bank.slots, views, self.bank_views):
+                    if attention:   # the state's own keys and values, then the row's, right-aligned as a later pass reads them
+                        for buf, t in zip(bank, row): buf[entry, :, BANK_WIDTH - p:].copy_(t[i, :, Sr - r.state_len:Sr + len(r.ids)])
+                    else:           # DeltaNet: the row buffer holds the states as the pass left them in place
+                        for buf, t in zip(bank, row): buf[entry].copy_(t[i])

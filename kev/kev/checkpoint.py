@@ -115,9 +115,11 @@ class LoadOptions:
                  saved (no merge, no copy: kev.mlx_model.load_full), and ignores `attn` and `dtype` (the backbone runs
                  as stored: bf16 for every released checkpoint).
     cuda_graphs  replay the serving passes of a hybrid backbone on CUDA (state prefix, question rows on a cached state) as
-                 CUDA graphs, batched across requests (kev.cuda_graphs, DecisionModel.probs_batch). None = off, the eager
-                 path every reported number uses; kev.serve turns it on for CUDA. Exact up to floating-point
-                 reassociation, not bit for bit (the passes are padded to buckets).
+                 CUDA graphs, batched across requests (kev.cuda_graphs, DecisionModel.probs_batch). The chat input format
+                 runs through the same machinery, as the passes of one record (kev.cuda_graphs.chat). None = off, the eager
+                 path every reported number before them used; kev.serve, and kev.scripts.pref.dindex_engine for the chat
+                 format, turn it on for CUDA. Exact up to floating-point reassociation, not bit for bit (the passes are padded to
+                 buckets).
     fused        rewrite a merged hybrid backbone on CUDA with fused Triton kernels (kev.fused_qwen35; needs
                  flash-linear-attention fused_qwen35.FLA_VERSION and refuses any other). None = off; kev.serve turns it on
                  for CUDA when fused_available() (KEV_FUSED=0 to decline). Equal to the reference layers up to bf16 rounding.
