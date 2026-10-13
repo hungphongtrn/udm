@@ -320,10 +320,11 @@ Pending to attribute the gain: A seed 0 on the same subset (`dindex.sh subset ru
 
 The chat format's one clear cost was serving time: on the DI subset it ran 3.7x the Kev format's -- arm D 27,246 s for the
 15,000 rows against 6,048 s (r10) and 7,367 s (v7-base), one 3090, bf16, one request at a time through
-`kev.predictors.LocalPredictor`. Cause: the Kev format's row form is *one* padded pass per request (one causal row per
-option, the state repeated in each, `forward_rows_batch`), a shape `kev.cuda_graphs` can replay; the chat path ran eagerly
-(`DecisionModel.chat_hidden`): the state once, then per question a pass over that question's prefix, its cached prefix
-replicated per row chunk, plus one padded pass per `rows_per_pass` option rows.
+`kev.predictors.LocalPredictor`. Cause: the Kev format reads every option of a question from *one* causal row (state +
+that question's branch, the state recomputed per question, no cache: `forward_rows_batch`; most DI requests have one
+question, so one pass per request); the chat formats' scalar head reads one reward per row, so each option is its own
+row, and the chat path ran eagerly (`DecisionModel.chat_hidden`): the state once, then per question a pass over that
+question's prefix, its cached prefix replicated per row chunk, plus one padded pass per `rows_per_pass` option rows.
 
 Changed: those same tokens now run as the same machinery's passes (`kev.cuda_graphs.chat`) -- the record's state into a
 bank entry, the questions' prefixes as eager unpadded row passes, one per distinct prefix length, then one graphed row pass
