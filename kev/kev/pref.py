@@ -17,6 +17,11 @@ per question). On top of it, per micro-batch:
 kev.train --loss bce replaces both with balanced_bce_loss: a class-balanced per-option BCE (positives and negatives each
 half of a question's weight, soft targets as partial credit, none-of-the-above rows left out), optionally plus
 --ce_w x Kev's softmax cross-entropy over the options (the listwise term; the BCE stays the anchor of the scale).
+
+kev.train --loss rcr replaces them with rcr_loss, Regression Compatible Ranking (Bai et al., CIKM 2023, arXiv 2211.01494,
+Definition 2): (1 - alpha) x per-option sigmoid CE + alpha x ListCE(sigmoid), the listwise term a softmax CE over the
+virtual logits log sigmoid(r_i). Both terms reach their minimum at sigmoid(r_i) = P(option i is right), so the listwise
+term ranks without pulling the level away from the BCE's (the conflict SigmoidCE + SoftmaxCE has).
 """
 import torch
 import torch.nn.functional as F
@@ -72,6 +77,26 @@ def balanced_bce_loss(z, q, dev):
         if w.sum() > 0:
             loss = loss + 0.5 * (w * F.binary_cross_entropy_with_logits(z, torch.full_like(z, y), reduction="none")).sum() / w.sum()
     return loss
+
+
+def rcr_loss(z, q, dev, alpha, drop_none):
+    """--loss rcr, one question (Bai et al. 2023, eq. 1, 12, 20) with y_i = [i == label] or the soft target:
+        (1 - alpha) * mean_i SigmoidCE(r_i, y_i)  +  alpha * -(1 / sum_i y_i) * sum_i y_i * log(sigmoid(r_i) / sum_j sigmoid(r_j))
+    One deviation from the paper: the pointwise term is the mean over the question's options, not the sum, so a question
+    weighs once whatever its option count (77-option banking77 rows would otherwise outweigh 3-option ones 25:1 in the BCE
+    term alone). alpha = 0 is plain per-option sigmoid CE. drop_none (the pointwise formats) leaves none-of-the-above rows
+    out, as balanced_bce_loss does: graded alone, such a row is right or wrong depending on options it cannot see. A
+    question with no positive mass left (its answer was a none row) keeps only the pointwise term: every kept option is
+    trained as wrong. -> (loss, pointwise term, listwise term or None); None when every option is left out."""
+    keep = [i for i, o in enumerate(q["options"]) if o not in NONE_TEXTS] if drop_none else list(range(len(z)))
+    if not keep: return None
+    t = torch.tensor(q["target"], device=dev, dtype=z.dtype) if q.get("target") is not None else F.one_hot(torch.tensor(q["label"], device=dev), len(z)).to(z.dtype)
+    idx = torch.tensor(keep, device=dev); z, t = z[idx], t[idx]
+    point = F.binary_cross_entropy_with_logits(z, t)
+    if t.sum() <= 0: return (1 - alpha) * point, point, None
+    ls = F.logsigmoid(z)
+    listwise = -(t * (ls - torch.logsumexp(ls, 0))).sum() / t.sum()
+    return (1 - alpha) * point + alpha * listwise, point, listwise
 
 
 def reward_reg(kind, rw, rl):

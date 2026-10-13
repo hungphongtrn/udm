@@ -70,3 +70,19 @@ def test_detection_direction():
     """Confidence readouts flag low confidence as all-wrong; pnone flags high none mass."""
     d = {"ans": np.array([0.9, 0.8]), "bad": np.array([0.2, 0.3])}
     assert report.detection(d, "maxprob") == 1.0 and report.detection(d, "pnone") == 0.0
+
+
+def test_fit_threshold_cuts_only_at_tie_block_ends():
+    """The lowest threshold within the risk; a tied block is answered whole, so a cut inside it (risk 0 at the third row)
+    is not available; no qualifying prefix -> answer nothing."""
+    conf, hit = [0.9, 0.8, 0.5, 0.5, 0.1], [1, 1, 1, 0, 0]
+    assert report.fit_threshold(conf, hit, 0.10) == 0.8
+    assert report.fit_threshold(conf, hit, 0.25) == 0.5
+    assert report.fit_threshold([0.9, 0.2], [0, 1], 0.10) == float("inf")
+
+
+def test_apply_threshold_splits_answerable_and_allwrong():
+    """The pool is answerable rows then allwrong rows (pool()); a threshold carried over reports both answer rates."""
+    got = report.apply_threshold([0.85, 0.4, 0.95, 0.3], np.array([1.0, 1.0, 0.0, 0.0]), 0.8, 2)
+    assert got == {"threshold": 0.8, "coverage": 0.5, "risk": 0.5, "answered_answerable": 0.5, "answered_allwrong": 0.5}
+    assert report.apply_threshold([0.1, 0.2], np.array([1.0, 0.0]), float("inf"), 1)["coverage"] == 0.0

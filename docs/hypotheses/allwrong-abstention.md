@@ -1,10 +1,13 @@
-# Hypothesis: an anchored reward knows when no option is right (arm F vs A on all-wrong questions)
+# Hypothesis: an anchored reward knows when no option is right (all-wrong detection, readout and training screen)
 
 Branch `idea/allwrong-abstention`, cut from `hyp/preference-reward-model` at `4668509` (its arms, checkpoints and
-wave-1 numbers: `docs/hypotheses/preference-reward-model.md`). No training: every number comes from the existing seed-0
-checkpoints `runs/pref/{A,C,D,F}/seed0`. Code: `kev/scripts/abstain/` (`build_allwrong.py`, `eval_allwrong.sh`,
-`allwrong_report.py`), `kev/tests/test_allwrong.py`. Everything below (arms, readouts, thresholds, rule) is fixed before any
-run.
+wave-1 numbers: `docs/hypotheses/preference-reward-model.md`), with `idea/pointwise-chat-input` merged (arm HB, the
+chat_yesno prompt). Two parts: D1 reads the existing seed-0 checkpoints `runs/pref/{A,C,F}/seed0` (no training); D2-D7 are
+a half-data training screen of anchored recipes. Code: `kev/scripts/abstain/` (`build_allwrong.py`, `eval_allwrong.sh`,
+`allwrong_report.py`, `queue.sh`), `kev/scripts/pref/arms.sh` (the h arms), `kev/kev/pref.py` (`rcr_loss`),
+`kev/kev/model.py` (`MLPHead`), `kev/kev/train.py` (`--loss rcr`, `--rcr_alpha`, `--head mlp`, `--train_frac`); tests in
+`kev/tests/test_allwrong.py` and `kev/tests/test_pref.py`. Everything below (arms, readouts, thresholds, rules) is fixed
+before any run.
 
 ## Claim
 
@@ -32,8 +35,10 @@ The tempting comparison (F's sigmoid(max r) vs A's max softmax) mixes three thin
 | A.maxr - A.maxprob, A.lse - A.maxprob | Does A's *raw logit* already carry the level (the energy-score effect: CE does not constrain the level, but nothing forces it to be uninformative)? If yes, the headline gain is the readout, not F's training. |
 | F.maxr - A.maxr | The anchor itself: same readout, the two training objectives. |
 | F.maxr - F.maxprob | Inside F: how much of F's detection is level (shift) and how much is scale. |
-| F.maxr - C.maxr, F.maxr - D.maxr | BCE vs no anchor (C) and vs an anchor at 0 (D: BSR). Prediction: C and D near A.maxprob, D worst. F starts from C, so F - C is the BCE stage alone. |
+| F.maxr - C.maxr | BCE vs no anchor. Prediction: C near A.maxprob. F starts from C, so F - C is the BCE stage alone. |
 | F.maxr - A.pnone | The product's existing mechanism: Kev trains with none options (`--p_none 0.1`, `--p_none_pair 0.25`), so A offered a "None of these" option already has a direct abstention signal. If A.pnone matches F.maxr, the anchor buys abstention only where no none option is offered. |
+
+Arm D (BSR) is dropped (K1): an anchor at 0 is not a level, and every D question is answered by C and F.
 
 AURC (risk-coverage) mixes detection with top1: an arm with a lower answerable top1 has a worse oracle AURC. AUROC is the
 detection-only number and the one the rule uses; AURC and its oracle are reported beside it.
@@ -73,46 +78,86 @@ question is always wrong): AURC, accuracy at coverage 0.3/0.5/0.7/0.9/1.0, the o
 every condition count (rejected = over context, never truncated; counts printed). Differences: paired bootstrap over
 questions, 2,000 resamples, 95% percentile CI (question sampling only, not seed variance).
 
-## Decision rule (seed 0; v7 = decision-v7 development, t4 = transfer-v4 development)
+## Training screen (D2-D7): half data, seed 0
 
-1. **Headline.** Supported if, on both v7 and t4, AUROC(F.maxr) - AUROC(A.maxprob) >= 0.05 with a CI above 0, and F's
-   answerable top1 is not more than 2 points below A's (the parent study's screen; wave 1 had F - A = -1.58 on full v7).
-   Refuted if the difference is <= 0 on either set. Inconclusive otherwise.
-2. **Attribution to the anchor.** Only if 1 holds: AUROC(F.maxr) - AUROC(A.maxr) >= 0.03 with a CI above 0 on both sets.
-   If 1 holds and 2 fails, the result is recorded as "the level is in A's logits too; the gain is the readout", not as
-   an anchor result.
-3. **Against the existing mechanism (reported, not part of 1-2).** F.maxr (no none option) vs A.pnone (none offered).
-   F.maxr >= A.pnone - 0.02 on both sets: the anchor matches the none option without needing one in the set.
-   Otherwise: the none option already does it where it can be offered.
-4. **Predictions recorded before the run:** C.maxr and D.maxr within 0.05 of A.maxprob, D.maxr the lowest of the
-   maxr readouts; F.maxprob below F.maxr. These are not verdicts.
+Every arm below is an existing or new recipe trained on the same seeded half of the decision-v7 training records
+(`--train_frac 0.5`, a per-source sample keyed on the seed, so all h arms and their warm starts see the same records),
+otherwise the full arm's flags (`scripts/pref/arms.sh`: base Qwen3.5-4B-Base, 2 epochs, lr 5e-5, LoRA, `--p_none_pair
+0.25`). A screen: the winner is rerun on full data with more seeds; a Decision Index subset is a final guard after that,
+not part of this screen.
 
-If 1-2 hold, follow-ups (not pre-registered here): seeds 1-2 of F (needs C seeds 1-2), the pointwise BCE arm HB from
-`idea/pointwise-chat-input` on the same pairs, and the risk-coverage operating point on decision-v7 calibration.
+| Arm | Prompt | Head | Loss | Role |
+|---|---|---|---|---|
+| Ah | Kev | pointer | CE | baseline: maxprob, maxr, lse, and pnone (K9) |
+| Ch | chat | linear | Bradley-Terry | no anchor |
+| Fh | chat | linear | Ch + 1 epoch BT + 0.5 BCE (`--init_from Ch`) | the two-stage anchor (arm F) |
+| HBh | chat_yesno | linear, W_yes - W_no init | class-balanced BCE | absolute grader (arm HB) |
+| Rh | chat | linear | RCR, alpha 0.5 | one-stage anchor: (1 - a) sigmoid CE + a ListCE (Bai et al. 2023) |
+| R2h | chat | MLP (1024, SiLU) | RCR, alpha 0.5 | Rh with the MLP head |
+| Sh | chat | MLP | RCR, alpha 0 (sigmoid CE only) | STh's stage 1 |
+| STh | chat | MLP | Sh + 1 epoch BT + 0.5 BCE (`--init_from Sh`) | absolute first, then pairwise |
+| RYh | chat_yesno | linear, W_yes - W_no init | RCR, alpha 0.5 | RCR on the yes/no prompt |
+
+Fixed choices: base model, not instruct (K2); MLP head for the new arms (K3) except Rh (the linear control against F)
+and RYh (the yes/no init needs a linear head) (K4); top1 is read on decision-v7 development, never test (K5); AUROC
+decides, AURC is reported beside it (K6); maxr is the anchored arms' readout (K7); the minimal pairs are the eval (K8);
+STh's stage 2 uses F's BCE weight 0.5 (K10). RCR deviation from the paper: the pointwise term is the mean over a
+question's options, not the sum (`kev.pref.rcr_loss`); none rows stay in the listing prompt and are dropped on the
+pointwise ones, as `--loss bce` does.
+
+## Decision rules (seed 0; v7 = decision-v7 development, t4 = transfer-v4 development)
+
+Terms: X **beats** Y when dAUROC(X - Y) >= 0.03 with the 95% CI above 0 on both v7 and t4. X is **not worse** than Y
+when the CI's lower end is >= -0.02 on both. The **top1 guard**: an arm's v7 development top1 (reward_report.json
+`raw.overall.top1`, printed by the report) is at most 2 points below A's (full) or Ah's (half). Development NLL is
+reported beside it; it breaks ties only.
+
+- **D1 readout (full A, C, F; no training).** Headline supported if F.maxr - A.maxprob >= 0.05 with a CI above 0 on both
+  sets and F passes the top1 guard; refuted if <= 0 on either; inconclusive otherwise. If supported, A.maxr - A.maxprob
+  and A.lse - A.maxprob say whether A's logits carry the level too (if A.maxr is within 0.03 of F.maxr, the gain is the
+  readout, not the anchor). C.maxr - C.maxprob is the same question for the unanchored pairwise arm.
+- **D2 one-stage anchor.** Rh replaces F's two stages if Rh is not worse than Fh, beats Ch, and passes the guard. Rh beats
+  Fh: RCR is the recipe. Fh beats Rh: two stages carry something RCR does not.
+- **D3 staging.** STh beats R2h: pointwise first, then pairwise, matters; otherwise R2h (one run) is preferred. STh vs Fh
+  is reported (order of the stages; the heads differ).
+- **D4 head.** The MLP head is adopted if R2h beats Rh, or is not worse with a higher dev top1. R2h - Sh is the listwise
+  term's share (alpha 0.5 vs 0), reported.
+- **D5 prompt.** RYh vs HBh: RCR vs class-balanced BCE on the yes/no prompt; RYh vs Rh: yes/no prompt + init vs the
+  listing prompt. The better of each pair by the beats rule; neither beating: not worse both ways, the cheaper (Rh) stays.
+- **D6 threshold transfer.** For each arm and readout, the lowest threshold with risk <= 0.10 on the v7 pool (answerable +
+  allwrong) is applied unchanged to the t4 pool. An anchored readout transfers if its t4 risk is <= 0.15 and its t4
+  coverage is >= 0.8 x the coverage a threshold fit on t4 would reach; reported for every arm, judged on the D2-D5 winner
+  against Ah.maxprob.
+- **D7 against the none option.** The D2-D5 winner's maxr (no none option in the set) vs Ah.pnone (none offered): it
+  matches the existing mechanism if AUROC >= Ah.pnone - 0.02 on both sets.
+
+Predictions recorded before the run (not verdicts): C.maxr within 0.05 of A.maxprob; F.maxprob below F.maxr; Rh within
+0.02 of Fh; Sh the highest AUROC and the lowest top1 of the MLP arms.
 
 ## Commands (training machine, from `kev/`)
 
 ```bash
-.venv/bin/python -m pytest tests/test_allwrong.py
-# data once (CPU), before any eval_allwrong.sh: they would race to build it
-.venv/bin/python scripts/abstain/build_allwrong.py --suite evals/v7/decision-v7 --out runs/allwrong/data/decision-v7-development
-.venv/bin/python scripts/abstain/build_allwrong.py --suite evals/v4/transfer-v4 --out runs/allwrong/data/transfer-v4-development
-# one GPU per arm; needs runs/pref/<arm>/seed0/eval/decision-v7-development/reward_report.json (eval_arm.sh) for maxprob_G
-CUDA_VISIBLE_DEVICES=0 nohup scripts/abstain/eval_allwrong.sh runs/pref/A/seed0 > runs/allwrong/A.log 2>&1 &
-CUDA_VISIBLE_DEVICES=1 nohup scripts/abstain/eval_allwrong.sh runs/pref/F/seed0 > runs/allwrong/F.log 2>&1 &
-CUDA_VISIBLE_DEVICES=2 nohup scripts/abstain/eval_allwrong.sh runs/pref/C/seed0 > runs/allwrong/C.log 2>&1 &
-CUDA_VISIBLE_DEVICES=4 nohup scripts/abstain/eval_allwrong.sh runs/pref/D/seed0 > runs/allwrong/D.log 2>&1 &
+.venv/bin/python -m pytest tests/test_allwrong.py tests/test_pref.py
+# everything (data build, D1 evals, the nine h arms with eval_arm.sh + eval_allwrong.sh) on GPUs 0,1,2, ~13 h:
+nohup scripts/abstain/queue.sh > runs/queue.log 2>&1 &
+# progress: runs/queue.log; per arm runs/queue/<arm>.log and .done/.failed. Then the two reports (queue.sh prints them):
 .venv/bin/python scripts/abstain/allwrong_report.py --arm A=runs/pref/A/seed0 --arm C=runs/pref/C/seed0 \
-  --arm D=runs/pref/D/seed0 --arm F=runs/pref/F/seed0 --out runs/allwrong/report
+  --arm F=runs/pref/F/seed0 --out runs/allwrong/report-full
+.venv/bin/python scripts/abstain/allwrong_report.py --arm Ah=runs/pref/Ah/seed0 --arm Ch=runs/pref/Ch/seed0 \
+  --arm Fh=runs/pref/Fh/seed0 --arm HBh=runs/pref/HBh/seed0 --arm Rh=runs/pref/Rh/seed0 --arm R2h=runs/pref/R2h/seed0 \
+  --arm Sh=runs/pref/Sh/seed0 --arm STh=runs/pref/STh/seed0 --arm RYh=runs/pref/RYh/seed0 --out runs/allwrong/report-half
 ```
 
-Outputs: `runs/allwrong/report/report.json` (every number above), `rc-decision-v7.svg` / `rc-transfer-v4.svg`
-(accuracy vs coverage; solid = maxr, dashed = maxprob).
+Lanes (`queue.sh`): GPU 0 the D1 all-wrong evals, then Ah, Ch, HBh; GPU 1 Sh, STh, Rh; GPU 2 R2h, RYh, then Fh once Ch
+is done. A single arm by hand: `scripts/pref/run_arm.sh Rh 0 1` (arm, seed, GPU index). Outputs:
+`runs/allwrong/report-*/report.json` (every number above, `dev` top1/NLL, `threshold_transfer`), `rc-decision-v7.svg` /
+`rc-transfer-v4.svg` (accuracy vs coverage; solid = maxr, dashed = maxprob).
 
 ## Risks
 
-- F trained one extra epoch from C on the same data: a detection gain over C could be more training, not the BCE term.
-  F - C cannot separate them; a C + 1 epoch arm without BCE would (not run).
+- F trained one extra epoch from C on the same data: a detection gain over C could be more training, not the BCE term
+  (the same holds for Fh - Ch and STh - Sh). Rh vs Fh compares equal BCE exposure only roughly (2 vs 2 + 1 epochs).
+- Half data lowers top1 for every h arm; the guard compares h arms with Ah, never with the full arms.
 - Training already contains all-wrong sets, but only with a none option present (augment's `p_none` and none pairs): A
   and F have seen "the true option is gone" with a none option to pick, never without. The no-none condition is out of
   their training distribution for both.

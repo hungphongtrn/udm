@@ -18,6 +18,15 @@ HP also reads the preference pairs that `convert_pref_data.py` writes (see "Poin
 | HL | H with `--loss ce`: softmax CE over a question's option rewards (reranker loss) instead of BT + BSR; probabilities via G's fitted T |
 | HB | H's pointwise grader as a Yes/No question (`--input_format chat_yesno`), head started at the LM head's `W_yes - W_no` (`--head_init yesno`), class-balanced per-option BCE (`--loss bce`) |
 | HBL | HB + `--ce_w 0.25` (listwise CE term) |
+| Ah / Ch / Fh / HBh | A / C / F / HB on the seeded half of the training records (`--train_frac ${HALF_FRAC:-0.5}`); Fh warm-starts from Ch |
+| Rh | chat, linear head, `--loss rcr --rcr_alpha 0.5` (per-option sigmoid CE + ListCE over sigmoid rewards), half data |
+| R2h / Sh | Rh with `--head mlp`; Sh with `--rcr_alpha 0` (sigmoid CE only) |
+| STh | Stage 2 on Sh: `--loss pref --bce_w 0.5`, 1 epoch (F's stage 2) |
+| RYh | RCR on `chat_yesno` with `--head_init yesno` (linear head) |
+
+The h arms are the all-wrong abstention screen ([`docs/hypotheses/allwrong-abstention.md`](../../docs/hypotheses/allwrong-abstention.md));
+`scripts/abstain/queue.sh` runs them on three GPUs. `run_arm.sh` also scores every arm on the all-wrong minimal pairs
+(`scripts/abstain/eval_allwrong.sh`; `ALLWRONG=0` skips it).
 
 H and HP belong to branch `idea/pointwise-chat-input` (pre-registered in
 [`docs/hypotheses/pointwise-chat-input.md`](../../docs/hypotheses/pointwise-chat-input.md), which also holds the rule and

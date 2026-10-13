@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Train one arm, then evaluate it. Usage: scripts/pref/run_arm.sh ARM SEED [GPU]   (env: FORCE=1, BATCH_FALLBACK=1, ROW_BUDGET, BCE_W, F_EPOCHS, TEST=1)
+# Train one arm, then evaluate it (scripts/pref/eval_arm.sh, then the all-wrong minimal pairs: scripts/abstain/eval_allwrong.sh).
+# Usage: scripts/pref/run_arm.sh ARM SEED [GPU]   (env: FORCE=1, BATCH_FALLBACK=1, ROW_BUDGET, BCE_W, F_EPOCHS, HALF_FRAC, TEST=1, ALLWRONG=0 skips the all-wrong eval)
 set -euo pipefail
 cd "$(dirname "$0")/../.."            # kev/
 source scripts/pref/arms.sh
@@ -20,10 +21,13 @@ if [ -e "$OUT" ]; then
   if [ "${FORCE:-0}" = 1 ]; then rm -rf "$OUT"
   elif [ -f "$OUT/head.pt" ]; then   # trained: evaluate only (eval_arm.sh skips splits already scored)
     echo "[$(date -Is)] arm $ARM seed $SEED already trained ($OUT/head.pt): evaluating only"
-    CUDA_VISIBLE_DEVICES=$GPU scripts/pref/eval_arm.sh "$OUT"; exit
+    CUDA_VISIBLE_DEVICES=$GPU scripts/pref/eval_arm.sh "$OUT"
+    [ "${ALLWRONG:-1}" = 0 ] || CUDA_VISIBLE_DEVICES=$GPU scripts/abstain/eval_allwrong.sh "$OUT"; exit
   else echo "refusing: $OUT exists without head.pt (unfinished training; LoRA runs cannot resume); FORCE=1 or delete it to rerun" >&2; exit 1; fi
 fi
-[ "$ARM" = F ] && [ ! -f "runs/pref/C/seed$SEED/head.pt" ] && { echo "arm F needs runs/pref/C/seed$SEED (run C first)" >&2; exit 1; }
+# stage-2 arms warm-start from their stage 1 (arms.sh --init_from)
+case $ARM in F) DEP=C ;; Fh) DEP=Ch ;; STh) DEP=Sh ;; *) DEP= ;; esac
+[ -n "$DEP" ] && [ ! -f "runs/pref/$DEP/seed$SEED/head.pt" ] && { echo "arm $ARM needs runs/pref/$DEP/seed$SEED (run $DEP first)" >&2; exit 1; }
 FLAGS=$(arm_flags "$ARM" "$SEED")
 # kev.train refuses an existing --out, so the log lives beside it and is copied in afterwards
 mkdir -p "$(dirname "$OUT")"; LOG="$OUT.train.log"
@@ -32,3 +36,4 @@ CUDA_VISIBLE_DEVICES=$GPU .venv/bin/python -m kev.train $FLAGS --out "$OUT" 2>&1
 [ -f "$OUT/head.pt" ] || { echo "training failed: no $OUT/head.pt (log: $LOG)" >&2; exit 1; }
 cp "$LOG" "$OUT/train.log"
 CUDA_VISIBLE_DEVICES=$GPU scripts/pref/eval_arm.sh "$OUT"
+[ "${ALLWRONG:-1}" = 0 ] || CUDA_VISIBLE_DEVICES=$GPU scripts/abstain/eval_allwrong.sh "$OUT"

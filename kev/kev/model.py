@@ -19,7 +19,9 @@ SPECIAL = ["<|fim_prefix|>", "<|fim_middle|>", "<|box_start|>", "<|box_end|>", "
 # option itself (the pointwise score Bradley-Terry assumes), at the cost of every relative cue the listing carries.
 # chat_yesno ends on a Yes/No question, so the last token's next-token logits answer it: a ScalarHead initialised to
 # W_yes - W_no (DecisionModel head_init="yesno") starts as the language model's own logit(Yes) - logit(No).
-HEAD_KINDS, INPUT_FORMATS = ("pointer", "scalar"), ("kev", "chat", "chat_pointwise", "chat_yesno")
+HEAD_KINDS, INPUT_FORMATS = ("pointer", "scalar", "mlp"), ("kev", "chat", "chat_pointwise", "chat_yesno")
+# heads that read one reward per option with no query (ScalarHead, MLPHead): every per-row path (the chat formats) takes either
+SCALAR_HEADS = ("scalar", "mlp")
 # everything that accepts the chat layout accepts the pointwise variants (checkpoint meta, eval, serving, arm scripts);
 # INPUT_FORMATS laid out by chat_splits and served through enc["chat"]: kev.cuda_graphs.chat, DecisionModel.chat_hidden.
 # A future chat-shaped format joins here (and in CHAT_LAYOUTS), not at each equality check.
@@ -355,9 +357,28 @@ class ScalarHead(nn.Module):
         return self.forward(None, h_opts)
 
 
+class MLPHead(nn.Module):
+    """Two-layer reward head Linear(d, hidden) -> SiLU -> Linear(hidden, 1), hidden = 1024 (BaseReward's best head; the linear
+    ScalarHead its worst). The output layer starts at zero, so step 0 gives r = 0 for every option, as an untrained
+    reward should, and the hidden layer learns once the output layer moves. Otherwise exactly ScalarHead's interface."""
+
+    def __init__(self, d, hidden=1024):
+        super().__init__()
+        self.fc, self.out = nn.Linear(d, hidden), nn.Linear(hidden, 1)
+        nn.init.zeros_(self.out.weight); nn.init.zeros_(self.out.bias)
+        self.temperature = 1.0
+
+    def forward(self, h_decide, h_opts):  # [d] (unused), [K,d] -> rewards [K]
+        z = self.out(F.silu(self.fc(h_opts))).squeeze(-1)
+        return z if self.training or self.temperature == 1.0 else z / self.temperature
+
+    def many(self, h_decide, h_opts, owner):
+        return self.forward(None, h_opts)
+
+
 def make_head(kind, d, head_dim=256):
     if kind not in HEAD_KINDS: raise ValueError(f"unknown head {kind!r}")
-    return PointerHead(d, dp=head_dim) if kind == "pointer" else ScalarHead(d)
+    return PointerHead(d, dp=head_dim) if kind == "pointer" else ScalarHead(d) if kind == "scalar" else MLPHead(d)
 
 
 # What a loaded model exposes to kev.serve, kev.predictors and the Space: the scoring interface both DecisionModel (torch)
@@ -416,8 +437,8 @@ class DecisionModel(nn.Module):
         if self.hybrid and option_isolation: raise ValueError("option_isolation needs the packed mask; not available on hybrid backbones")
         self.option_isolation = option_isolation
         if input_format not in INPUT_FORMATS: raise ValueError(f"unknown input format {input_format!r}")
-        if input_format in CHAT_FORMATS and (head_kind != "scalar" or option_isolation):
-            raise ValueError("the chat formats read one reward per option row: they need head_kind='scalar' and no option_isolation")
+        if input_format in CHAT_FORMATS and (head_kind not in SCALAR_HEADS or option_isolation):
+            raise ValueError(f"the chat formats read one reward per option row: they need head_kind in {SCALAR_HEADS} (scalar) and no option_isolation")
         self.head_kind, self.input_format = head_kind, input_format
         self.chat_template_sha256 = chat_template_digest(tok) if input_format in CHAT_FORMATS else None
         if chat_template_sha256 and chat_template_sha256 != self.chat_template_sha256:

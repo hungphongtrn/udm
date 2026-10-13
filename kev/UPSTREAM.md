@@ -34,7 +34,8 @@ flash-attn is installed but unused by Kev (sdpa). Upstream `uv.lock` was deleted
 
 Defaults keep upstream behaviour bit-identical (`--head pointer`, `--input_format kev`, `--loss ce`).
 
-- `kev/model.py`: `ScalarHead` (one `Linear(d, 1)` reward per option) and `make_head`/`HEAD_KINDS`; `INPUT_FORMATS = ("kev", "chat", "chat_pointwise", "chat_yesno")`
+- `kev/model.py`: `ScalarHead` (one `Linear(d, 1)` reward per option), `MLPHead` (`Linear(d, 1024)` -> SiLU -> `Linear(1024, 1)`,
+  output layer zero-initialised; same interface), `make_head`/`HEAD_KINDS`/`SCALAR_HEADS`; `INPUT_FORMATS = ("kev", "chat", "chat_pointwise", "chat_yesno")`
   and `CHAT_FORMATS` / `CHAT_LAYOUTS` (everything that accepts the chat layout, including the pointwise ones: `chat_pointwise`
   drops the `Options:` listing from the prefix, so a response is graded on its own; `chat_yesno` also ends the row on a Yes/No
   question), `DecisionModel(head_init="yesno")` (scalar head initialised to the LM head's `W_yes - W_no`),
@@ -44,15 +45,17 @@ Defaults keep upstream behaviour bit-identical (`--head pointer`, `--input_forma
 - `kev/checkpoint.py`: `head_kind`, `input_format`, `chat_template_sha256` in checkpoint meta and `COMPAT_FIELDS`; the MLX backend
   rejects non-pointer/non-Kev checkpoints. `kev/predictors.py`: the long-row check also counts `enc["chat_row_max"]`.
 - `kev/pref.py` (new): Bradley-Terry pair loss from hard or soft labels, per-option BCE, class-balanced per-option BCE
-  (`--loss bce`), BSR / L2 reward regularizers. `kev/data.py`: `NONE_TEXTS`.
-- `kev/train.py`: flags `--head`, `--input_format`, `--head_init`, `--loss {ce,pref,bce}`, `--ce_w`, `--reg`, `--reg_w`, `--bce_w`, `--bce_types`;
-  `objective` and `batch_loss` route to the pref loss; pref stats (`pair_acc`, reward mean/std/absmax) in logs.
+  (`--loss bce`), RCR (`rcr_loss`, `--loss rcr`: per-option sigmoid CE + ListCE over sigmoid rewards, Bai et al. 2023),
+  BSR / L2 reward regularizers. `kev/data.py`: `NONE_TEXTS`.
+- `kev/train.py`: flags `--head {pointer,scalar,mlp}`, `--input_format`, `--head_init`, `--loss {ce,pref,bce,rcr}`, `--ce_w`, `--rcr_alpha`,
+  `--reg`, `--reg_w`, `--bce_w`, `--bce_types`, `--train_frac` (seeded per-source subsample of the training records);
+  `objective` and `batch_loss` route to the pref losses; pref stats (`pair_acc`, reward mean/std/absmax, bce/listwise terms) in logs.
 - `tests/test_pref.py` (new): CPU tests of the pref losses, chat layout and checkpoint round-trip.
 - `scripts/pref/` (new): setup, arm definitions, run/eval/wave scripts and reward report for the preference study
   (see `scripts/pref/README.md`).
 - `scripts/abstain/` and `tests/test_allwrong.py` (new, branch `idea/allwrong-abstention`): all-wrong minimal pairs from a
-  frozen suite, their benchmark passes and the cross-arm detection / risk-coverage report
-  (see `docs/hypotheses/allwrong-abstention.md`).
+  frozen suite, their benchmark passes, the cross-arm detection / risk-coverage / threshold-transfer report and the
+  three-GPU screen queue (see `docs/hypotheses/allwrong-abstention.md`).
 
 ## Reproduce the diff
 

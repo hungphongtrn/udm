@@ -1,7 +1,8 @@
 """All-wrong detection and risk-coverage across arms (numpy only). Reads what eval_allwrong.sh wrote.
 
     .venv/bin/python scripts/abstain/allwrong_report.py --arm A=runs/pref/A/seed0 --arm C=runs/pref/C/seed0 \
-        --arm D=runs/pref/D/seed0 --arm F=runs/pref/F/seed0 --out runs/allwrong/report
+        --arm F=runs/pref/F/seed0 --out runs/allwrong/report-full
+    (half-data screen: --arm Ah=runs/pref/Ah/seed0 --arm Rh=... ; scripts/abstain/queue.sh prints both commands)
 
 For each suite in RUN/eval/allwrong-<suite>/<condition>/rows.json (build_allwrong.py's four conditions) and each arm, the
 pairs every arm scored in every condition (the join is on (id, question); the counts of pairs lost to rejected records
@@ -20,8 +21,12 @@ paired win rate (answerable more confident than its own allwrong twin), and the 
 answerable + allwrong (one of each per question; an allwrong answer is always wrong): AURC, selective accuracy at fixed
 coverages, and the oracle AURC that arm's answerable top1 allows. AURC mixes detection with top1; AUROC is detection only.
 pnone has no curve (its pool would answer "none" correctly), only AUROC and the two top1s.
-Paired differences (--compare X.r-Y.r, default: the hypothesis doc's list for the arms given) are bootstrapped over
-pairs (2,000 resamples, seed 0; question sampling only). Writes <out>/report.json and <out>/rc-<suite>.svg.
+Paired differences (--compare X.r-Y.r, default: the hypothesis doc's D1-D7 list for the arms given) are bootstrapped over
+pairs (2,000 resamples, seed 0; question sampling only). Each arm's decision-v7 development top1 and NLL
+(reward_report.json raw.overall) is printed beside it. D6 threshold transfer: per arm and curve readout, the lowest
+threshold whose decision-v7 pool risk is <= --risk (0.10; whole tie blocks), applied unchanged to the transfer-v4 pool:
+coverage, risk, the fractions of answerable and of allwrong rows answered, and the coverage a threshold fit on transfer-v4
+itself would reach (the ceiling). Writes <out>/report.json and <out>/rc-<suite>.svg.
 """
 import argparse, json
 from pathlib import Path
@@ -31,8 +36,19 @@ CONDITIONS = ("answerable", "allwrong", "answerable_none", "allwrong_none")
 CURVE_READOUTS = ("maxprob", "maxprob_G", "maxr", "lse")
 NONE_READOUTS = ("pnone", "pnone_G")
 COVERAGES = (0.3, 0.5, 0.7, 0.9, 1.0)
-DEFAULT_COMPARE = ("F.maxr-A.maxprob", "A.maxr-A.maxprob", "A.lse-A.maxprob", "F.maxr-F.maxprob", "F.maxr-A.maxr",
-                   "F.maxr-C.maxr", "F.maxr-D.maxr", "F.maxr-A.pnone")
+# The hypothesis doc's decisions (arm names cannot contain "-"; compares naming an arm not given are skipped).
+DEFAULT_COMPARE = (
+    # D1: readout alone on the full-data arms (no training)
+    "A.maxr-A.maxprob", "A.lse-A.maxprob", "C.maxr-C.maxprob", "F.maxr-F.maxprob", "F.maxr-A.maxprob", "F.maxr-A.pnone",
+    # half-data screen. D2: RCR (linear head) vs pairwise C / C -> F and vs Kev's own readout
+    "Ah.maxr-Ah.maxprob", "Rh.maxr-Fh.maxr", "Rh.maxr-Ch.maxr", "Rh.maxr-Ah.maxprob",
+    # D3: pointwise-then-pairwise stage vs RCR in one stage; D4: MLP vs linear head under RCR; listwise term (alpha 0.5 vs 0)
+    "STh.maxr-R2h.maxr", "STh.maxr-Fh.maxr", "R2h.maxr-Rh.maxr", "R2h.maxr-Sh.maxr",
+    # D5: RCR vs class-balanced BCE on the yes/no prompt, and yes/no vs the listing prompt
+    "RYh.maxr-HBh.maxr", "RYh.maxr-Rh.maxr",
+    # D7: every anchored arm's level vs offering a none option to Kev
+    "Rh.maxr-Ah.pnone", "R2h.maxr-Ah.pnone", "Sh.maxr-Ah.pnone", "STh.maxr-Ah.pnone", "RYh.maxr-Ah.pnone", "Fh.maxr-Ah.pnone")
+FIT_SUITE, APPLY_SUITE = "decision-v7", "transfer-v4"   # D6: threshold fit on the first, applied unchanged to the second
 B, SEED = 2000, 0
 
 
@@ -67,6 +83,23 @@ def risk_coverage(conf, hit):
     return np.cumsum(h) / np.arange(1, len(h) + 1)
 
 
+def fit_threshold(conf, hit, risk):
+    """Lowest threshold t (answer iff conf >= t) whose answered set has risk (1 - accuracy) <= `risk`. A threshold
+    answers whole tie blocks, so only block ends are candidates. -> t, or inf (answer nothing) if no block end qualifies."""
+    conf, hit = np.asarray(conf, float), np.asarray(hit, float)
+    order = np.argsort(-conf, kind="stable"); c, h = conf[order], hit[order]
+    end = np.flatnonzero(np.append(c[1:] != c[:-1], True))   # last index of each tie block
+    ok = end[1 - np.cumsum(h)[end] / (end + 1) <= risk + 1e-12]
+    return float(c[ok[-1]]) if len(ok) else float("inf")
+
+
+def apply_threshold(conf, hit, t, n_ans):
+    """The first n_ans rows of the pool are answerable, the rest allwrong (pool()). -> coverage, risk and answer rates."""
+    on = np.asarray(conf, float) >= t
+    return {"threshold": t, "coverage": float(on.mean()), "risk": float(1 - hit[on].mean()) if on.any() else 0.0,
+            "answered_answerable": float(on[:n_ans].mean()), "answered_allwrong": float(on[n_ans:].mean())}
+
+
 def rc_metrics(acc):
     n = len(acc)
     return {"aurc": float(np.mean(1 - acc)), **{f"acc@{c:g}": float(acc[int(np.ceil(c * n)) - 1]) for c in COVERAGES}}
@@ -82,6 +115,13 @@ def load_T(run):
     p = Path(run) / "eval" / "decision-v7-development" / "reward_report.json"
     if not p.exists(): return None
     g = json.load(open(p)).get("G"); return g["T"] if g else None
+
+
+def load_dev(run):
+    """Decision-v7 development top1 and softmax NLL (scripts/pref/reward_report.py raw.overall), None before eval_arm.sh."""
+    p = Path(run) / "eval" / "decision-v7-development" / "reward_report.json"
+    if not p.exists(): return None
+    o = json.load(open(p))["raw"]["overall"]; return {"top1": o["top1"], "nll": o["nll"]}
 
 
 def readouts(run, suite):
@@ -173,13 +213,17 @@ def main():
     ap.add_argument("--arm", action="append", required=True, help="NAME=RUN_DIR (repeat)")
     ap.add_argument("--compare", action="append", help="X.readout-Y.readout (repeat; default: the hypothesis doc's list)")
     ap.add_argument("--out", required=True)
+    ap.add_argument("--risk", type=float, default=0.10, help=f"D6 target risk on the {FIT_SUITE} pool (answerable + allwrong)")
     a = ap.parse_args()
     arms = dict(s.split("=", 1) for s in a.arm)
     suites = sorted({p.name[len("allwrong-"):] for run in arms.values() for p in (Path(run) / "eval").glob("allwrong-*")})
     if not suites: raise SystemExit("no RUN/eval/allwrong-* dirs: run eval_allwrong.sh first")
     compares = a.compare or [c for c in DEFAULT_COMPARE if {c.split("-")[0].split(".")[0], c.split("-")[1].split(".")[0]} <= set(arms)]
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(SEED); res = {"arms": arms, "suites": {}}
+    rng = np.random.default_rng(SEED); res = {"arms": arms, "dev": {name: load_dev(run) for name, run in arms.items()}, "suites": {}}
+    print("decision-v7 development (reward_report.json raw.overall):")
+    for name, d in res["dev"].items(): print(f"  {name:5}" + ("not evaluated" if d is None else f"top1 {d['top1']:.4f}  nll {d['nll']:.4f}"))
+    pools = {}   # (suite, arm, readout) -> (conf, hit, n answerable) on that suite's common pairs
     for suite in suites:
         per = {name: readouts(run, suite) for name, run in arms.items()}
         common = sorted(set.intersection(*(set(k) for k, _, _, _ in per.values())))
@@ -202,7 +246,8 @@ def main():
             for r, d in ro.items():
                 m_ = {"auroc": detection(d, r), "win": win_rate(d, r)}
                 if r in CURVE_READOUTS:
-                    acc = risk_coverage(*pool(d, ah)); m_.update(rc_metrics(acc)); curves[(name, r)] = acc
+                    conf, hit = pool(d, ah); acc = risk_coverage(conf, hit); m_.update(rc_metrics(acc)); curves[(name, r)] = acc
+                    pools[(suite, name, r)] = (conf, hit, len(ah))
                 A["readouts"][r] = m_
                 print(f"{'':5}{r:11}{m_['auroc']:8.4f}{m_['win']:8.4f}" + (f"{m_['aurc']:8.4f}{oracle:8.4f}" + "".join(f"{m_['acc@' + format(c, 'g')]:9.4f}" for c in COVERAGES) if "aurc" in m_ else ""))
         for c in compares:
@@ -213,6 +258,22 @@ def main():
             fmt = lambda v, ci: "n/a" if v is None else f"{v:+.4f} [{ci[0]:+.4f}, {ci[1]:+.4f}]"
             print(f"{c:22} dAUROC {fmt(d['d_auroc'], d['d_auroc_ci'])}   dAURC {fmt(d['d_aurc'], d['d_aurc_ci'])}")
         svg({k: v for k, v in curves.items() if k[1] in ("maxprob", "maxr")}, f"{suite}: answerable + all-wrong pool", out / f"rc-{suite}.svg")
+    if {FIT_SUITE, APPLY_SUITE} <= set(suites):
+        # D6: a threshold fit for --risk on one suite's pool, applied unchanged to the other's; "oracle" = the coverage the
+        # same readout reaches on the apply suite with a threshold fit there (the best that readout's ranking allows)
+        res["threshold_transfer"] = T6 = {"risk": a.risk, "fit": FIT_SUITE, "apply": APPLY_SUITE, "arms": {}}
+        print(f"\n== threshold transfer: fit on {FIT_SUITE} at risk <= {a.risk:g}, applied to {APPLY_SUITE}")
+        print(f"{'arm':5}{'readout':11}{'fit_cov':>9}{'cov':>8}{'risk':>8}{'ans_ok':>8}{'ans_bad':>8}{'oracle':>8}")
+        for name in arms:
+            for r in CURVE_READOUTS:
+                if (FIT_SUITE, name, r) not in pools: continue
+                fc, fh, fn = pools[(FIT_SUITE, name, r)]; tc, th, tn = pools[(APPLY_SUITE, name, r)]
+                t = fit_threshold(fc, fh, a.risk)
+                m_ = {"fit": apply_threshold(fc, fh, t, fn), "apply": apply_threshold(tc, th, t, tn),
+                      "apply_oracle_coverage": apply_threshold(tc, th, fit_threshold(tc, th, a.risk), tn)["coverage"]}
+                T6["arms"].setdefault(name, {})[r] = m_; p = m_["apply"]
+                print(f"{name:5}{r:11}{m_['fit']['coverage']:9.4f}{p['coverage']:8.4f}{p['risk']:8.4f}{p['answered_answerable']:8.4f}"
+                      f"{p['answered_allwrong']:8.4f}{m_['apply_oracle_coverage']:8.4f}")
     json.dump(res, open(out / "report.json", "w"), indent=1)
 
 

@@ -10,9 +10,9 @@ from pathlib import Path
 import pytest
 import torch
 import torch.nn.functional as F
-from kev.model import DecisionModel, SPECIAL, chat_common, chat_prompt, chat_splits, chat_template_digest, chat_template_parts, encode, user_tokens
+from kev.model import DecisionModel, MLPHead, SPECIAL, chat_common, chat_prompt, chat_splits, chat_template_digest, chat_template_parts, encode, user_tokens
 from kev.data import NONE_TEXTS
-from kev.pref import balanced_bce_loss, bce_loss, preference_loss, preference_pairs, reward_reg
+from kev.pref import balanced_bce_loss, bce_loss, preference_loss, preference_pairs, rcr_loss, reward_reg
 
 IM = ["<|im_start|>", "<|im_end|>"]
 CHATML = ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
@@ -106,6 +106,43 @@ def test_balanced_bce_ignores_option_count_and_none_rows():
 
 def test_single_option_question_has_no_pairs():
     assert preference_loss(torch.tensor([0.3]), {"label": 0}, "cpu") is None
+
+
+def test_rcr_alpha0_is_mean_sigmoid_ce_and_listwise_reads_the_level():
+    """alpha = 0 is the per-option sigmoid CE (mean over options); the listwise term is not shift-invariant (it is what
+    anchors the level), and far below zero, where sigmoid(r) ~ exp(r), it becomes the softmax CE."""
+    z = torch.tensor([0.3, -1.2, 0.8, 0.1]); q = {"options": list("abcd"), "label": 2}
+    loss, point, _ = rcr_loss(z, q, "cpu", 0.0, drop_none=False)
+    assert torch.isclose(loss, F.binary_cross_entropy_with_logits(z, F.one_hot(torch.tensor(2), 4).float())) and torch.isclose(loss, point)
+    lw = lambda r: rcr_loss(r, q, "cpu", 1.0, drop_none=False)[2]
+    assert not torch.isclose(lw(z), lw(z + 3.0))
+    assert torch.isclose(lw(z - 30.0), F.cross_entropy(z[None], torch.tensor([2])), atol=1e-6)
+    full, p, l = rcr_loss(z, q, "cpu", 0.5, drop_none=False)
+    assert torch.isclose(full, 0.5 * p + 0.5 * l)
+
+
+def test_rcr_drops_none_rows_when_asked():
+    """Pointwise prompts leave none wordings out; a question whose answer was the none row keeps only the pointwise term
+    (every other option trained as wrong). The listing prompt keeps every row."""
+    none = sorted(NONE_TEXTS)[0]
+    z = torch.tensor([3.0, -1.0, 5.0]); q = {"options": ["a", "b", none], "label": 2}
+    loss, point, listwise = rcr_loss(z, q, "cpu", 0.5, drop_none=True)
+    assert listwise is None and torch.isclose(point, F.binary_cross_entropy_with_logits(z[:2], torch.zeros(2))) and torch.isclose(loss, 0.5 * point)
+    assert rcr_loss(z, q, "cpu", 0.5, drop_none=False)[2] is not None
+    assert rcr_loss(z[:1], {"options": [none], "label": 0}, "cpu", 0.5, drop_none=True) is None
+
+
+def test_mlp_head_starts_at_zero_and_learns():
+    """Step 0 gives r = 0 for every option (zero output layer); the hidden layer starts learning once the output moves."""
+    torch.manual_seed(0)
+    head, h = MLPHead(8, hidden=16), torch.randn(5, 8)
+    assert torch.equal(head(None, h), torch.zeros(5))
+    opt = torch.optim.SGD(head.parameters(), lr=0.5); y = torch.tensor([1.0, 0, 0, 1, 0])
+    first = None
+    for _ in range(50):
+        loss = F.binary_cross_entropy_with_logits(head(None, h), y); first = first or loss.item()
+        opt.zero_grad(); loss.backward(); opt.step()
+    assert loss.item() < 0.5 * first and head.fc.weight.grad.abs().sum() > 0
 
 
 # --- the chat encoding ---------------------------------------------------------------------------------------------
@@ -433,11 +470,35 @@ def test_train_stage2_warm_start_and_compat(tiny_base, tmp_path, monkeypatch):
         train_tiny(tiny_base, tmp_path / "c", "--init_from", str(tmp_path / "a"), "--head", "pointer", "--lora", "4", "--max_steps", "1", monkeypatch=monkeypatch)
 
 
+def test_train_mlp_rcr_half_data_then_stage2(tiny_base, tmp_path, monkeypatch, capsys):
+    """Arms Sh/R2h -> STh: the MLP head trains under RCR on a seeded half of the records (each source subsampled), the
+    checkpoint reloads as an MLP head scoring one reward per option, and a pref + BCE stage 2 warm-starts from it on the
+    same half."""
+    from kev.checkpoint import Checkpoint
+    from kev.data import load_records, materialize
+    half = ("--head", "mlp", "--input_format", "chat", "--lora", "4", "--max_steps", "2", "--train_frac", "0.5")
+    train_tiny(tiny_base, tmp_path / "s", *half, "--loss", "rcr", "--rcr_alpha", "0.5", monkeypatch=monkeypatch)
+    picked = [l for l in capsys.readouterr().out.splitlines() if "train_frac" in l]
+    n_all = len(load_records(tiny_base / "data.jsonl"))
+    assert len(picked) == 1 and 0 < int(picked[0].split("-> ")[1].split()[0]) < n_all
+    ck = Checkpoint(tmp_path / "s"); tok, model = ck.load("cpu")
+    assert ck.meta.head_kind == "mlp" and isinstance(model.head, MLPHead)
+    rec = materialize(load_records(tiny_base / "data.jsonl")[0])
+    assert [len(z) for z in model.forward(model.encode(tok, rec))] == [len(q["options"]) for q in rec["questions"]]
+    train_tiny(tiny_base, tmp_path / "st", *half, "--loss", "pref", "--bce_w", "0.5", "--init_from", str(tmp_path / "s"), monkeypatch=monkeypatch)
+    assert picked[0] in capsys.readouterr().out   # the same records
+    assert (tmp_path / "st" / "head.pt").exists()
+
+
 @pytest.mark.parametrize("args", [("--input_format", "chat", "--head", "pointer"),
                                   ("--input_format", "chat_pointwise", "--head", "pointer"),
                                   ("--input_format", "chat", "--head", "scalar", "--option_isolation", "1"),
                                   ("--reg", "bsr", "--loss", "ce"),
-                                  ("--loss", "pref", "--label_smoothing", "0.1")])
+                                  ("--loss", "pref", "--label_smoothing", "0.1"),
+                                  ("--input_format", "chat", "--head", "scalar", "--loss", "rcr", "--bce_w", "0.5"),
+                                  ("--input_format", "chat", "--head", "scalar", "--loss", "pref", "--rcr_alpha", "0.3"),
+                                  ("--input_format", "chat_yesno", "--head", "mlp", "--head_init", "yesno"),
+                                  ("--train_frac", "0")])
 def test_train_rejects_invalid_flag_combinations(tiny_base, tmp_path, monkeypatch, args):
     with pytest.raises(SystemExit):
         train_tiny(tiny_base, tmp_path / "x", *args, "--max_steps", "1", monkeypatch=monkeypatch)

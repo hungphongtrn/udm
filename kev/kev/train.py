@@ -21,8 +21,8 @@ from .checkpoint import Checkpoint, Meta, write_meta
 from .device import DEVICE_HELP, DEVICES, allocated_bytes, empty_cache, select, sync
 from .data import EVAL_ONLY, build, augment, load_records, materialize, none_pair, source_seed
 from .suite import SYNTHETIC_SOURCES, digest, load_split, read_json, read_manifest, validate_training, write_json
-from .model import CHAT_FORMATS, HEAD_KINDS, INPUT_FORMATS, MAX_STATE, MAX_TRAIN_STATE, DecisionModel, fits, load_tokenizer, rows_of, training_context, user_tokens
-from .pref import REGS, balanced_bce_loss, bce_loss, preference_loss, reward_reg
+from .model import CHAT_FORMATS, HEAD_KINDS, INPUT_FORMATS, MAX_STATE, MAX_TRAIN_STATE, SCALAR_HEADS, DecisionModel, chat_lists_options, fits, load_tokenizer, rows_of, training_context, user_tokens
+from .pref import REGS, balanced_bce_loss, bce_loss, preference_loss, rcr_loss, reward_reg
 
 
 # --- losses -----------------------------------------------------------------------------------------------------------
@@ -63,9 +63,9 @@ def question_loss(z, q, dev, ord_w, label_smoothing=0.0, brier_w=0.0, focal_gamm
 
 
 def objective(z, q, dev, a, terms, members, weight):
-    """One question's training loss: question_loss (--loss ce), the preference loss (--loss pref, kev.pref) or the
-    class-balanced per-option BCE plus --ce_w x question_loss (--loss bce), plus --bce_w x the per-option BCE. Pair rewards
-    go to `members` (--reg); `weight` (the question's share of its variant) scales the logged terms."""
+    """One question's training loss: question_loss (--loss ce), the preference loss (--loss pref, kev.pref), the
+    class-balanced per-option BCE plus --ce_w x question_loss (--loss bce) or RCR (--loss rcr), plus --bce_w x the
+    per-option BCE. Pair rewards go to `members` (--reg); `weight` (the question's share of its variant) scales the logged terms."""
     if a.loss == "ce":
         loss = question_loss(z, q, dev, a.ord_w, a.label_smoothing, a.brier_w, a.focal_gamma)
     elif a.loss == "bce":
@@ -74,6 +74,13 @@ def objective(z, q, dev, a, terms, members, weight):
         if b is not None: terms["bce"] += b.item() * weight; terms["bce_n"] += weight
         if a.ce_w > 0:
             c = question_loss(z, q, dev, a.ord_w); loss = loss + a.ce_w * c; terms["listwise"] += c.item() * weight; terms["listwise_n"] += weight
+    elif a.loss == "rcr":
+        # none rows are left out where an option is graded without the others (the pointwise prompts), as for --loss bce
+        out = rcr_loss(z, q, dev, a.rcr_alpha, drop_none=a.input_format in CHAT_FORMATS and not chat_lists_options(a.input_format))
+        if out is None: loss = z.sum() * 0.0
+        else:
+            loss, point, listwise = out; terms["bce"] += point.item() * weight; terms["bce_n"] += weight
+            if listwise is not None: terms["listwise"] += listwise.item() * weight; terms["listwise_n"] += weight
     else:
         out = preference_loss(z, q, dev)
         if out is None: loss = z.sum() * 0.0   # one option: nothing to prefer
@@ -158,6 +165,16 @@ def training_requests(a, tok, manifest, holdout):
         keep = sorted(mix_rng.sample(range(len(public)), int(round(a.public_frac * len(public)))))
         reqs = [public[i] for i in keep] + synth
         print(f"mix: public_frac {a.public_frac} -> {len(keep)} public + {len(synth)} synthetic records", flush=True)
+    if a.train_frac < 1:
+        # per-source deterministic subsample (keyed on --seed, as --public_frac), so every arm of one seed trains on the
+        # same records and a warm start (--init_from) at the same fraction continues on its stage 1's records
+        by_src = {}
+        for r in reqs: by_src.setdefault(r["_meta"]["source"], []).append(r)
+        reqs = []
+        for src, rs in sorted(by_src.items()):
+            rng = random.Random(source_seed(a.seed, f"train_frac:{src}"))
+            reqs += [rs[i] for i in sorted(rng.sample(range(len(rs)), max(1, int(round(a.train_frac * len(rs))))))]
+        print(f"mix: train_frac {a.train_frac} -> {len(reqs)} records over {len(by_src)} sources", flush=True)
     if a.synthetic_repeat > 1:
         extra = [r for r in reqs if r["_meta"]["source"] in SYNTHETIC_SOURCES] * (a.synthetic_repeat - 1)
         reqs = reqs + extra
@@ -436,17 +453,20 @@ def parse_args():
     ap.add_argument("--option_isolation", type=int, choices=[0, 1], default=0, help="option spans are isolated sub-branches with shared positions (exact permutation invariance)")
     ap.add_argument("--special_embeddings", type=int, choices=[0, 1], default=0, help="also train the embeddings of the 5 delimiter tokens")
     ap.add_argument("--head_dim", type=int, default=256, help="pointer head dimension")
-    ap.add_argument("--head", choices=HEAD_KINDS, default="pointer", help="pointer: Kev's query-key pointer over option states; scalar: one Linear(d, 1) reward per option")
+    ap.add_argument("--head", choices=HEAD_KINDS, default="pointer", help="pointer: Kev's query-key pointer over option states; scalar: one Linear(d, 1) reward per option; "
+                                                                         "mlp: Linear(d, 1024) -> SiLU -> Linear(1024, 1) per option, output layer zero-initialised (kev.model.MLPHead)")
     ap.add_argument("--input_format", choices=INPUT_FORMATS, default="kev", help="kev: Kev's delimiter format, read each option at its </opt>; chat: one plain-text user "
                                                                              "message per option rendered with the tokenizer's chat template (state, instruction, option list, 'Grade this option: o_k'), "
-                                                                             "reward read at the last token, prefix cached across the options (needs --head scalar); chat_pointwise: the same "
+                                                                             "reward read at the last token, prefix cached across the options (needs --head scalar or mlp); chat_pointwise: the same "
                                                                              "without the option list, so an option's reward depends only on the state, the instruction and the option itself; "
                                                                              "chat_yesno: pointwise too, the row ends 'Option: o_k ... Is this option a correct answer? Answer Yes or No.'")
     ap.add_argument("--head_init", choices=["random", "yesno"], default="random", help="yesno: start the scalar head as the base LM head's W_yes - W_no (bias 0), "
                                                                                       "so the initial reward is logit(Yes) - logit(No) (needs --input_format chat_yesno, not with --init_from)")
-    ap.add_argument("--loss", choices=["ce", "pref", "bce"], default="ce", help="ce: Kev's cross-entropy (question_loss); pref: Bradley-Terry over label-derived pairs (kev.pref); "
-                                                                               "bce: class-balanced per-option BCE on sigmoid(reward), none rows left out (kev.pref.balanced_bce_loss)")
+    ap.add_argument("--loss", choices=["ce", "pref", "bce", "rcr"], default="ce", help="ce: Kev's cross-entropy (question_loss); pref: Bradley-Terry over label-derived pairs (kev.pref); "
+                                                                                      "bce: class-balanced per-option BCE on sigmoid(reward), none rows left out (kev.pref.balanced_bce_loss); "
+                                                                                      "rcr: (1 - alpha) per-option sigmoid CE + alpha ListCE(sigmoid) (Bai et al. 2023, kev.pref.rcr_loss)")
     ap.add_argument("--ce_w", type=float, default=0.0, help="with --loss bce: weight of Kev's softmax cross-entropy over the options (the listwise term; 0 = off)")
+    ap.add_argument("--rcr_alpha", type=float, default=0.5, help="with --loss rcr: weight alpha of the listwise term (0 = per-option sigmoid CE alone)")
     ap.add_argument("--reg", choices=REGS, default="none", help="reward regularizer per micro-batch over the preference pairs' rewards (kev.pref): bsr = mean^2, l2 = mean of squares")
     ap.add_argument("--reg_w", type=float, default=1e-3, help="weight of --reg")
     ap.add_argument("--bce_w", type=float, default=0.0, help="weight of per-option BCE on sigmoid(reward) against the hard label (Stage 2; 0 = off)")
@@ -461,6 +481,7 @@ def parse_args():
                                                                           "the state twice); their siblings count in the --length_sort cost (default: every record, as before)")
     ap.add_argument("--synthetic_repeat", type=int, default=1, help="oversample synthetic policy sources (legacy_policy, compositional, contrastive) this many times per epoch")
     ap.add_argument("--public_frac", type=float, default=1.0, help="deterministic subsample of public-source training records (mix ablations)")
+    ap.add_argument("--train_frac", type=float, default=1.0, help="deterministic per-source subsample of every training record (keyed on --seed; screening at a fraction of the data)")
     ap.add_argument("--anchor", default="", help="JSON of frozen-base zero-shot distributions {record_id: {qid: {key: p}}} (kev.anchors); enables the anchoring loss")
     ap.add_argument("--anchor_w", type=float, default=0.0, help="weight of KL(base || model) toward the frozen base model's zero-shot distribution, per anchored question")
     ap.add_argument("--anchor_sources", default="", help="comma-separated sources to anchor (default: every record with a target)")
@@ -495,24 +516,28 @@ def parse_args():
     a = ap.parse_args()
     if a.shared_prefix is None: a.shared_prefix = a.full_ft
     a.bce_types = sorted({t for t in a.bce_types.split(",") if t})   # a list: vars(a) is written to JSON
-    if a.input_format in CHAT_FORMATS and a.head != "scalar":
-        ap.error("--input_format chat / chat_pointwise / chat_yesno read one reward per option row: needs --head scalar")
+    if a.input_format in CHAT_FORMATS and a.head not in SCALAR_HEADS:
+        ap.error("--input_format chat / chat_pointwise / chat_yesno read one reward per option row: needs --head scalar or mlp")
     if a.input_format in CHAT_FORMATS and (a.option_isolation or a.pass_tokens_max):
         ap.error("--input_format chat / chat_pointwise / chat_yesno: not with --option_isolation, nor --pass_tokens_max (its plan measures Kev-format rows)")
-    if a.head_init == "yesno" and (a.input_format != "chat_yesno" or a.init_from):
-        ap.error("--head_init yesno reads the base LM head for the chat_yesno prompt: needs --input_format chat_yesno, not with --init_from")
+    if a.head_init == "yesno" and (a.input_format != "chat_yesno" or a.init_from or a.head != "scalar"):
+        ap.error("--head_init yesno reads the base LM head for the chat_yesno prompt into a linear head: needs --input_format chat_yesno and --head scalar, not with --init_from")
     if a.loss == "pref" and (a.ord_w or a.label_smoothing or a.brier_w or a.focal_gamma):
         ap.error("--ord_w / --label_smoothing / --brier_w / --focal_gamma modify the CE loss; not with --loss pref")
     if a.loss == "bce" and (a.label_smoothing or a.brier_w or a.focal_gamma or a.bce_w):
         ap.error("--loss bce: no --label_smoothing / --brier_w / --focal_gamma (CE modifiers), no --bce_w (the unbalanced add-on; bce is already the loss)")
     if not (math.isfinite(a.ce_w) and a.ce_w >= 0) or (a.ce_w and a.loss != "bce"):
         ap.error("--ce_w is finite, >= 0 and weights the listwise term of --loss bce")
+    if a.loss == "rcr" and (a.ord_w or a.label_smoothing or a.brier_w or a.focal_gamma or a.bce_w):
+        ap.error("--loss rcr: no CE modifiers (--ord_w / --label_smoothing / --brier_w / --focal_gamma), no --bce_w (its pointwise term is the BCE)")
+    if not (math.isfinite(a.rcr_alpha) and 0 <= a.rcr_alpha <= 1) or (a.rcr_alpha != 0.5 and a.loss != "rcr"):
+        ap.error("--rcr_alpha is in [0, 1] and weights the listwise term of --loss rcr")
     if a.reg != "none" and a.loss != "pref":
         ap.error("--reg regularizes the preference pairs' rewards: needs --loss pref")
     if not (math.isfinite(a.reg_w) and a.reg_w >= 0 and math.isfinite(a.bce_w) and a.bce_w >= 0) or not set(a.bce_types) <= {"choice", "noul", "score"}:
         ap.error("--reg_w and --bce_w are finite and >= 0; --bce_types is a subset of choice,noul,score")
-    if min(a.epochs, a.accum, a.n_per_source, a.lora, a.batch, a.synthetic_repeat) < 1 or not 0 < a.public_frac <= 1:
-        ap.error("epochs, accum, n_per_source, lora, batch and synthetic_repeat must be positive; 0 < public_frac <= 1")
+    if min(a.epochs, a.accum, a.n_per_source, a.lora, a.batch, a.synthetic_repeat) < 1 or not 0 < a.public_frac <= 1 or not 0 < a.train_frac <= 1:
+        ap.error("epochs, accum, n_per_source, lora, batch and synthetic_repeat must be positive; 0 < public_frac <= 1; 0 < train_frac <= 1")
     if a.dtype == "bf16" and a.device != "cuda":
         ap.error("--dtype bf16 requires --device cuda")
     if a.lr <= 0 or a.head_lr < 0 or a.weight_decay < 0 or min(a.ord_w, a.perm_kl, a.anchor_w) < 0 or not 0 <= a.perm_frac <= 1:
@@ -714,8 +739,8 @@ def main():
                 if step % 10 == 0:
                     rn = max(run["r_n"], 1); r_mean = run["r_sum"] / rn; r_std = max(run["r_sq"] / rn - r_mean ** 2, 0) ** 0.5
                     pref = (f" pref {run['pref']/max(run['pair_n'],1):.3f} pair_acc {run['pair_acc']/max(run['pair_n'],1):.3f}" if a.loss == "pref" else "") + \
-                           (f" reg {run['reg']/run['n']:.4f}" if a.reg != "none" else "") + (f" bce {run['bce']/max(run['bce_n'],1):.3f}" if a.bce_w or a.loss == "bce" else "") + \
-                           (f" listwise {run['listwise']/max(run['listwise_n'],1):.3f}" if a.ce_w else "")
+                           (f" reg {run['reg']/run['n']:.4f}" if a.reg != "none" else "") + (f" bce {run['bce']/max(run['bce_n'],1):.3f}" if a.bce_w or a.loss in ("bce", "rcr") else "") + \
+                           (f" listwise {run['listwise']/max(run['listwise_n'],1):.3f}" if a.ce_w or (a.loss == "rcr" and a.rcr_alpha) else "")
                     print(f"ep{ep} step {step}/{steps} loss {run['ce']/run['n']:.3f}{pref} r_mean {r_mean:.3f} r_std {r_std:.3f} r_absmax {run['r_absmax']:.2f} "
                           f"kl {run['kl']/max(run['kl_n'],1):.3f} anchor {run['anchor']/max(run['anchor_n'],1):.3f} {(time.time()-t0)/seen:.3f}s/rec", flush=True)
                     run = Counter()
