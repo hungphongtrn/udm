@@ -209,8 +209,11 @@ inside the shared prefix, so the saving is small]:
   ~15-20 h. D and H/HP run the graphed chat passes by the serving default, so these are the fast-path estimates;
   `chat_speed_check.py runs/pref/H/seed0` measures H's before the rest.
 - DI 0.3 subset (H only): D's 7.6 h was the old eager chat path; the graphed path (on by default since `4668509`) targets
-  the Kev format's ~2 h and is unmeasured, so ~2-7 h [INFERENCE]. Re-measure D first (`chat_speed_check.py`, then a fresh
-  subset run) before relying on it; `GRAPHS=0` runs the old eager path, only for the comparison.
+  the Kev format's ~2 h. Measured on D seed 0 (3090): its graphs' memory pool grew until eager passes ran out of memory,
+  586 of 15,000 requests refused as unsupported (0 in the first 2,000, ~90 per 1,000 at the end; API-Bank 237,
+  POP909-CL 221, CLINC150 80), index 34.42 against the eager run's 36.91. dindex_engine now releases the graphs on out of
+  memory and reruns the request (CudaGraphs.release); rerun those 586 rows before trusting a graphed index. `GRAPHS=0`
+  runs the old eager path.
 - Total for the seed-0 path (H, HP, RB2 on A/D/H/HP, DI on H): ~35-40 h of one 3090; the seed screen adds ~18 h.
 
 ## Commands

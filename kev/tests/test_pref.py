@@ -246,7 +246,8 @@ def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec, fmt):
     one unpadded eager pass per question prefix, one graphed pass for the option rows), one whose six questions' prefixes
     have six distinct lengths and so cannot share one bucket (their continuations must run unpadded: a padded DeltaNet state
     has advanced past the prefix's last real token), and one whose single question is the state pass itself, both before any
-    capture and after (replays) -- for both chat layouts: the pointwise prefix (no option listing) is the same tokens at the
+    capture and after (replays), and again after CudaGraphs.release (what dindex_engine does on out of memory) and a new
+    capture in the new pool -- for both chat layouts: the pointwise prefix (no option listing) is the same tokens at the
     same positions to these passes, which read the splits and never the listing."""
     from kev.cuda_graphs import CudaGraphs, bucket
     from kev.data import load_records, materialize
@@ -277,6 +278,12 @@ def test_chat_graphs_match_chat_hidden(tiny_base, tok_rec, fmt):
     model.graphs.capture_pending()       # dindex_engine captures the same way between requests
     assert model.graphs.stats()["kept"] > 0, model.graphs.stats()
     for enc in encs: check(enc)          # replayed graphs
+    model.graphs.release()
+    assert model.graphs.stats()["kept"] == 0, model.graphs.stats()
+    for enc in encs: check(enc)          # eager again, from the same buffers
+    model.graphs.capture_pending()
+    assert model.graphs.stats()["kept"] > 0, model.graphs.stats()
+    for enc in encs: check(enc)          # replays of graphs captured in the new pool
 
 
 @pytest.fixture(scope="module")
