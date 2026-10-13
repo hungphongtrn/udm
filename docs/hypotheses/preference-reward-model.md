@@ -288,11 +288,35 @@ reproduction check: its board checkpoint (`jaredpalmer/kev-4b@139fdd94`) runs on
 each benchmark is compared with its board score (`dindex_subset.py compare`, z on accuracy metrics).
 Commands: `kev/scripts/pref/README.md` "Decision Index 0.3" (`dindex.sh check runs/pref/D/seed0` runs all three).
 
-| Model | DI 0.3 public index | Notes |
-|---|---|---|
-| kev-4b r10 (board 37.95) | pending | reproduction check: per-benchmark z vs board |
-| D seed 0 | pending | |
-| kev-4b@v7-base | pending | comparator |
+Archive `dindex-subset.tgz` (index/score files per run, retemper grid, pairings; no per-row results). Rows: 15,000 per
+model; unsupported (scored wrong): r10 12, v7-base 12 (Kev format), D 0 (chat format).
 
-Verdict: **inconclusive** (rule 5). Best scalar-pref arm D: 3-seed top1 v7 -0.79 vs A (fails the -0.5 margin), t4 +0.15;
-not refuted. Decision Index check of D seed 0 still pending.
+| Model | DI 0.3 public index (subset) | Raw index | Notes |
+|---|---|---|---|
+| kev-4b r10 (board 37.95) | 36.69 | 52.61 | reproduction check passes: 24 accuracy benchmarks z mean -0.03, sd 1.14, none beyond 3 (2 beyond 2: ChessBench -2.17, CLadder +2.29); 12 F1/nDCG benchmarks (no z) mean diff -0.010, largest CLINC150 -0.064 |
+| kev-4b@v7-base | 33.60 | 50.10 | comparator; served at its own T = 1.0 |
+| D seed 0 | **36.91** | 53.18 | served at T = 1.0 |
+
+Readings:
+
+- D - v7-base = **+3.31** index points. Per benchmark (37): 27 up, 9 down, 1 tied; mean +0.034, median +0.032; sign
+  test p = 0.004. No paired row-level CI (per-row results not shipped). Largest gains: RAGTruth (59) +0.226, BPoMP (20)
+  +0.174, Humicroedit (21) +0.136, When2Call (62) +0.096. Losses: BANKING77 (4) -0.067 (the same task D loses on v7
+  dev, -5.8), home appliance (9) -0.057, GSM8K (30) -0.040, BFCL (1) -0.035. Areas: Arts & Human Taste +0.071,
+  Language Understanding +0.066, Knowledge & Reasoning +0.015, Tools +0.012, Retrieval & Classification +0.003.
+- D seed 0 on the subset (36.91) matches the board's r10 through the same engine (36.69), which has later training
+  stages than the base recipe.
+- Temperature is irrelevant here: every T in the grid (0.5-4) gives the same index for both models (the 0.3 metrics are
+  argmax / ranking based; T rescales scores without reordering them and noul stays on the same side of 0.5), so the
+  "shipped", "raw" and "best T" pairings are identical.
+- Confound: v7-base is the published base-recipe model, not our arm A (different training run; our A is the Kev recipe
+  on bf16 weights). The +3.31 is D-vs-published-base, not pref-vs-CE. One seed of D (its best on dev).
+- Dev and index disagree in sign: D trails A on v7 dev (-0.79, 3 seeds) yet beats v7-base on the index. Consistent with
+  `docs/studies/README.md` finding that in-distribution validation is a weak proxy for the index.
+
+Pending to attribute the gain: A seed 0 on the same subset (`dindex.sh subset runs/pref/A/seed0`), paired with D.
+
+Verdict: **inconclusive** (rule 5) on the pre-registered dev rule. Best scalar-pref arm D: 3-seed top1 v7 -0.79 vs A
+(fails the -0.5 margin), t4 +0.15; not refuted. Externally D seed 0 scores 36.91 on the Decision Index 0.3 subset,
++3.31 over the published base recipe (v7-base) and level with the board's r10; whether that comes from the pref
+loss / scalar head or from our training run awaits A on the subset.
