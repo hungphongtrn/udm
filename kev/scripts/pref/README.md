@@ -54,7 +54,9 @@ format check accepts it (`kev.model.CHAT_FORMATS`). Recipe, rule and thresholds:
 [`docs/hypotheses/pointwise-chat-input.md`](../../docs/hypotheses/pointwise-chat-input.md).
 ```bash
 # HP's data (once, CPU): HelpSteer3 preference pairs -> Kev --data records + a manifest (dataset revision, admission
-# counts and drop reasons, sha256). Exact-match decontamination against RewardBench 2 prompts.
+# counts and drop reasons, sha256). Admission is the trainer's own rule with kev.suite.ADMISSION_BRANCH_HEADROOM reserved
+# on the branch (a training augment can add an option), plus the chat row limit of the format the arm trains.
+# Exact-match decontamination against RewardBench 2 prompts.
 .venv/bin/python scripts/pref/convert_pref_data.py --out runs/pref/data/pref-helpsteer3.jsonl
 
 # H vs D is one flag; HP vs H is the data file (PREF_REPLAY defaults to the whole 12,576-record v7 train partition)
@@ -65,7 +67,9 @@ scripts/pref/eval_arm.sh runs/pref/H/seed0                    # run_arm.sh alrea
 # RewardBench 2 (best-of-4 + Ties) for any arm's checkpoint: A (reference), D (format comparator), H, HP. The layout is
 # the checkpoint's own: chat_pointwise scores each candidate on its own, chat/kev pass a prompt's candidates as one
 # question's options. Same scoring as allenai/reward-bench (utils.py: reroll_and_score_dataset, process_single_model),
-# six-subset mean, unsupported = wrong, plus the set-independence probe (--probe 64).
+# six-subset mean, plus the set-independence probe (--probe 64). An unsupported candidate (over context / OOM) is never
+# truncated and never scored around: a non-Ties prompt with any unsupported candidate earns 0, a Ties row with one keeps
+# its place in every denominator but contributes nothing, and the probe skips such a prompt (counts in the JSON).
 .venv/bin/python scripts/pref/rewardbench2.py --run runs/pref/H/seed0 --out runs/pref/H/seed0/rewardbench2.json
 ```
 

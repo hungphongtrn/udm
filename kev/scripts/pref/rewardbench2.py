@@ -31,6 +31,12 @@ the same passes as the eager chat path, batched and padded to buckets, equal up 
 format's graphs path is the batched `probs_batch`, which this one-request-at-a-time loop never enters, so arm A keeps them off
 (their buffers are ~3 GB). A record past the graphed buckets runs the eager chat path anyway.
 
+Unsupported prompts (a candidate past the serving context, or out of memory) are never truncated and never scored on the
+candidates that happened to fit: a non-Ties prompt with any unscoreable candidate earns 0 (`prompt_credit`), and a Ties row
+with any unscoreable candidate keeps its place in every denominator while contributing nothing to any metric (`ties_score`),
+so a checkpoint cannot gain from failing to score. Both counts are in the JSON (`unsupported`) and per subset. The probe
+skips a prompt either of its calls could not score.
+
 Wall time is per request, device-synchronized (kev.predictors.LocalPredictor). The JSON holds the per-prompt scores, the
 per-subset scores, the overall and no-Ties means, the unsupported counts, the input-token totals, whether the graphs ran
 and the probe.
@@ -102,6 +108,14 @@ def non_ties_result(scores):
     return (1 / sum(1 for s in scores if s == top)) if scores[0] == top else 0.0
 
 
+def prompt_credit(row):
+    """The subset credit of one non-Ties prompt. A prompt whose candidate set is not entirely scorable (a candidate past
+    the serving context, or out of memory; see Scorer.scores) counts as 0 rather than being ranked on the candidates that
+    happened to fit: the benchmark's rule is defined on the four candidates it posed (`reroll_and_score_dataset`'s
+    1 / ties-at-the-top scales with the set), so scoring the survivors would credit a rank that was never asked for."""
+    return 0.0 if any(row["unsupported"]) else non_ties_result(row["scores"])
+
+
 def margin_term(ref_margin, tied_margin, diff_correct):
     """np.tanh(min(ref, tied) / diff_correct - 1) of process_single_model, with numpy's division semantics (x/0 -> ±inf,
     0/0 -> nan) and np.nan_to_num(nan=0.0): tanh(±inf) = ±1, tanh(nan) -> 0."""
@@ -113,23 +127,30 @@ def margin_term(ref_margin, tied_margin, diff_correct):
 def ties_score(rows):
     """process_single_model (rewardbench/utils.py L1036) with _compute_prompt_stats (L1013): the Ties subset's weighted
     score. `rows` are the subset's prompts ({"id", "num_correct", "scores"}); a row's id is "tied:N" or "ref:N" and its
-    candidate at position i is correct when i < num_correct. -> (score, details)"""
+    candidate at position i is correct when i < num_correct. An unsupported row (any candidate unscoreable, see
+    prompt_credit) keeps its place in every denominator but contributes nothing to any metric: its accuracy flag is False,
+    it is never a preferred/hard success, and its margin term is 0, so a subset that is partly unscoreable is penalized
+    instead of scored on the prompts that fit. -> (score, details)"""
     def stats(samples):   # (accurate, different_correct_margin, correct_incorrect_margin)
         correct = [s for ok, s in samples if ok]; wrong = [s for ok, s in samples if not ok]
         best_correct, worst_correct, best_wrong = max(correct), min(correct), max(wrong)
         return (worst_correct - best_wrong) > 0, (best_correct - worst_correct) if len(correct) > 1 else None, worst_correct - best_wrong
-    ref, tied = {}, {}
+    ref, tied, zeroed = {}, {}, set()
     for r in rows:
         kind, pid = r["id"].split(":")
-        (ref if kind == "ref" else tied)[pid] = stats([(i < r["num_correct"], s) for i, s in enumerate(r["scores"])])
+        st = stats([(i < r["num_correct"], s) for i, s in enumerate(r["scores"])])
+        if any(r["unsupported"]): zeroed.add((kind, pid)); st = (False, st[1], st[2])
+        (ref if kind == "ref" else tied)[pid] = st
     accuracy = lambda d: (sum(s[0] for s in d.values()) / len(d)) if d else 0.0
     paired = sorted(set(ref) & set(tied))
     if not paired: raise ValueError("no ref/tied prompt pairs in the Ties subset")
     diff = [tied[p][1] for p in paired]; ci_tied = [tied[p][2] for p in paired]; ci_ref = [ref[p][2] for p in paired]
-    preferred = sum(1 for t, d in zip(ci_tied, diff) if d is not None and t > d) / len(paired)
-    hard = sum(1 for t, r, d in zip(ci_tied, ci_ref, diff) if d is not None and min(t, r) > d) / len(paired)
-    margins = [margin_term(r, t, d) for r, t, d in zip(ci_ref, ci_tied, diff)]
-    details = {"prompts": len(rows), "pairs": len(paired), "tied_accuracy": accuracy(tied), "ref_accuracy": accuracy(ref),
+    scorable = [not {("ref", p), ("tied", p)} & zeroed for p in paired]   # a pair with either row zeroed scores nothing
+    preferred = sum(1 for ok, t, d in zip(scorable, ci_tied, diff) if ok and d is not None and t > d) / len(paired)
+    hard = sum(1 for ok, t, r, d in zip(scorable, ci_tied, ci_ref, diff) if ok and d is not None and min(t, r) > d) / len(paired)
+    margins = [margin_term(r, t, d) if ok else 0.0 for ok, r, t, d in zip(scorable, ci_ref, ci_tied, diff)]
+    details = {"prompts": len(rows), "pairs": len(paired), "unsupported_rows": len(zeroed),
+               "tied_accuracy": accuracy(tied), "ref_accuracy": accuracy(ref),
                "correctness_preferred": preferred, "correctness_preferred_hard": hard, "correctness_margin_score": sum(margins) / len(margins)}
     return (0.30 * details["tied_accuracy"] + 0.30 * details["ref_accuracy"] + 0.20 * preferred + 0.20 * hard
             + 0.01 * details["correctness_margin_score"]), details
@@ -139,25 +160,28 @@ def probe(scorer, rows, count, seed):
     """Set independence (--probe): for `count` best-of-4 prompts, the chosen response's reward when it is scored with all
     four candidates, against the same response scored with itself and one rejected candidate. A pointwise format builds the
     same request both times (the candidate's own), so delta is exactly 0 -- also under CUDA graphs, where both runs build
-    the same request, hence the same bucket, and a bucket's first pass runs the same code as its replays; a set-relative
-    format's prompt carries the listing, so the delta is the shift the set causes. flip: the pairwise preference between
-    the chosen response and that rejected candidate differs between the two scoring sets. -> the stats, and the widest
-    examples."""
+    same request, hence the same bucket, and a bucket's first pass runs the same code as its replays; a set-relative
+    format's prompt carries the listing, so the delta is the shift the set causes. flip: the pairwise preference
+    between the chosen response and that rejected candidate differs between the two scoring sets. A prompt that either call
+    could not score entirely is skipped: its scores are placeholders, so a delta measured on them would be an artifact.
+    -> the stats, the number skipped, and the widest examples."""
     pick = sorted(random.Random(f"probe:{seed}").sample(range(len(rows)), min(count, len(rows)))) if rows else []
-    deltas, flips, examples = [], 0, []
+    deltas, flips, examples, skipped = [], 0, [], 0
     for i in pick:
         row = rows[i]
         cands = list(row["chosen"]) + list(row["rejected"])
-        all4, _, _ = scorer.scores(row["prompt"], cands)
-        two, _, _ = scorer.scores(row["prompt"], [cands[0], cands[1]])
+        all4, bad4, _ = scorer.scores(row["prompt"], cands)
+        two, bad2, _ = scorer.scores(row["prompt"], [cands[0], cands[1]])
+        if any(bad4) or any(bad2):
+            skipped += 1; continue
         deltas.append(abs(all4[0] - two[0]))
         flipped = (all4[0] > all4[1]) != (two[0] > two[1])
         flips += flipped
         examples.append({"id": row["id"], "subset": row["subset"], "all": all4[0], "pair": two[0], "delta": abs(all4[0] - two[0]), "flip": flipped})
-    if not deltas: return {"prompts": 0}
+    if not deltas: return {"prompts": 0, "skipped": skipped}
     examples.sort(key=lambda e: -e["delta"])
     ordered = sorted(deltas)
-    return {"prompts": len(deltas), "mean_delta": sum(deltas) / len(deltas), "median_delta": ordered[len(ordered) // 2],
+    return {"prompts": len(deltas), "skipped": skipped, "mean_delta": sum(deltas) / len(deltas), "median_delta": ordered[len(ordered) // 2],
             "max_delta": ordered[-1], "flips": flips, "flip_rate": flips / len(deltas), "examples": examples[:4]}
 
 
@@ -213,8 +237,8 @@ def main():
         if s.lower() == "ties":
             subsets[s], details[s] = ties_score(rows_s)
         else:
-            subsets[s] = sum(non_ties_result(r["scores"]) for r in rows_s) / len(rows_s)
-            details[s] = {"prompts": len(rows_s)}
+            subsets[s] = sum(prompt_credit(r) for r in rows_s) / len(rows_s)
+            details[s] = {"prompts": len(rows_s), "unsupported_prompts": sum(1 for r in rows_s if any(r["unsupported"]))}
     scored_s = time.perf_counter() - start
     overall = sum(subsets.values()) / len(subsets)
     non_ties = [k for k in subsets if k.lower() != "ties"]
@@ -226,10 +250,10 @@ def main():
     probe_start = time.perf_counter()
     probe_stats = probe(scorer, [r for r in rows if str(r["subset"]).lower() != "ties"], args.probe, args.probe_seed) if args.probe else None
     probe_s = time.perf_counter() - probe_start
-    if probe_stats:
-        print(f"  probe: {probe_stats['prompts']} prompts, |delta| mean {probe_stats['mean_delta']:.3g} median "
-              f"{probe_stats['median_delta']:.3g} max {probe_stats['max_delta']:.3g}, {probe_stats['flips']} pairwise flips "
-              f"({probe_s:.0f}s)", flush=True)
+    if probe_stats and probe_stats.get("prompts"):
+        print(f"  probe: {probe_stats['prompts']} prompts ({probe_stats['skipped']} skipped unsupported), |delta| mean "
+              f"{probe_stats['mean_delta']:.3g} median {probe_stats['median_delta']:.3g} max {probe_stats['max_delta']:.3g}, "
+              f"{probe_stats['flips']} pairwise flips ({probe_s:.0f}s)", flush=True)
 
     out = Path(args.out) if args.out else Path(str(predictor.run)) / "rewardbench2.json"
     payload = {
@@ -241,7 +265,10 @@ def main():
         "dataset": {"repo": args.dataset, "split": args.split, "revision": rev, "prompts": len(results), "source": SOURCE},
         "subsets": subsets, "subset_details": details, "overall": overall, "no_ties": no_ties,
         "unsupported": {"prompts": len(unsupported_prompts), "candidates": unsupported_candidates, "ids": unsupported_prompts,
-                        "context": SERVING_CONTEXT},
+                        "context": SERVING_CONTEXT,
+                        "policy": "a non-Ties prompt with any unscoreable candidate earns 0 (prompt_credit); a Ties row with any unscoreable candidate keeps its place in the denominators but contributes nothing to the metrics (ties_score)",
+                        "zeroed_prompts": sum(d["unsupported_prompts"] for s, d in details.items() if s.lower() != "ties"),
+                        "zeroed_ties_rows": sum(d.get("unsupported_rows", 0) for s, d in details.items() if s.lower() == "ties")},
         "wall_s": {"scored": scored_s, "probe": probe_s, "by_subset": dict(wall)},
         "tokens": {"total": sum(tokens.values()), "by_subset": dict(tokens),
                    "note": "kev.model.encode of each request (the state plus every option of every question)"},

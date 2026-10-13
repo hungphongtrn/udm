@@ -99,8 +99,11 @@ one label per pair, the aggregate.
   dropped, as are empty responses.
 - Records are admitted exactly as every training record is (`kev.train.training_requests`):
   `kev.model.fits(materialize(record), tokenizer, **training_context(max_state))`, at the arm's default `max_state` 384,
-  plus the row check the arm's own format adds (`kev.model.encode` on the chat layout: the row must fit
-  `max_branch + CHAT_ROW_SLACK`), so nothing in the file can make `kev.train`'s encode raise.
+  with `kev.suite.ADMISSION_BRANCH_HEADROOM` (64 branch tokens) reserved, the rule every frozen suite was admitted
+  under: `kev.data.augment` can add an option to a Choice question at training time (a none option, p 0.12, or a
+  distractor, p 0.15) that the converted pair does not carry, and the augmented record must still encode. The row check
+  the arm's own format adds comes on top (`kev.model.encode` on the chat layout: the row must fit
+  `max_branch + CHAT_ROW_SLACK`, with the same headroom), so nothing in the file can make `kev.train`'s encode raise.
   From the character lengths (context p50 1,022 chars, responses p50 1,510 chars; the Kev branch holds the instruction
   and BOTH responses) ~13,000 of the 36,299 non-tie pairs fit [INFERENCE]; the manifest reports the real number and the
   per-limit drop counts.
@@ -142,11 +145,15 @@ one label per pair, the aggregate.
   scores it (weighted 0.30/0.30/0.20/0.20/0.01; the reference prompt of a tied prompt is its `ref:N` row), the other
   subsets as the chosen response winning against three rejected ones (credit shared at a tied top). The prompt layout is
   the checkpoint's own: A/D put the prompt's candidates in one question (set-relative, D's listing includes them), H/HP
-  score each candidate on its own.
+  score each candidate on its own. An unsupported candidate (over the serving context, or OOM) is never truncated and
+  never scored around: a non-Ties prompt with any unsupported candidate earns 0 (the ranking rule is defined on the four
+  candidates the benchmark posed), and a Ties row with one keeps its place in every denominator while contributing
+  nothing to any metric, so no arm can gain from failing to score. Per-prompt and per-subset counts are in the JSON.
 - Set-independence probe (`--probe 64`, part of `rewardbench2.py`): for 64 best-of-4 prompts, the chosen response's
   reward scored with all four candidates versus with itself and one rejected one: mean/median/max |Δ| and the pairwise
   flip rate of the chosen-vs-that-rejected comparison. H's Δ must be exactly 0 (the same one-option request both times);
-  A's and D's are what those formats pay.
+  A's and D's are what those formats pay. A prompt that either of the probe's two calls could not score entirely is
+  skipped (its scores are placeholders), and the skip count is reported.
 - Serving path (not a score): H/HP are chat-format checkpoints, so `dindex_engine` and `rewardbench2.py` replay their
   passes as CUDA graphs (`kev.cuda_graphs.chat`, on for `input_format in kev.model.CHAT_FORMATS` on CUDA; off with
   `GRAPHS=0` / `--graphs 0`). The graphed passes are eager `chat_hidden`'s tokens and positions, so rewards agree up to
@@ -173,7 +180,9 @@ Set before any run.
    better is a free win; one that ranks worse must not be more than half a point worse). HP vs H: HP must beat H by
    >= 1 point overall AND on at least 4 of the 6 subsets. Between +1 and -1 point overall is reported as "no measurable
    gain from mixing" (not support for the data claim); worse than -1 is a loss. A's overall is reported as the reference
-   (the released recipe's prompt is not a reward-model prompt, so it is not a comparator).
+   (the released recipe's prompt is not a reward-model prompt, so it is not a comparator). All arms are scored under the
+   same unsupported policy (see the metrics), fixed here before any run: no arm is credited for a prompt or row it could
+   not score, so the comparison cannot be moved by a cheaper way to fail.
 5. **Verdict.**
    - Format claim **supported** if rules 1-3 hold; **refuted** if rule 1 fails on either set at seed 0 (or on the 3-seed
      means if reached); **inconclusive** otherwise (e.g. the flip-rate clause alone missing).
@@ -251,8 +260,9 @@ scripts/pref/pack_results.sh pref-H-HP.tgz                # logs, metrics, eval 
   Ties subset's 102 prompts (51 ref + 51 tied pairs) make its score coarse. The rule compares arms at the same
   checkpoint budget, not against the leaderboard.
 - Unsupported requests: H scores every candidate on its own, so one long candidate no longer takes its prompt down with
-  it (the set-relative formats overflow per prompt). The counts are reported per arm; they are not comparable across
-  formats by construction.
+  it (the set-relative formats overflow per prompt). No arm is credited for what it could not score: the prompt/row is
+  zeroed as described under the metrics. The counts are reported per arm; they are not comparable across formats by
+  construction.
 - HP's wall time and memory are H's plus ~12,000 records (no new memory, more steps); the same microbatch applies.
 - Decontamination is exact-match only; a paraphrase of a RewardBench 2 prompt stays in the training data.
 - The converted pairs carry one question type (`choice`) and one instruction: HP tests the data, not instruction

@@ -20,8 +20,11 @@ responses, the better one on a seeded-random key:
                               "label": "a", "src": "helpsteer3_pref_general"}}}
 
 `overall_preference` 0 ("about the same") is not a preference and is dropped. Admission is the training rule every
-record passes (`kev.train.training_requests`): `kev.model.fits(materialize(record), tokenizer, **training_context(max_state))`,
-the Kev-format encoding within the training context, so the pairs train on the same population as the suite's records.
+record passes (`kev.train.training_requests`): `kev.model.fits(materialize(record), tokenizer, **training_context(max_state))`
+with `kev.suite.ADMISSION_BRANCH_HEADROOM` reserved on the branch — the headroom every frozen suite was admitted under,
+because a training-time `kev.data.augment` can add an option (a none option, p 0.12, or a distractor, p 0.15) that the
+converted pair does not carry yet, and such a pair must still encode when the trainer augments it. The format arm HP
+trains is checked too (`kev.model.encode` on the chat layout: the row must fit `max_branch + CHAT_ROW_SLACK`).
 The manifest records how many rows each limit dropped. At the default 384-token state and 1024-token branch, ~13,000 of
 the 36,299 non-tie pairs fit (estimate from the character lengths: the Kev branch holds the instruction and BOTH
 responses), so the default `--cap 12000` (the size of decision-v7's training partition) samples rather than truncates.
@@ -45,6 +48,7 @@ from huggingface_hub import HfApi
 from kev.api import render
 from kev.data import load_records, materialize
 from kev.model import MAX_STATE, ContextOverflow, encode, fits, load_tokenizer, training_context
+from kev.suite import ADMISSION_BRANCH_HEADROOM
 
 DATASET, CONFIG, SPLIT = "nvidia/HelpSteer3", "preference", "train"
 BENCHMARK, BENCHMARK_SPLIT = "allenai/reward-bench-2", "test"
@@ -109,6 +113,15 @@ def overflow_reason(tok, rec, ctx):
     return "packed" if len(enc["ids"]) > ctx["max_packed"] else None
 
 
+def admission_context(ctx):
+    """The training context with kev.suite.ADMISSION_BRANCH_HEADROOM reserved on the branch, the rule every frozen suite
+    was admitted under: a training-time augment (kev.data.augment) can add one option to a Choice question (a none option,
+    p 0.12, or a distractor, p 0.15), which the converted pair does not carry yet. For the `chat` layout the added option
+    also lengthens the prefix's listing, so the headroom covers the chat row too; under `chat_pointwise` (arm HP) the row
+    holds the graded option alone and the reserve is only conservative."""
+    return {**ctx, "max_branch": ctx["max_branch"] - ADMISSION_BRANCH_HEADROOM}
+
+
 def chat_row_fits(tok, rec, ctx):
     """True when the record's chat row fits the row limit encode enforces on the format arm HP trains (max_branch +
     CHAT_ROW_SLACK). `fits` measures only the Kev encoding, which holds the question's whole option list, so it is the
@@ -148,6 +161,7 @@ def main():
     args = ap.parse_args()
 
     ctx = training_context(args.max_state)
+    actx = admission_context(ctx)   # kev.suite.ADMISSION_BRANCH_HEADROOM reserved: a training augment can add an option
     tok = load_tokenizer(args.base, args.base_revision or None)
     rev = resolve(args.dataset, args.revision)
     rows = load_dataset(args.dataset, args.config, split=args.split, revision=rev)
@@ -167,10 +181,10 @@ def main():
         if rec is None:
             drops[reason] = drops.get(reason, 0) + 1; continue
         internal = materialize(rec)
-        if not fits(internal, tok, **ctx):                       # kev.train.training_requests' rule, same call
-            reason = overflow_reason(tok, internal, ctx) or "packed"
+        if not fits(internal, tok, **actx):                      # kev.train.training_requests' rule, same call, headroom reserved
+            reason = overflow_reason(tok, internal, actx) or "packed"
             drops[reason] = drops.get(reason, 0) + 1; continue
-        if not chat_row_fits(tok, internal, ctx):                # the row arm HP's own encode reads
+        if not chat_row_fits(tok, internal, actx):               # the row arm HP's own encode reads
             drops["chat_row"] = drops.get("chat_row", 0) + 1; continue
         enc = encode(tok, internal, max_state=ctx["max_state"], max_branch=ctx["max_branch"], strict=True)
         admitted.append(rec); state_tokens.append(enc["state_tokens"]); record_tokens.append(len(enc["ids"]))
@@ -188,15 +202,19 @@ def main():
     first = materialize(back[0])
     if first["questions"][0]["options"] != [f"{k}: {v}" for k, v in kept[0]["questions"][QID]["criteria"].items()]:
         raise SystemExit(f"{out}: the first record's options do not read back as its criteria")
-    if not fits(first, tok, **ctx): raise SystemExit(f"{out}: the first record does not fit the training context it was admitted against")
+    if not fits(first, tok, **actx): raise SystemExit(f"{out}: the first record does not fit the admission context it was admitted against")
 
     digest = hashlib.sha256(out.read_bytes()).hexdigest()
     manifest = {
         "out": str(out), "records": len(kept), "bytes": out.stat().st_size, "sha256": digest,
         "dataset": {"repo": args.dataset, "config": args.config, "split": args.split, "revision": rev, "rows": len(rows), "license": "cc-by-4.0"},
         "tokenizer": {"base": args.base, "revision": args.base_revision},
-        "admission": {"rule": "kev.model.fits(materialize(record), tokenizer, **kev.model.training_context(max_state))",
-                      "context": ctx, "admitted": len(admitted), "written": len(kept), "cap": args.cap, "seed": args.seed, "dropped": drops},
+        "admission": {"rule": "kev.model.fits(materialize(record), tokenizer, **admission_context(training_context(max_state))): "
+                              "kev.train.training_requests' rule with kev.suite.ADMISSION_BRANCH_HEADROOM reserved on the branch, "
+                              "the headroom every frozen suite was admitted under (a training augment can add one option to a "
+                              "Choice question), plus kev.model.encode's chat-row limit on the format the arm trains",
+                      "context": ctx, "branch_headroom": ADMISSION_BRANCH_HEADROOM, "admitted": len(admitted), "written": len(kept),
+                      "cap": args.cap, "seed": args.seed, "dropped": drops},
         "record": {"question": QID, "type": "choice", "instructions": INSTRUCTION, "keys": list(KEYS),
                    "label": "the better response's key (which response is better is assigned to a random key)",
                    "state": "the pair's conversation, as Kev's message-list state (kev.api.render flattens it)"},

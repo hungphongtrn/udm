@@ -3,7 +3,9 @@ Run: .venv/bin/python -m pytest tests/test_pref.py -q   (on the training machine
 """
 import inspect
 import json
+import math
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -408,3 +410,58 @@ def test_train_pointer_pref_smoke(tiny_base, tmp_path, monkeypatch):
     """Arm B: the default pointer head in the Kev format trains under the preference loss."""
     train_tiny(tiny_base, tmp_path / "b", "--loss", "pref", "--lora", "4", "--max_steps", "1", monkeypatch=monkeypatch)
     assert (tmp_path / "b" / "head.pt").exists()
+
+
+# --- RewardBench 2 aggregation (scripts/pref/rewardbench2.py) -------------------------------------------------------
+
+def rewardbench2():
+    """The script, imported by path (scripts/ is not a package): the aggregation over score rows is pure, so its
+    unsupported policy is testable without a checkpoint, a GPU or the benchmark."""
+    pytest.importorskip("datasets")
+    import importlib.util
+    path = Path(__file__).resolve().parents[1] / "scripts/pref/rewardbench2.py"
+    spec = importlib.util.spec_from_file_location("rewardbench2", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_prompt_credit_zeroes_unsupported_prompts():
+    """A prompt with any unscoreable candidate earns 0 (not its chosen response's rank among the candidates that fit)."""
+    rb = rewardbench2()
+    row = {"id": "1", "scores": [1.0, 0.5, 0.4, 0.3], "unsupported": [False, False, True, False]}
+    assert rb.prompt_credit(row) == 0.0
+    assert rb.prompt_credit({**row, "unsupported": [False] * 4}) == 1.0
+    shared_top = {**row, "scores": [1.0, 1.0, 0.0, 0.0], "unsupported": [False] * 4}
+    assert rb.prompt_credit(shared_top) == 0.5             # credit shared at a tied top, as reroll_and_score_dataset scores
+    assert rb.prompt_credit({**shared_top, "unsupported": [True, False, False, False]}) == 0.0
+
+
+def test_ties_score_zeroes_unsupported_rows_but_keeps_denominators():
+    """An unsupported Ties row stays in every denominator and contributes nothing: its accuracy flag is False, its pair is
+    never a preferred/hard success, and its margin term is 0."""
+    rb = rewardbench2()
+    def row(kind, pid, num_correct, scores, unsupported=False):
+        return {"id": f"{kind}:{pid}", "num_correct": num_correct, "scores": scores, "unsupported": [unsupported] * len(scores)}
+    # ref:0 -> correct [3], wrong [2,1,0]: accurate, margin 3-2 = 1      tied:0 -> correct [3,2], wrong [1,0]: margin 2-1 = 1, diff 1
+    # ref:1 -> correct [0,1], wrong [2,3]: not accurate, margin 0-2 = -2   tied:1 -> correct [4,3], wrong [0,0]: margin 3-0 = 3, diff 1
+    base = [row("ref", 0, 1, [3, 2, 1, 0]), row("tied", 0, 2, [3, 2, 1, 0]),
+            row("ref", 1, 2, [0, 1, 2, 3]), row("tied", 1, 2, [4, 3, 0, 0])]
+    clean, details = rb.ties_score(base)
+    assert clean == pytest.approx(0.30 * 1.0 + 0.30 * 0.5 + 0.20 * 0.5 + 0.01 * (math.tanh(0.0) + math.tanh(-3.0)) / 2)
+    assert details["tied_accuracy"] == 1.0 and details["ref_accuracy"] == 0.5      # tied:0, tied:1 accurate; ref:0 only
+    assert details["correctness_preferred"] == 0.5 and details["correctness_preferred_hard"] == 0.0
+    assert details["correctness_margin_score"] == pytest.approx((math.tanh(0.0) + math.tanh(-3.0)) / 2)
+    # one unsupported ref row: pair 1 scores nothing (preferred, hard, margin), both pairs stay in the denominators
+    zeroed, zdet = rb.ties_score([base[0], base[1], row("ref", 1, 2, [0, 1, 2, 3], unsupported=True), base[3]])
+    assert zdet == {"prompts": 4, "pairs": 2, "unsupported_rows": 1, "tied_accuracy": 1.0, "ref_accuracy": 0.5,
+                    "correctness_preferred": 0.0, "correctness_preferred_hard": 0.0, "correctness_margin_score": pytest.approx(0.0)}
+    assert zeroed == pytest.approx(0.30 * 1.0 + 0.30 * 0.5) and zeroed < clean
+    # both rows of pair 0 unsupported: that pair's accuracy flags and margin are gone, pair 1 still scores
+    both, bdet = rb.ties_score([row("ref", 0, 1, [3, 2, 1, 0], unsupported=True), row("tied", 0, 2, [3, 2, 1, 0], unsupported=True),
+                                base[2], base[3]])
+    assert (bdet["prompts"], bdet["pairs"], bdet["unsupported_rows"]) == (4, 2, 2)
+    assert (bdet["tied_accuracy"], bdet["ref_accuracy"]) == (0.5, 0.0)
+    assert (bdet["correctness_preferred"], bdet["correctness_preferred_hard"]) == (0.5, 0.0)
+    assert bdet["correctness_margin_score"] == pytest.approx((0.0 + math.tanh(-3.0)) / 2)
+    assert both == pytest.approx(0.30 * 0.5 + 0.20 * 0.5 + 0.01 * math.tanh(-3.0) / 2)
