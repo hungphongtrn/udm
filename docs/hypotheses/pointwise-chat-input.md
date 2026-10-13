@@ -213,7 +213,9 @@ inside the shared prefix, so the saving is small]:
   requests refused (0 in the first 2,000, ~90 per 1,000 at the end; API-Bank 237, POP909-CL 221, CLINC150 80; index
   34.42), 15,154 s. dindex_engine now releases the graphs on out of memory and reruns the request (CudaGraphs.release,
   `2efe65f`); those 586 rows rerun with it took 3,450 s (5.9 s each: the suite's most-option requests). Result: index
-  37.01, 15,000 ok, against eager's 36.91 (kernel rounding). Graphed wall time ~15-18.6k s (the refused rows' failed
+  37.01, 15,000 ok, against eager's 36.91 (kernel rounding: `dindex_subset.py flips`, 372 of 123,375 answers changed,
+  0.30 %, most in near-tied many-option benchmarks -- ChessBench 4.9 %, POP909-CL 3.8 %, GSM8K 3.2 % at max |dp| <= 0.05;
+  max |dp| anywhere 0.15 (ANLI); per-benchmark deltas 14 up, 13 down). Graphed wall time ~15-18.6k s (the refused rows' failed
   attempts are in the 15,154 s), so ~4.2-5.2 h: 1.5-1.8x eager, still 2-3x the Kev format's 6,048-7,367 s. `GRAPHS=0`
   runs the old eager path.
 - Total for the seed-0 path (H, HP, RB2 on A/D/H/HP, DI on H): ~35-40 h of one 3090; the seed screen adds ~18 h.
