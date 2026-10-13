@@ -208,9 +208,9 @@ inside the shared prefix, so the saving is small]:
   with a ~300-900-token prompt), ~5-8 h per arm, plus the 64-prompt probe (6 requests each) ~10 min. All four arms
   ~15-20 h. D and H/HP run the graphed chat passes by the serving default, so these are the fast-path estimates;
   `chat_speed_check.py runs/pref/H/seed0` measures H's before the rest.
-- DI 0.3 subset (H only): ~7 h (15,000 requests; the chat path reads K option rows per question either way)
-  [INFERENCE from D's 7.6 h]. The graphed path is what D's 7.6 h measured, so H inherits it; `GRAPHS=0` would run the
-  old eager path and is only for the comparison.
+- DI 0.3 subset (H only): D's 7.6 h was the old eager chat path; the graphed path (on by default since `4668509`) targets
+  the Kev format's ~2 h and is unmeasured, so ~2-7 h [INFERENCE]. Re-measure D first (`chat_speed_check.py`, then a fresh
+  subset run) before relying on it; `GRAPHS=0` runs the old eager path, only for the comparison.
 - Total for the seed-0 path (H, HP, RB2 on A/D/H/HP, DI on H): ~35-40 h of one 3090; the seed screen adds ~18 h.
 
 ## Commands
