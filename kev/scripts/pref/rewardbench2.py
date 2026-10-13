@@ -52,7 +52,7 @@ from datasets import load_dataset
 from huggingface_hub import HfApi
 
 from kev.checkpoint import Checkpoint, LoadOptions
-from kev.model import CHAT_FORMATS, ContextOverflow
+from kev.model import CHAT_FORMATS, ContextOverflow, chat_lists_options
 from kev.predictors import LocalPredictor
 from kev.suite import SERVING_CONTEXT
 
@@ -72,8 +72,8 @@ def request(state, options, keys):
 
 
 class Scorer:
-    """Scores a prompt's candidates with one checkpoint. `pointwise` (chat_pointwise) scores every candidate on its own
-    request; the set-relative formats score all of a prompt's candidates as the options of one question."""
+    """Scores a prompt's candidates with one checkpoint. `pointwise` (chat_pointwise, chat_yesno) scores every candidate on
+    its own request; the set-relative formats score all of a prompt's candidates as the options of one question."""
 
     def __init__(self, predictor, pointwise, order_seed=0):
         self.p, self.pointwise, self.order_seed = predictor, pointwise, order_seed
@@ -220,7 +220,7 @@ def main():
     fmt = Checkpoint(args.run).meta.input_format   # before the load, as dindex_engine reads it: graphs are worth their buffers only where serving replays
     graphs = args.graphs if args.graphs is not None else (args.device == "cuda" and fmt in CHAT_FORMATS)
     predictor = LocalPredictor(args.run, args.device, LoadOptions(dtype=DTYPES[args.dtype], temperature=1.0, cuda_graphs=graphs), context=SERVING_CONTEXT)
-    pointwise = predictor.model.input_format == "chat_pointwise"
+    pointwise = fmt in CHAT_FORMATS and not chat_lists_options(fmt)
     scorer = Scorer(predictor, pointwise, args.order_seed)
     print(f"{args.dataset}@{rev[:8]} {args.split}: {len(rows)} prompts; {predictor.run}: head {predictor.model.head_kind}, "
           f"input format {predictor.model.input_format} -> {'one request per candidate (pointwise)' if pointwise else 'one question per prompt (set-relative)'}, "

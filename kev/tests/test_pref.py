@@ -11,7 +11,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 from kev.model import DecisionModel, SPECIAL, chat_common, chat_prompt, chat_splits, chat_template_digest, chat_template_parts, encode, user_tokens
-from kev.pref import bce_loss, preference_loss, preference_pairs, reward_reg
+from kev.data import NONE_TEXTS
+from kev.pref import balanced_bce_loss, bce_loss, preference_loss, preference_pairs, reward_reg
 
 IM = ["<|im_start|>", "<|im_end|>"]
 CHATML = ("{% for m in messages %}<|im_start|>{{ m['role'] }}\n{{ m['content'] }}<|im_end|>\n{% endfor %}"
@@ -86,6 +87,23 @@ def test_bce_loss_hard_labels_only():
     assert torch.allclose(bce_loss(z, q, "cpu", ("choice",)), want)
 
 
+def test_balanced_bce_ignores_option_count_and_none_rows():
+    """Positives and negatives each weigh half whatever k is (so the 1/k prior is no shortcut: all-zero rewards cost log 2 at
+    k = 2 and k = 50 alike, and the loss is minimised at r = 0 for a uniform target); none wordings are left out, so a
+    question whose correct option is a none row trains its other options as wrong only."""
+    q = lambda k, y: {"options": [f"opt{i}" for i in range(k)], "label": y, "qtype": "choice"}
+    for k in (2, 50):
+        assert torch.isclose(balanced_bce_loss(torch.zeros(k), q(k, 0), "cpu"), torch.tensor(math.log(2)))
+    z = torch.zeros(4, requires_grad=True)
+    balanced_bce_loss(z, {**q(4, 0), "target": [0.25] * 4}, "cpu").backward()
+    assert torch.allclose(z.grad, torch.zeros(4))
+    none = sorted(NONE_TEXTS)[0]
+    z = torch.tensor([3.0, -1.0, 5.0])
+    got = balanced_bce_loss(z, {"options": ["a", "b", none], "label": 2, "qtype": "choice"}, "cpu")
+    assert torch.isclose(got, 0.5 * F.binary_cross_entropy_with_logits(z[:2], torch.zeros(2)))
+    assert balanced_bce_loss(z[:1], {"options": [none], "label": 0, "qtype": "choice"}, "cpu") is None
+
+
 def test_single_option_question_has_no_pairs():
     assert preference_loss(torch.tensor([0.3]), {"label": 0}, "cpu") is None
 
@@ -140,7 +158,7 @@ def test_chat_encoding_layout(tok_rec):
     positions continue the prefix; every row ends with the tail's last token. The Kev format carries no chat splits."""
     tok, rec = tok_rec
     assert "chat" not in encode(tok, rec)
-    enc = encode(tok, rec, chat=True)
+    enc = encode(tok, rec, chat="chat")
     head_ids = tok(HEAD + "State:\n", add_special_tokens=False).input_ids
     tail_ids = tok(TAIL, add_special_tokens=False).input_ids
     state_ids = user_tokens(tok, rec["state"])
@@ -165,7 +183,7 @@ def test_chat_pointwise_encoding_layout(tok_rec):
     """Arm H's layout (chat_pointwise): the prefix carries no option text and is one prefix for all K options; the branches
     and their lengths are the chat layout's, and their positions continue this prefix."""
     tok, rec = tok_rec
-    pw, full = encode(tok, rec, chat=True, chat_listing=False), encode(tok, rec, chat=True)
+    pw, full = encode(tok, rec, chat="chat_pointwise"), encode(tok, rec, chat="chat")
     head_ids = tok(HEAD + "State:\n", add_special_tokens=False).input_ids
     state_ids = user_tokens(tok, rec["state"])
     assert len(enc_chat := pw["chat"]) == len(rec["questions"])
@@ -181,7 +199,7 @@ def test_chat_pointwise_encoding_layout(tok_rec):
         option_ids = {tok(o, add_special_tokens=False).input_ids[0] for o in q["options"]}
         assert not option_ids & set(p_ids)                       # no option of this question in the prefix
         assert option_ids <= set(ids)                            # the chat layout lists every one of them
-    text, n = chat_prompt(tok, rec, 0, 0, options=False)
+    text, n = chat_prompt(tok, rec, 0, 0, fmt="chat_pointwise")
     assert n == len(pw["chat"][0][0]) + len(pw["chat"][0][2][0]["ids"]) and isinstance(text, str)
     q0 = rec["questions"][0]
     options0 = {tok(o, add_special_tokens=False).input_ids[0] for o in q0["options"]}
@@ -191,10 +209,25 @@ def test_chat_pointwise_encoding_layout(tok_rec):
     assert pw["chat_row_max"] == max(len(ids) + len(r["ids"]) for ids, _, rows in pw["chat"] for r in rows)
 
 
+def test_chat_yesno_encoding_layout(tok_rec):
+    """Arm HB's layout (chat_yesno): pointwise like chat_pointwise, the prefix ends at 'Option: ', and each branch is the
+    option, then the Yes/No question, then the template tail, so the row's last token is where the answer would start."""
+    tok, rec = tok_rec
+    yn = encode(tok, rec, chat="chat_yesno")
+    head_ids = tok(HEAD + "State:\n", add_special_tokens=False).input_ids
+    tail_ids = tok(TAIL, add_special_tokens=False).input_ids
+    state_ids = user_tokens(tok, rec["state"])
+    for q, (ids, pos, rows) in zip(rec["questions"], yn["chat"]):
+        assert ids == head_ids + state_ids + tok(f"\n\nInstruction: {q['instr']}\n\nOption: ", add_special_tokens=False).input_ids
+        for o, r in zip(q["options"], rows):
+            assert r["ids"] == tok(o + "\n\nIs this option a correct answer? Answer Yes or No." + TAIL, add_special_tokens=False).input_ids
+            assert r["ids"][-len(tail_ids):] == tail_ids and r["pos"] == list(range(len(ids), len(ids) + len(r["ids"])))
+
+
 def test_chat_state_truncation_and_escaping(tok_rec):
     """The state is cut to max_state - 1 tokens (as Kev's encode does); delimiter-looking text in options cannot make tokens."""
     tok, rec = tok_rec
-    enc = encode(tok, rec, chat=True, max_state=4)
+    enc = encode(tok, rec, chat="chat", max_state=4)
     assert enc["state_truncated"]
     head_ids = tok(HEAD + "State:\n", add_special_tokens=False).input_ids
     assert enc["chat"][0][0][len(head_ids):len(head_ids) + 3] == user_tokens(tok, rec["state"])[:3]

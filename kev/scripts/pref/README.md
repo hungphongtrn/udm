@@ -16,6 +16,8 @@ HP also reads the preference pairs that `convert_pref_data.py` writes (see "Poin
 | H | D + `--input_format chat_pointwise`: each option is graded on its own, the `Options:` listing is gone |
 | HP | H + open human preference pairs (`--data $PREF_DATA --replay 12576`) |
 | HL | H with `--loss ce`: softmax CE over a question's option rewards (reranker loss) instead of BT + BSR; probabilities via G's fitted T |
+| HB | H's pointwise grader as a Yes/No question (`--input_format chat_yesno`), head started at the LM head's `W_yes - W_no` (`--head_init yesno`), class-balanced per-option BCE (`--loss bce`) |
+| HBL | HB + `--ce_w 0.25` (listwise CE term) |
 
 H and HP belong to branch `idea/pointwise-chat-input` (pre-registered in
 [`docs/hypotheses/pointwise-chat-input.md`](../../docs/hypotheses/pointwise-chat-input.md), which also holds the rule and
@@ -64,6 +66,8 @@ format check accepts it (`kev.model.CHAT_FORMATS`). Recipe, rule and thresholds:
 # H vs D is one flag; HP vs H is the data file (PREF_REPLAY defaults to the whole 12,576-record v7 train partition)
 BATCH_FALLBACK=1 scripts/pref/run_arm.sh H 0 0
 BATCH_FALLBACK=1 PREF_DATA=runs/pref/data/pref-helpsteer3.jsonl scripts/pref/run_arm.sh HP 0 0
+BATCH_FALLBACK=1 scripts/pref/run_arm.sh HB 0 0
+BATCH_FALLBACK=1 scripts/pref/run_arm.sh HBL 0 0
 scripts/pref/eval_arm.sh runs/pref/H/seed0                    # run_arm.sh already evals; this redoes/reports one run
 
 # RewardBench 2 (best-of-4 + Ties) for any arm's checkpoint: A (reference), D (format comparator), H, HP. The layout is
@@ -74,6 +78,9 @@ scripts/pref/eval_arm.sh runs/pref/H/seed0                    # run_arm.sh alrea
 # truncated and never scored around: a non-Ties prompt with any unsupported candidate earns 0, a Ties row with one keeps
 # its place in every denominator but contributes nothing, and the probe skips such a prompt (counts in the JSON).
 .venv/bin/python scripts/pref/rewardbench2.py --run runs/pref/H/seed0 --out runs/pref/H/seed0/rewardbench2.json
+# Pooled (absolute-scale) metrics on a RewardBench 2 JSON: per subset + overall pooled AUROC, sigmoid ECE, prior-adjusted
+# ECE; --report adds Platt ECE with G's (a, b). Writes <json stem>.pooled.json. Dev-set equivalents are in reward_report.py.
+.venv/bin/python scripts/pref/rb2_pooled.py runs/pref/H/seed0/rewardbench2.json --report runs/pref/H/seed0/eval/decision-v7-development/reward_report.json
 ```
 
 ## Decision Index 0.3 (arms D / H; secondary, external)

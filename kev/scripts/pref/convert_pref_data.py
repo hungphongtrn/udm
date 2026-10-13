@@ -127,7 +127,7 @@ def chat_row_fits(tok, rec, ctx):
     CHAT_ROW_SLACK). `fits` measures only the Kev encoding, which holds the question's whole option list, so it is the
     stricter of the two: this check exists so nothing the converter writes can make kev.train's own encode raise."""
     try:
-        encode(tok, rec, max_state=ctx["max_state"], max_branch=ctx["max_branch"], strict=True, chat=True, chat_listing=False)
+        encode(tok, rec, max_state=ctx["max_state"], max_branch=ctx["max_branch"], strict=True, chat="chat_pointwise")
         return True
     except ContextOverflow:
         return False

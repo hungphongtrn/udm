@@ -1,12 +1,12 @@
-# Hypothesis: pointwise chat input (arms H and HP)
+# Hypothesis: pointwise chat input (arms H, HP, HL, HB, HBL)
 
 Branch `idea/pointwise-chat-input`, cut from `hyp/preference-reward-model` after its wave-1 and seeds-1-2 results
 (`docs/hypotheses/preference-reward-model.md`, HEAD `c47005e`, whose "Deferred" note points here). Code:
 `kev/kev/model.py` (the `chat_pointwise` input format), `kev/scripts/pref/` (`arms.sh`, `convert_pref_data.py`,
 `rewardbench2.py`), `kev/tests/test_pref.py`. Everything below (arms, thresholds, rule) is fixed before any run.
 
-The branch touches only the format plumbing of `kev/kev/model.py`: `INPUT_FORMATS` / `CHAT_FORMATS`,
-`chat_lists_options`, `chat_splits(..., options=)`, `chat_prompt(..., options=)`, `encode(..., chat_listing=)` and
+The branch touches only the format plumbing of `kev/kev/model.py`: `INPUT_FORMATS` / `CHAT_FORMATS` / `CHAT_LAYOUTS`,
+`chat_lists_options`, `chat_splits(..., fmt=)`, `chat_prompt(..., fmt=)`, `encode(..., chat=<format>)` and
 `DecisionModel.encode`. A concurrent line of work optimizes chat serving speed in the other worktree (`chat_hidden`,
 `forward_chat_batch`, `dindex_engine`); nothing here restructures those, so that rebase is mechanical. Every check of
 the form `input_format == "chat"` goes through `CHAT_FORMATS` instead of string equality, at the checkpoint meta and in
@@ -28,6 +28,8 @@ response. Two claims, one per arm:
 | **H** (format) | Removing the listing keeps dev top1 within 1 point of D on both dev sets, and makes the reward of a response independent of the set it is scored in (exactly, by construction — including the option order, which `kev.benchmark`'s permutation probe measures for D). |
 | **HP** (data) | H plus open human preference pairs (RewardBench 2's own task: ranking a prompt's candidates) is strictly better than H and D at ranking (RewardBench 2 overall), at dev top1 within 1 point of H. The pairs are the only difference from H. |
 | **HL** (loss) | H's grader trained as a reranker (RankLLaMA's objective: softmax CE over a question's option rewards) instead of Bradley-Terry + BSR, with probabilities from the softmax at G's fitted temperature, generalizes at least as well as H (transfer-v4 top1) and is better calibrated (G NLL). The loss is the only difference from H. |
+| **HB** (absolute grader) | A grader asked "Is this option a correct answer? Answer Yes or No." about one option at a time (`chat_yesno`), its scalar head started at the base LM head's `W_yes - W_no` and trained with class-balanced per-option BCE, gives a reward on one scale across questions: higher pooled AUROC (every option of every question in one pool) than H and than H + Platt on transfer-v4 development and on RewardBench 2, at dev top1 within 1 point of H. Its sigmoid(r - log(k - 1)) is calibrated without a fitted temperature. |
+| **HBL** (absolute + listwise) | HB + 0.25 × Kev's listwise CE keeps HB's pooled AUROC gain while recovering any top1 HB loses to H. |
 
 The released Kev recipe (arm A: pointer head, CE, Kev format) has no reward-model prompt at all: it is the reference arm
 for RewardBench 2, not a comparator for the format.
@@ -40,13 +42,40 @@ for RewardBench 2, not a comparator for the format.
 | **H** | D with the listing removed: scalar head + pref + BSR 1e-3, `chat_pointwise` | `--head scalar --input_format chat_pointwise --loss pref --reg bsr --reg_w 1e-3` |
 | **HP** | H plus the converted preference pairs | H + `--data PREF_DATA --replay 12576` |
 | **HL** | H with Kev's CE loss over the option rewards (added after the A/D RewardBench 2 run, before any H result) | `--head scalar --input_format chat_pointwise --loss ce` |
+| **HB** | each option asked a Yes/No question on its own, head = LM head's `W_yes - W_no`, class-balanced BCE (added after the HL result, before any HB run) | `--head scalar --input_format chat_yesno --head_init yesno --loss bce` |
+| **HBL** | HB + listwise CE at weight 0.25 | HB + `--ce_w 0.25` |
 | A | parent study baseline, Kev pointer head + CE (reference for RewardBench 2 only) | `--head pointer --input_format kev --loss ce` |
 
 H and D differ in exactly one flag. HP and H differ in exactly one pair of flags (the data file and the replay count).
 HL and H differ in the loss (`--loss ce` and no `--reg`, which only regularizes preference pairs).
+HB differs from H in three coupled things (prompt, head init, loss), deliberately: the Yes/No question is what makes the
+`W_yes - W_no` init meaningful, and the init is what puts BCE's absolute target on a scale the base already reads. HB is
+a recipe test against H, not an ablation; HBL and HB differ in exactly one flag.
 Exact strings live in `kev/scripts/pref/arms.sh` (source of truth if it differs from this table; update here).
 D's seed-0 number is arithmetically unchanged by this branch: `chat`'s layout is byte-identical (the branch keeps
 `chat_lists_options("chat") == True`, and `kev/tests/test_pref.py` pins the chat prefix).
+
+## The absolute-grader prompt (arms HB / HBL, `chat_yesno`)
+
+Pointwise like `chat_pointwise`; the row ends on a question whose next-token answer the LM head already scores:
+
+```
+State:
+{state}
+
+Instruction: {instruction}
+
+Option: {o_k}
+
+Is this option a correct answer? Answer Yes or No.
+```
+
+`DecisionModel(head_init="yesno")` copies the LM head rows of `Yes` and `No` (`kev.model.YESNO_TOKENS`) into the scalar
+head as `w = W_yes - W_no`, bias 0, so at step 0 the reward is the base model's own `logit(Yes) - logit(No)` at the last
+prompt token. `--loss bce` (`kev.pref.balanced_bce_loss`) weighs a question's positives and negatives half each (the
+1/k prior is no shortcut: all-zero rewards cost log 2 at any k), takes soft targets as given, and leaves the none
+wordings (`kev.data.NONE_TEXTS`) out: "none of these" is a statement about the set, not a gradable option. Under that
+balance the reward estimates a log likelihood ratio, so the k-option probability is sigmoid(r - log(k - 1)).
 
 ## The pointwise prompt (arm H, `chat_pointwise`)
 
@@ -169,6 +198,12 @@ one label per pair, the aggregate.
   machine before any number is trusted.
 - Decision Index 0.3 subset for H only (secondary, external: the parent doc's `dindex.sh subset` + `dindex_subset.py
   pair`), against D 36.91 and v7-base 33.60 on the same 15,000 rows.
+- Pooled metrics (arms HB / HBL vs H / HL / D / A): `reward_report.py` adds `auroc_pooled` (every option of every
+  question pooled: P(a right option of one question outscores a wrong option of another), rank-based, so Platt cannot
+  move it) and `ece_sigmoid_prior` (ECE of sigmoid(r - log(k - 1))). `rb2_pooled.py` does the same on a RewardBench 2
+  JSON (candidates pooled per subset and overall; `ece_prior` uses the prompt's known num_correct odds;
+  `--report` adds `ece_platt` from G's Decision Index (a, b)). Unsupported prompts count at their worst case (correct
+  candidates lowest, wrong ones highest).
 
 ## Decision rule
 
@@ -203,6 +238,15 @@ Set before any run.
      than 1 point below on decision-v7 development, or within 1 point on both with a lower G NLL (softmax at fitted T)
      on both; **refuted** if HL is more than 1 point below H on either dev set; **inconclusive** otherwise. Seeds 1-2 as
      in rule 2 if it passes at seed 0.
+   - Absolute-grader claim (HB vs H, seed 0) is **supported** if HB's pooled AUROC beats H's (H + Platt has the same
+     AUROC, Platt being monotone) by >= 0.01 on transfer-v4 development AND on RewardBench 2 (overall, `rb2_pooled.py`),
+     with HB's top1 not more than 1 point below H's on either dev set; **refuted** if HB's pooled AUROC is not above H's on
+     either, or its top1 is more than 1 point below H on either dev set; **inconclusive** otherwise. Calibration
+     (secondary): HB's `ece_sigmoid_prior` vs H + Platt's `ece_sigmoid` on decision-v7 development. HBL vs HB: same
+     AUROC test (HBL within 0.01 of HB) plus HBL's top1 >= HB's. Per-subset prediction, recorded before the run:
+     the gain shows on the verifiable subsets (Factuality, Math, Precise IF) and not on Focus or Ties.
+   - Next stages, only if HB is supported: HBX (HB on long-form candidate data, the pointwise grader at answer length)
+     and preference fine-tuning from HB's checkpoint with its BCE kept as an anchor. Not pre-registered here.
 6. **Secondary, not in the verdict:** H's DI 0.3 subset index vs D's 36.91 and v7-base's 33.60 (already measured), and
    the per-subset RB2 pattern (Safety / Precise IF where the pairs should help most).
 

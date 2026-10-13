@@ -34,16 +34,18 @@ flash-attn is installed but unused by Kev (sdpa). Upstream `uv.lock` was deleted
 
 Defaults keep upstream behaviour bit-identical (`--head pointer`, `--input_format kev`, `--loss ce`).
 
-- `kev/model.py`: `ScalarHead` (one `Linear(d, 1)` reward per option) and `make_head`/`HEAD_KINDS`; `INPUT_FORMATS = ("kev", "chat", "chat_pointwise")`
-  and `CHAT_FORMATS` (everything that accepts the chat layout, including the pointwise one: `chat_pointwise` drops the
-  `Options:` listing from the prefix, so a response is graded on its own),
+- `kev/model.py`: `ScalarHead` (one `Linear(d, 1)` reward per option) and `make_head`/`HEAD_KINDS`; `INPUT_FORMATS = ("kev", "chat", "chat_pointwise", "chat_yesno")`
+  and `CHAT_FORMATS` / `CHAT_LAYOUTS` (everything that accepts the chat layout, including the pointwise ones: `chat_pointwise`
+  drops the `Options:` listing from the prefix, so a response is graded on its own; `chat_yesno` also ends the row on a Yes/No
+  question), `DecisionModel(head_init="yesno")` (scalar head initialised to the LM head's `W_yes - W_no`),
   `chat_template_parts` / `chat_template_digest` / `chat_lists_options` / `chat_splits` / `chat_prompt` (chat input layout built from the tokenizer's own
-  chat template, no added tokens); `encode(chat=True)` adds `enc["chat"]`; `forward_chat_batch`;
+  chat template, no added tokens); `encode(chat=<format>)` adds `enc["chat"]`; `forward_chat_batch`;
   `_kev_format_only` guard on the pointer/Kev-only probability paths.
 - `kev/checkpoint.py`: `head_kind`, `input_format`, `chat_template_sha256` in checkpoint meta and `COMPAT_FIELDS`; the MLX backend
   rejects non-pointer/non-Kev checkpoints. `kev/predictors.py`: the long-row check also counts `enc["chat_row_max"]`.
-- `kev/pref.py` (new): Bradley-Terry pair loss from hard or soft labels, per-option BCE, BSR / L2 reward regularizers.
-- `kev/train.py`: flags `--head`, `--input_format {kev,chat}`, `--loss {ce,pref}`, `--reg`, `--reg_w`, `--bce_w`, `--bce_types`;
+- `kev/pref.py` (new): Bradley-Terry pair loss from hard or soft labels, per-option BCE, class-balanced per-option BCE
+  (`--loss bce`), BSR / L2 reward regularizers. `kev/data.py`: `NONE_TEXTS`.
+- `kev/train.py`: flags `--head`, `--input_format`, `--head_init`, `--loss {ce,pref,bce}`, `--ce_w`, `--reg`, `--reg_w`, `--bce_w`, `--bce_types`;
   `objective` and `batch_loss` route to the pref loss; pref stats (`pair_acc`, reward mean/std/absmax) in logs.
 - `tests/test_pref.py` (new): CPU tests of the pref losses, chat layout and checkpoint round-trip.
 - `scripts/pref/` (new): setup, arm definitions, run/eval/wave scripts and reward report for the preference study

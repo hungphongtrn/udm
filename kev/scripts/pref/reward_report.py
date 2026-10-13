@@ -4,8 +4,12 @@
 
 Per question type and overall (clean, knowable rows; the same population as report.json["clean"]): top-1, pairwise accuracy
 (label vs each other option), reward stats (the row's logits are the rewards), softmax NLL and ECE, sigmoid(reward) ECE vs the
-one-hot label (absolute calibration: meaningful mainly for D/E/F). With --calib, G: fit temperature T (softmax) and Platt (a, b)
-on the calibration rows, apply both to the eval rows, report the calibrated metrics. Writes <dir>/reward_report.json.
+one-hot label (absolute calibration: meaningful mainly for D/E/F), pooled AUROC (every option of every question in one
+pool: does a right option in one question outscore a wrong option in another? the absolute-scale test; rank-based, so
+Platt with a > 0 leaves it unchanged) and sigmoid(reward - log(k - 1)) ECE (the balanced-BCE arms' calibration claim: their
+reward is a log likelihood ratio, the k-option question's 1/k prior is the offset). With --calib, G: fit temperature T
+(softmax) and Platt (a, b) on the calibration rows, apply both to the eval rows, report the calibrated metrics. Writes
+<dir>/reward_report.json.
 """
 import argparse, json
 from pathlib import Path
@@ -33,9 +37,23 @@ def ece(conf, hit):
         if m.any(): e += m.mean() * abs(conf[m].mean() - hit[m].mean())
     return float(e)
 
+def auroc(score, hit):
+    """Area under the ROC curve: P(score of a random positive > score of a random negative), ties counted half (average
+    ranks, Mann-Whitney). None without both classes."""
+    score, hit = np.asarray(score, float), np.asarray(hit, bool)
+    n1, n0 = int(hit.sum()), int((~hit).sum())
+    if not n1 or not n0: return None
+    order = np.argsort(score, kind="mergesort"); s = score[order]; ranks = np.empty(len(s))
+    i = 0
+    while i < len(s):
+        j = i
+        while j + 1 < len(s) and s[j + 1] == s[i]: j += 1
+        ranks[order[i:j + 1]] = (i + j) / 2 + 1; i = j + 1
+    return float((ranks[hit].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
+
 def metrics(rows, T=1.0, ab=(1.0, 0.0)):
     r_all = np.concatenate([r for r, _, _ in rows])
-    top1, pair, nll, conf, hit, gap, s_conf, s_hit = [], [], [], [], [], [], [], []
+    top1, pair, nll, conf, hit, gap, s_conf, s_hit, p_conf = [], [], [], [], [], [], [], [], []
     for r, y, _ in rows:
         p = softmax(r / T); k = int(np.argmax(r))
         top1.append(k == y); nll.append(-np.log(max(p[y], 1e-12))); conf.append(p.max()); hit.append(k == y)
@@ -43,10 +61,12 @@ def metrics(rows, T=1.0, ab=(1.0, 0.0)):
         pair += [1.0 if r[y] > o else 0.5 if r[y] == o else 0.0 for o in oth]
         gap.append(r[y] - oth.mean())
         s_conf += list(sigmoid(ab[0] * r + ab[1])); s_hit += [i == y for i in range(len(r))]
+        p_conf += list(sigmoid(r - np.log(max(len(r) - 1, 1))))
     return {"n": len(rows), "top1": float(np.mean(top1)), "pairwise_acc": float(np.mean(pair)),
             "r_mean": float(r_all.mean()), "r_std": float(r_all.std()), "r_min": float(r_all.min()), "r_max": float(r_all.max()),
             "abs_r_p99": float(np.quantile(np.abs(r_all), .99)), "label_minus_other": float(np.mean(gap)),
-            "nll": float(np.mean(nll)), "ece_softmax": ece(conf, hit), "ece_sigmoid": ece(s_conf, s_hit)}
+            "nll": float(np.mean(nll)), "ece_softmax": ece(conf, hit), "ece_sigmoid": ece(s_conf, s_hit),
+            "auroc_pooled": auroc(r_all, s_hit), "ece_sigmoid_prior": ece(p_conf, s_hit)}
 
 def fit_T(rows):
     """Temperature minimizing softmax NLL: NLL is convex in beta=1/T, so golden-section search on log beta."""
@@ -88,10 +108,11 @@ def main():
         res["G"] = {"calib_dir": a.calib, "T": T, "platt_a": ab[0], "platt_b": ab[1], "n_calib": len(cal),
                     "temperature": by_type(rows, T=T), "platt": by_type(rows, ab=ab)}   # temperature: softmax metrics; platt: ece_sigmoid
     json.dump(res, open(Path(a.dir) / "reward_report.json", "w"), indent=1)
-    cols = ["n", "top1", "pairwise_acc", "r_mean", "r_std", "r_min", "r_max", "abs_r_p99", "label_minus_other", "nll", "ece_softmax", "ece_sigmoid"]
+    cols = ["n", "top1", "pairwise_acc", "r_mean", "r_std", "r_min", "r_max", "abs_r_p99", "label_minus_other", "nll", "ece_softmax", "ece_sigmoid",
+            "auroc_pooled", "ece_sigmoid_prior"]
     def show(title, tab):
         print(f"\n{title}\n{'type':9}" + "".join(f"{c[:11]:>12}" for c in cols))
-        for t, m in tab.items(): print(f"{t:9}" + "".join(f"{m[c]:12.4g}" for c in cols))
+        for t, m in tab.items(): print(f"{t:9}" + "".join(f"{m[c]:12.4g}" if m[c] is not None else f"{'-':>12}" for c in cols))
     print(f"== {a.dir}"); show("raw (T=1, no Platt)", res["raw"])
     if res.get("permutation"): print(f"\npermutation flip_rate {res['permutation']['flip_rate']} (n={res['permutation']['n']})")
     if "G" in res:

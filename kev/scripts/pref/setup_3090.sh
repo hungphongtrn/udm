@@ -28,8 +28,8 @@ tok = AutoTokenizer.from_pretrained("Qwen/Qwen3.5-4B-Base", revision="1001bb4d82
 head, tail = chat_template_parts(tok)   # raises if the Base tokenizer has no chat template
 print("chat template head:", repr(head), "tail:", repr(tail), "sha256:", chat_template_digest(tok))
 rec = materialize(load_records("evals/v7/decision-v7/development.jsonl")[0])
-for fmt, opts in (("chat", True), ("chat_pointwise", False)):
-    text, n = chat_prompt(tok, rec, q=0, k=0, options=opts)
+for fmt in ("chat", "chat_pointwise", "chat_yesno"):
+    text, n = chat_prompt(tok, rec, q=0, k=0, fmt=fmt)
     print(f"--- rendered {fmt} prompt, decision-v7 development record 0, question 0, option 0 ({n} tokens; reward read at the last token) ---")
     print(text)
 print("--- end ---")
