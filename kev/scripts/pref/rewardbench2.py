@@ -4,8 +4,9 @@
 
 Scores allenai/reward-bench-2 (1865 prompts, 8977 candidates) with the checkpoint's own head, in-process through
 kev.predictors.LocalPredictor under kev.suite.SERVING_CONTEXT, the path kev.serve answers the API with: a state past the
-serving context is refused there and counted wrong here (`unsupported`), never truncated. One row per prompt, the
-dataset's candidate order (the chosen responses first, then the rejected ones), the Ties subset included.
+serving context is refused there and counted wrong here (`unsupported`), never truncated. One row per prompt, the Ties
+subset included. The dataset lists the chosen responses first; a set-relative prompt is shown its candidates in a seeded
+per-prompt shuffle (`--order_seed`, -1 = the dataset's order), so a first-position preference cannot earn credit.
 
 Scoring is the benchmark's own, transcribed from allenai/reward-bench (main, sha 5b958c9d9dc5533cd6bca9e212244a5f5ff07512):
 `reroll_and_score_dataset` (rewardbench/utils.py L548: the chosen response wins when it is (one of) the highest-scored, and
@@ -20,8 +21,9 @@ The prompt layout is the checkpoint's input format, which is what the arms diffe
   No other candidate enters the prompt, so a response's reward cannot depend on the set it is scored in: that is what a
   pointwise reward model is, and `--probe` reports the invariance it must have.
 - chat / kev (arms A / D and the released checkpoints): the prompt's candidates are the options of one question, keys
-  "a", "b", ... in the dataset's order, and a candidate's reward is the head's readout for its option. The prompt then
-  lists the other candidates, so the reward of a response does shift with the set (`--probe` measures the shift).
+  "a", "b", ... in the shuffled order (scores are mapped back to the dataset's order before scoring), and a candidate's
+  reward is the head's readout for its option. The prompt then lists the other candidates, so the reward of a response
+  does shift with the set (`--probe` measures the shift).
 
 Temperature: the predictor runs at 1.0 (raw logits). Every metric here is a ranking or a margin between the same prompt's
 candidates, so the checkpoint's fitted temperature cannot change any of them.
@@ -59,7 +61,7 @@ SOURCE = "allenai/reward-bench@5b958c9d9dc5533cd6bca9e212244a5f5ff07512"
 INSTRUCTION = "Which response is better?"    # scripts/pref/convert_pref_data.py: the preference data trains on the same prompt
 QID = "better"
 SUBSETS = ("Factuality", "Precise IF", "Math", "Safety", "Focus", "Ties")
-KEYS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"    # option keys, in the dataset's candidate order (chosen first)
+KEYS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"    # option keys, in the order the prompt shows the candidates
 DTYPES = {"bf16": torch.bfloat16, "fp32": torch.float32}
 
 
@@ -73,14 +75,21 @@ class Scorer:
     """Scores a prompt's candidates with one checkpoint. `pointwise` (chat_pointwise) scores every candidate on its own
     request; the set-relative formats score all of a prompt's candidates as the options of one question."""
 
-    def __init__(self, predictor, pointwise):
-        self.p, self.pointwise = predictor, pointwise
+    def __init__(self, predictor, pointwise, order_seed=0):
+        self.p, self.pointwise, self.order_seed = predictor, pointwise, order_seed
 
-    def scores(self, state, candidates):
+    def order(self, n, key):
+        """The order a set-relative prompt shows its n candidates in: a seeded shuffle per (prompt, call) key, or the
+        dataset's order when order_seed < 0."""
+        if self.order_seed < 0: return list(range(n))
+        return random.Random(f"order:{self.order_seed}:{key}").sample(range(n), n)
+
+    def scores(self, state, candidates, key=""):
         """-> ([score per candidate], [unsupported per candidate], input tokens). A candidate (pointwise) or a prompt's
         question (the set-relative formats) past the serving context is scored 0.0 and flagged: the benchmark counts it
         wrong. The token count is the predictor's `input_tokens`: the kev-format encoding of each request (the state plus
-        that request's options), so it counts the rendered chat rows' own tokens only through their options."""
+        that request's options), so it counts the rendered chat rows' own tokens only through their options. `key` names
+        the call for the set-relative shuffle (Scorer.order); the scores come back in `candidates`' order."""
         if self.pointwise:
             out, bad, ntok = [], [], 0
             for c in candidates:
@@ -92,10 +101,13 @@ class Scorer:
             return out, bad, ntok
         keys = list(KEYS[: len(candidates)])
         if len(keys) < len(candidates): raise ValueError(f"{len(candidates)} candidates, at most {len(KEYS)} options per question")
+        perm = self.order(len(candidates), key)
         try:
-            got = self.p(request(state, candidates, keys))
+            got = self.p(request(state, [candidates[j] for j in perm], keys))
             z = got["logits"][QID]
-            return [z[k] for k in keys], [False] * len(candidates), got["input_tokens"]
+            out = [0.0] * len(candidates)
+            for k, j in zip(keys, perm): out[j] = z[k]
+            return out, [False] * len(candidates), got["input_tokens"]
         except (ContextOverflow, torch.cuda.OutOfMemoryError):
             if self.p.device == "cuda": torch.cuda.empty_cache()
             return [0.0] * len(candidates), [True] * len(candidates), 0
@@ -170,8 +182,8 @@ def probe(scorer, rows, count, seed):
     for i in pick:
         row = rows[i]
         cands = list(row["chosen"]) + list(row["rejected"])
-        all4, bad4, _ = scorer.scores(row["prompt"], cands)
-        two, bad2, _ = scorer.scores(row["prompt"], [cands[0], cands[1]])
+        all4, bad4, _ = scorer.scores(row["prompt"], cands, f"{row['id']}:probe:all")
+        two, bad2, _ = scorer.scores(row["prompt"], [cands[0], cands[1]], f"{row['id']}:probe:pair")
         if any(bad4) or any(bad2):
             skipped += 1; continue
         deltas.append(abs(all4[0] - two[0]))
@@ -198,6 +210,7 @@ def main():
                     help="CUDA graphs: unset = the serving default (on for a chat-format checkpoint on CUDA, as dindex_engine runs it); 0 = eager chat_hidden, 1 = force on")
     ap.add_argument("--probe", type=int, default=64, help="set-independence probe over this many best-of-4 prompts (0 = skip)")
     ap.add_argument("--probe_seed", type=int, default=0)
+    ap.add_argument("--order_seed", type=int, default=0, help="seed of the per-prompt candidate shuffle of the set-relative formats (-1 = the dataset's order, chosen first)")
     ap.add_argument("--limit", type=int, default=0, help="score at most this many prompts (debug; the subsets are then partial, so a Ties subset without both of every pair stops the score)")
     args = ap.parse_args()
 
@@ -208,10 +221,10 @@ def main():
     graphs = args.graphs if args.graphs is not None else (args.device == "cuda" and fmt in CHAT_FORMATS)
     predictor = LocalPredictor(args.run, args.device, LoadOptions(dtype=DTYPES[args.dtype], temperature=1.0, cuda_graphs=graphs), context=SERVING_CONTEXT)
     pointwise = predictor.model.input_format == "chat_pointwise"
-    scorer = Scorer(predictor, pointwise)
+    scorer = Scorer(predictor, pointwise, args.order_seed)
     print(f"{args.dataset}@{rev[:8]} {args.split}: {len(rows)} prompts; {predictor.run}: head {predictor.model.head_kind}, "
           f"input format {predictor.model.input_format} -> {'one request per candidate (pointwise)' if pointwise else 'one question per prompt (set-relative)'}, "
-          f"CUDA graphs {'on' if predictor.model.graphs is not None else 'off'}", flush=True)
+          f"CUDA graphs {'on' if predictor.model.graphs is not None else 'off'}, candidate order {'dataset' if args.order_seed < 0 or pointwise else f'shuffled (seed {args.order_seed})'}", flush=True)
 
     results, wall, tokens = [], defaultdict(float), defaultdict(int)
     unsupported_prompts, unsupported_candidates = [], 0
@@ -219,7 +232,7 @@ def main():
     for i, row in enumerate(rows):
         candidates = list(row["chosen"]) + list(row["rejected"])
         t = time.perf_counter()
-        scores, bad, ntok = scorer.scores(row["prompt"], candidates)
+        scores, bad, ntok = scorer.scores(row["prompt"], candidates, row["id"])
         wall[row["subset"]] += time.perf_counter() - t
         tokens[row["subset"]] += ntok
         if any(bad): unsupported_prompts.append(row["id"])
@@ -259,6 +272,7 @@ def main():
     payload = {
         "run": str(predictor.run), "head_kind": predictor.model.head_kind, "input_format": predictor.model.input_format,
         "scoring": "pointwise (one request per candidate)" if pointwise else "set-relative (one question per prompt)",
+        "order_seed": None if pointwise else args.order_seed,
         "device": args.device, "dtype": args.dtype, "temperature": predictor.temperature, "context": SERVING_CONTEXT,
         "graphs": {"ran": predictor.model.graphs is not None, "flag": args.graphs,
                    "rule": "on for a chat-format checkpoint on CUDA unless --graphs 0 (kev.cuda_graphs.chat); the Kev format's graphs run in probs_batch, which this loop never enters"},

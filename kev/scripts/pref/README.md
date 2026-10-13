@@ -67,7 +67,8 @@ scripts/pref/eval_arm.sh runs/pref/H/seed0                    # run_arm.sh alrea
 
 # RewardBench 2 (best-of-4 + Ties) for any arm's checkpoint: A (reference), D (format comparator), H, HP. The layout is
 # the checkpoint's own: chat_pointwise scores each candidate on its own, chat/kev pass a prompt's candidates as one
-# question's options. Same scoring as allenai/reward-bench (utils.py: reroll_and_score_dataset, process_single_model),
+# question's options in a seeded per-prompt shuffle (--order_seed 0; -1 = the dataset's chosen-first order).
+# Same scoring as allenai/reward-bench (utils.py: reroll_and_score_dataset, process_single_model),
 # six-subset mean, plus the set-independence probe (--probe 64). An unsupported candidate (over context / OOM) is never
 # truncated and never scored around: a non-Ties prompt with any unsupported candidate earns 0, a Ties row with one keeps
 # its place in every denominator but contributes nothing, and the probe skips such a prompt (counts in the JSON).

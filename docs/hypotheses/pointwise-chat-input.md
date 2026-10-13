@@ -147,7 +147,10 @@ one label per pair, the aggregate.
   scores it (weighted 0.30/0.30/0.20/0.20/0.01; the reference prompt of a tied prompt is its `ref:N` row), the other
   subsets as the chosen response winning against three rejected ones (credit shared at a tied top). The prompt layout is
   the checkpoint's own: A/D put the prompt's candidates in one question (set-relative, D's listing includes them), H/HP
-  score each candidate on its own. An unsupported candidate (over the serving context, or OOM) is never truncated and
+  score each candidate on its own. The dataset lists the chosen response first, so A/D are shown each prompt's
+  candidates in a seeded per-prompt shuffle (`--order_seed 0`; `-1` = the dataset's order) and their scores are mapped
+  back before scoring: under the dataset's order a first-position preference is credited as a correct ranking.
+  An unsupported candidate (over the serving context, or OOM) is never truncated and
   never scored around: a non-Ties prompt with any unsupported candidate earns 0 (the ranking rule is defined on the four
   candidates the benchmark posed), and a Ties row with one keeps its place in every denominator while contributing
   nothing to any metric, so no arm can gain from failing to score. Per-prompt and per-subset counts are in the JSON.
@@ -284,5 +287,18 @@ scripts/pref/pack_results.sh pref-H-HP.tgz                # logs, metrics, eval 
 ## Results
 
 To be filled after the runs, in the parent doc's format (per arm and seed: dev top1 / ECE / flip rate, then the RB2
-table, the probe, and H's DI subset row). Nothing has been run on this branch; the numbers above that are not marked
-[INFERENCE] are the parent study's measurements.
+table, the probe, and H's DI subset row).
+
+### RewardBench 2, dataset order (superseded)
+
+The first A/D runs (seed 0) showed every prompt's chosen response as option `a`, before the shuffle above existed.
+Reported for the record, not for the rule: a first-position preference counts as a correct ranking here, so they are
+rerun shuffled.
+
+| Arm | Factuality | Precise IF | Math | Safety | Focus | Ties | Overall | no-Ties | Probe mean / max abs Δ, flips | Wall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A (pointer, kev, graphs off) | 0.8126 | 0.4688 | 0.9071 | 0.8378 | 0.9535 | 0.5500 | 0.7550 | 0.7960 | 0.0758 / 0.304, 0 of 64 | 622 s |
+| D (scalar, chat, graphs on) | 0.7326 | 0.3688 | 0.6612 | 0.8200 | 0.9192 | 0.6765 | 0.6964 | 0.7004 | 0.409 / 1.65, 5 of 64 | 1,526 s |
+
+0 unsupported prompts for either arm. Probe |Δ| is in raw logits (pointer vs scalar head scales), so only the flip
+counts compare across arms.

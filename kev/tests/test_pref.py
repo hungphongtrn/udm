@@ -470,3 +470,27 @@ def test_ties_score_zeroes_unsupported_rows_but_keeps_denominators():
     assert (bdet["correctness_preferred"], bdet["correctness_preferred_hard"]) == (0.5, 0.0)
     assert bdet["correctness_margin_score"] == pytest.approx((0.0 + math.tanh(-4.0)) / 2)
     assert both == pytest.approx(0.30 * 0.5 + 0.20 * 0.5 + 0.01 * math.tanh(-4.0) / 2)
+
+
+def test_set_relative_scorer_shuffles_candidates_and_maps_scores_back():
+    """The dataset lists the chosen response first. A set-relative checkpoint that only prefers the first option it is
+    shown must not win every prompt; one that scores by content must get its scores back in the dataset's order."""
+    rb = rewardbench2()
+    class Predictor:
+        device = "cpu"
+        def __init__(self, score): self.score, self.shown = score, []
+        def __call__(self, req):
+            crit = req["questions"][rb.QID]["criteria"]
+            self.shown.append(list(crit.values()))
+            return {"logits": {rb.QID: {k: self.score(i, text) for i, (k, text) in enumerate(crit.items())}}, "input_tokens": 1}
+    cands = ["chosen", "r1", "r2", "r3"]
+    content = {"chosen": 4.0, "r1": 3.0, "r2": 2.0, "r3": 1.0}
+    by_content = rb.Scorer(Predictor(lambda i, text: content[text]), pointwise=False, order_seed=0)
+    for pid in range(20):
+        assert by_content.scores("s", cands, pid)[0] == [4.0, 3.0, 2.0, 1.0]
+    first_wins = rb.Scorer(Predictor(lambda i, text: -float(i)), pointwise=False, order_seed=0)
+    credit = [rb.prompt_credit({"scores": first_wins.scores("s", cands, pid)[0], "unsupported": [False] * 4}) for pid in range(40)]
+    assert 0 < sum(credit) < 40                            # the chosen response is shown first only on some prompts
+    dataset_order = rb.Scorer(Predictor(lambda i, text: -float(i)), pointwise=False, order_seed=-1)
+    assert all(rb.prompt_credit({"scores": dataset_order.scores("s", cands, pid)[0], "unsupported": [False] * 4}) == 1.0
+               for pid in range(5))                         # -1 reproduces the old runs' order, where position 0 wins
