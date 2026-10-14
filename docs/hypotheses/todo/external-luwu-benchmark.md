@@ -53,4 +53,24 @@ GPU=<free GPU> nohup ./kev.sh scripts/external/core.sh A Ah > kev/runs/dmb-core.
 
 ## Results
 
-Not run.
+**Contamination gate (2026-10-14, `kev/runs/dmb/overlap-core.json`, 12,576 decision-v7 train records, 1,456 core
+cases).** TREC flagged and dropped from every comparison per rule 1; the other three pass with zero matches.
+
+|Dataset|Cases|Matched|Rate|Calibration|Test|Flagged|
+|---|--:|--:|--:|--:|--:|---|
+|ag_news|200|0|0%|0/80|0/120|no|
+|dbpedia|700|0|0%|0/280|0/420|no|
+|emotion|286|0|0%|0/120|0/166|no|
+|trec|270|23|8.5%|22/120|1/150|**yes**|
+
+- All 23 TREC matches are exact (7 also by containment) against our `trec` source, and every case id equals the
+  matched record's index (`trec:calibration:128` ↔ `trec/train/128`): their TREC calibration split is drawn from
+  TREC train, of which decision-v7 holds ~1.3k questions, so 18% of it overlaps. The one test match (`trec:test:251`)
+  is presumably a question duplicated across TREC train and test [inference].
+- DBpedia and AG News are also decision-v7 sources (`dbpedia14`, `agnews`) but share no case text: same label sets and
+  domain, different examples. Comparisons on them are in-domain for our arms, not contaminated; Emotion is the only
+  out-of-domain core dataset left.
+- Surviving transfer rows: those among DBpedia, Emotion and AG News. `luwu_policies.py --overlap` drops TREC by default
+  (`core.sh` uses that); `--drop-overlapping-cases` (only the 23 ids) is a sensitivity view only, not the decision.
+
+Arms: not run yet.
