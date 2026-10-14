@@ -3,6 +3,8 @@
     # G0, before training the pointwise wave: the forked training forward (kev.shared_prefix: each question's prefix once,
     # its K options as branches from it) against one naive causal row per option, rewards and every trainable gradient
     .venv/bin/python scripts/abstain/fork_check.py parity --base Qwen/Qwen3.5-0.8B-Base --format chat_pointwise --n 10
+    # G0 with transformers' PyTorch reference kernels (no fla / causal-conv1d, no TF32): the thresholds apply as stated
+    .venv/bin/python scripts/abstain/fork_check.py parity --kernels reference
     # G4, on a trained pointwise checkpoint: each option scored alone (a batch of one branch) against all K together
     .venv/bin/python scripts/abstain/fork_check.py k1 --run runs/pref/PRh/seed0 --n 200
 
@@ -15,8 +17,12 @@ more than one question's rows. Three runs: fork (forward_chat_batch with gradien
 batch) and naive1 (one row at a time). naive vs naive1 is the noise floor of the same exact computation batched
 differently; the fork is exact when its distance to naive is of that order. Prints max |d reward| and the relative
 gradient error ||g - g_naive|| / ||g_naive|| (all trainable parameters, and the worst single tensor) for fork and
-naive1, against the thresholds 1e-4 (rewards) and 1e-3 (gradients). On CUDA fla's kernels round fp32 dots like TF32
-(kev/shared_prefix.py), so read the fork against the floor there; --device cpu runs transformers' reference kernels.
+naive1, against the thresholds 1e-4 (rewards) and 1e-3 (gradients). With --kernels bound (default) the Gated DeltaNet
+layers run whatever transformers bound at import: on this install fla's and causal-conv1d's CUDA kernels, which round
+fp32 dots like TF32 (kev/shared_prefix.py), so naive1 itself misses the thresholds and the fork can only be read against
+that floor. causal-conv1d is bound on every device and is CUDA-only, so --device cpu fails rather than falling back.
+--kernels reference rebinds the layers' kernel hooks to transformers' own PyTorch functions and turns TF32 and the fused
+SDPA kernels off, on any device: exact fp32, where the thresholds are meaningful (slower and more memory than bound).
 
 k1: the checkpoint in eval mode, inference path (graphed passes where they fit, else chat_hidden). For each question,
 the K rewards scored together against each option's branch scored alone from the same prefix: max |d reward|,
@@ -25,16 +31,55 @@ kernel rounding may differ; a set-dependent number here is a bug, not a property
 different option sets is allwrong_report.py's shared-option |dr|.)
 """
 import argparse
+import functools
+import inspect
 import random
+import sys
 
 import torch
 
 from kev.checkpoint import Checkpoint
 from kev.data import materialize
 from kev.model import CHAT_FORMATS, DecisionModel, load_tokenizer
+from kev.predictors import DELTANET_KERNELS, bound_implementation
 from kev.suite import load_split
 
 SUITE = "evals/v7/decision-v7"
+DELTANET_HOOKS = (*DELTANET_KERNELS, "causal_conv1d_update", "torch_recurrent_gated_delta_rule")
+
+
+def _deltanet_module(model):
+    """The module whose globals a hybrid backbone's Gated DeltaNet forward reads its kernels from."""
+    layer = next(m for m in model.lm.modules() if type(m).__name__.endswith("GatedDeltaNet"))
+    return sys.modules[type(layer).__module__]
+
+
+def _keyword_filter(fn):
+    """fn, dropping keyword arguments outside its signature (as transformers' kernel wrapper does before calling)."""
+    params = inspect.signature(fn).parameters
+    if any(p.kind is p.VAR_KEYWORD for p in params.values()): return fn
+
+    @functools.wraps(fn)
+    def call(*args, **kwargs):
+        return fn(*args, **{k: v for k, v in kwargs.items() if k in params})
+    return call
+
+
+def reference_kernels(model):
+    """Rebind the Gated DeltaNet forward's kernel hooks (module globals, read at call time) to the PyTorch functions
+    transformers wraps (`use_kernel_func_from_hub_with_fallback` keeps them as __wrapped__); TF32 and SDPA's flash /
+    memory-efficient kernels off."""
+    module = _deltanet_module(model)
+    for name in DELTANET_HOOKS:
+        if hasattr(module, name): setattr(module, name, _keyword_filter(inspect.unwrap(getattr(module, name))))
+    torch.backends.cuda.matmul.allow_tf32 = False; torch.backends.cudnn.allow_tf32 = False
+    if torch.cuda.is_available():
+        torch.backends.cuda.enable_flash_sdp(False); torch.backends.cuda.enable_mem_efficient_sdp(False)
+
+
+def kernel_report(model):
+    module = _deltanet_module(model)
+    return ", ".join(f"{n}={bound_implementation(getattr(module, n))}" for n in DELTANET_HOOKS if hasattr(module, n))
 
 
 def records(suite, n, min_k, seed=0):
@@ -57,6 +102,8 @@ def parity(a):
     if not model.hybrid: raise SystemExit("parity checks the hybrid (Qwen3.5) fork; this backbone runs rows already")
     if a.checkpointing: model.lm.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     model.lm.config.use_cache = False
+    if a.kernels == "reference": reference_kernels(model)
+    print(f"kernels ({a.kernels}): {kernel_report(model)}")
     g = torch.Generator().manual_seed(0)
     with torch.no_grad():
         for name, p in model.named_parameters():
@@ -100,7 +147,8 @@ def parity(a):
         wrel = ((gr[worst] - ref_g[worst]).norm() / ref_g[worst].norm().clamp_min(1e-30)).item()
         print(f"{kind:7} vs naive: max |d reward| {dr:.2e}   grad rel err {rel:.2e}   worst tensor {wrel:.2e} ({worst})")
         if kind == "fork": ok = dr < 1e-4 and rel < 1e-3
-    print("G0 PASS" if ok else "G0 FAIL (compare with naive1's floor above before concluding: on CUDA both carry TF32-like rounding)")
+    print("G0 PASS" if ok else "G0 FAIL" + ("" if a.kernels == "reference" else
+          " (bound kernels: compare with naive1's floor above, or rerun with --kernels reference)"))
 
 
 @torch.no_grad()
@@ -134,6 +182,8 @@ def main():
     p.add_argument("--format", choices=CHAT_FORMATS, default="chat_pointwise"); p.add_argument("--head", choices=("scalar", "mlp"), default="scalar")
     p.add_argument("--lora", type=int, default=16); p.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
     p.add_argument("--checkpointing", type=int, choices=(0, 1), default=1)
+    p.add_argument("--kernels", choices=("bound", "reference"), default="bound",
+                   help="bound: what transformers bound at import (fla / causal-conv1d); reference: its PyTorch functions, no TF32")
     k.add_argument("--run", required=True)
     a = ap.parse_args()
     parity(a) if a.cmd == "parity" else k1(a)
