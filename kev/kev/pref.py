@@ -79,24 +79,43 @@ def balanced_bce_loss(z, q, dev):
     return loss
 
 
-def rcr_loss(z, q, dev, alpha, drop_none):
+RCR_POINTS = ("mean", "balanced")
+
+
+def rcr_loss(z, q, dev, alpha, drop_none, point="mean", beta=0.0):
     """--loss rcr, one question (Bai et al. 2023, eq. 1, 12, 20) with y_i = [i == label] or the soft target:
-        (1 - alpha) * mean_i SigmoidCE(r_i, y_i)  +  alpha * -(1 / sum_i y_i) * sum_i y_i * log(sigmoid(r_i) / sum_j sigmoid(r_j))
-    One deviation from the paper: the pointwise term is the mean over the question's options, not the sum, so a question
-    weighs once whatever its option count (77-option banking77 rows would otherwise outweigh 3-option ones 25:1 in the BCE
-    term alone). alpha = 0 is plain per-option sigmoid CE. drop_none (the pointwise formats) leaves none-of-the-above rows
-    out, as balanced_bce_loss does: graded alone, such a row is right or wrong depending on options it cannot see. A
-    question with no positive mass left (its answer was a none row) keeps only the pointwise term: every kept option is
-    trained as wrong. -> (loss, pointwise term, listwise term or None); None when every option is left out."""
+        (1 - alpha) * Point  +  alpha * -(1 / sum_i y_i) * sum_i y_i * log(sigmoid(r_i) / sum_j sigmoid(r_j))
+    Point (--rcr_point):
+      mean      mean_i SigmoidCE(r_i, y_i). One deviation from the paper: the mean over the question's options, not the sum,
+                so a question weighs once whatever its option count. Its minimum is sigmoid(r_i) = P(option i is right), so
+                it learns the question's 1/K prior: a K = 77 question's rewards sit ~log(76) below a K = 2 question's.
+      balanced  0.5 * sum_i y_i SigmoidCE(r_i, 1) / sum_i y_i  +  0.5 * sum_j w_j SigmoidCE(r_j, 0) / sum_j w_j, with
+                w_j = (1 - y_j) exp(beta * r_j) (weights detached; beta = 0: every wrong option alike, beta > 0 weighs the
+                hardest wrong options more). Positives and negatives carry half the question each whatever K is, so r = 0
+                is one class-balanced boundary for every option count (alpha = 0, beta = 0 is balanced_bce_loss). The
+                price: sigmoid(r_i) is then a likelihood ratio, not P(right), and the listwise term (whose minimum is
+                sigmoid(r_i) proportional to P(right)) agrees with it only up to that reweighting.
+    alpha = 0 is the pointwise term alone. drop_none (the pointwise formats) leaves none-of-the-above rows out, as
+    balanced_bce_loss does: graded alone, such a row is right or wrong depending on options it cannot see. A question with
+    no positive mass left (its answer was a none row) keeps only the pointwise term: every kept option is trained as
+    wrong. -> (loss, pointwise term, listwise term or None); None when every option is left out."""
+    if point not in RCR_POINTS: raise ValueError(f"unknown rcr point term {point!r}")
     keep = [i for i, o in enumerate(q["options"]) if o not in NONE_TEXTS] if drop_none else list(range(len(z)))
     if not keep: return None
     t = torch.tensor(q["target"], device=dev, dtype=z.dtype) if q.get("target") is not None else F.one_hot(torch.tensor(q["label"], device=dev), len(z)).to(z.dtype)
     idx = torch.tensor(keep, device=dev); z, t = z[idx], t[idx]
-    point = F.binary_cross_entropy_with_logits(z, t)
-    if t.sum() <= 0: return (1 - alpha) * point, point, None
+    if point == "mean":
+        pt = F.binary_cross_entropy_with_logits(z, t)
+    else:
+        neg = (1 - t) * torch.exp(beta * (z.detach() - z.detach().max())) if beta else 1 - t   # max shift: same weights, no overflow
+        pt = z.sum() * 0.0
+        for w, y in ((t, 1.0), (neg, 0.0)):
+            if w.sum() > 0:
+                pt = pt + 0.5 * (w * F.binary_cross_entropy_with_logits(z, torch.full_like(z, y), reduction="none")).sum() / w.sum()
+    if t.sum() <= 0: return (1 - alpha) * pt, pt, None
     ls = F.logsigmoid(z)
     listwise = -(t * (ls - torch.logsumexp(ls, 0))).sum() / t.sum()
-    return (1 - alpha) * point + alpha * listwise, point, listwise
+    return (1 - alpha) * pt + alpha * listwise, pt, listwise
 
 
 def reward_reg(kind, rw, rl):

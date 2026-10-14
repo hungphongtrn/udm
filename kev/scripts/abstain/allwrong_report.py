@@ -16,17 +16,24 @@ are reported). Readouts of a row's rewards r (the logits rows.json records):
     pnone       softmax(r)[none]  (none conditions)   the product's own mechanism: offer a none option, read its mass
     pnone_G     softmax(r / T)[none]
 
-Per (suite, arm, readout): AUROC of separating allwrong (positive) from answerable by low confidence (pnone: high), the
-paired win rate (answerable more confident than its own allwrong twin), and the risk-coverage curve on the pool
-answerable + allwrong (one of each per question; an allwrong answer is always wrong): AURC, selective accuracy at fixed
-coverages, and the oracle AURC that arm's answerable top1 allows. AURC mixes detection with top1; AUROC is detection only.
-pnone has no curve (its pool would answer "none" correctly), only AUROC and the two top1s.
-Paired differences (--compare X.r-Y.r, default: the hypothesis doc's D1-D7 list for the arms given) are bootstrapped over
-pairs (2,000 resamples, seed 0; question sampling only). Each arm's decision-v7 development top1 and NLL
-(reward_report.json raw.overall) is printed beside it. D6 threshold transfer: per arm and curve readout, the lowest
-threshold whose decision-v7 pool risk is <= --risk (0.10; whole tie blocks), applied unchanged to the transfer-v4 pool:
-coverage, risk, the fractions of answerable and of allwrong rows answered, and the coverage a threshold fit on transfer-v4
-itself would reach (the ceiling). Writes <out>/report.json and <out>/rc-<suite>.svg.
+Per (suite, arm, readout): AUROC of separating allwrong (positive) from answerable by low confidence (pnone: high),
+FPR@95TPR (the fraction of answerable rows flagged at the threshold that flags 95% of allwrong rows), the paired win
+rate (answerable more confident than its own allwrong twin), and the risk-coverage curve on the pool answerable +
+allwrong (one of each per question; an allwrong answer is always wrong): AURC, selective accuracy at fixed coverages,
+and the oracle AURC that arm's answerable top1 allows. AURC mixes detection with top1; AUROC is detection only.
+pnone has no curve (its pool would answer "none" correctly), only AUROC and the two top1s. AUROC is also reported per
+option-count stratum (the question's original K = answerable's K - 1 options + 1: small K <= 4, mid 5-14, large >= 15,
+i.e. banking77 on decision-v7), so a readout whose level drifts with K shows up as a stratum gap.
+Pointwise consistency: per arm, the largest |reward difference| of an option shared by a pair's answerable and allwrong
+rows (the same option text scored in two sets). A set-independent grader (chat_pointwise / chat_yesno) is 0 up to kernel
+rounding; a listing prompt is not.
+Paired differences (--compare X.r-Y.r, default: the hypothesis doc's decision list for the arms given) are bootstrapped
+over pairs (2,000 resamples, seed 0; question sampling only). Each arm's development top1, softmax NLL and sigmoid ECE on
+decision-v7 and transfer-v4 (reward_report.json raw.overall) is printed beside it. Threshold transfer (D6 / gate 3): per
+arm, curve readout and target risk in --risk (0.05,0.10), the lowest threshold whose decision-v7 pool risk is <= the
+target (whole tie blocks), applied unchanged to the transfer-v4 pool and to each K stratum of both pools: coverage, risk,
+the fractions of answerable and of allwrong rows answered, and the coverage a threshold fit on transfer-v4 itself would
+reach (the ceiling). Writes <out>/report.json and <out>/rc-<suite>.svg.
 """
 import argparse, json
 from pathlib import Path
@@ -36,6 +43,7 @@ CONDITIONS = ("answerable", "allwrong", "answerable_none", "allwrong_none")
 CURVE_READOUTS = ("maxprob", "maxprob_G", "maxr", "lse")
 NONE_READOUTS = ("pnone", "pnone_G")
 COVERAGES = (0.3, 0.5, 0.7, 0.9, 1.0)
+K_STRATA = (("small", 0, 4), ("mid", 5, 14), ("large", 15, 10 ** 9))   # original option count, inclusive bounds
 # The hypothesis doc's decisions (arm names cannot contain "-"; compares naming an arm not given are skipped).
 DEFAULT_COMPARE = (
     # D1: readout alone on the full-data arms (no training)
@@ -47,7 +55,15 @@ DEFAULT_COMPARE = (
     # D5: RCR vs class-balanced BCE on the yes/no prompt, and yes/no vs the listing prompt
     "RYh.maxr-HBh.maxr", "RYh.maxr-Rh.maxr",
     # D7: every anchored arm's level vs offering a none option to Kev
-    "Rh.maxr-Ah.pnone", "R2h.maxr-Ah.pnone", "Sh.maxr-Ah.pnone", "STh.maxr-Ah.pnone", "RYh.maxr-Ah.pnone", "Fh.maxr-Ah.pnone")
+    "Rh.maxr-Ah.pnone", "R2h.maxr-Ah.pnone", "Sh.maxr-Ah.pnone", "STh.maxr-Ah.pnone", "RYh.maxr-Ah.pnone", "Fh.maxr-Ah.pnone",
+    # PF-RCR wave. D8 topology: the listing out of the prompt (BT + BSR both)
+    "Hh.maxr-Dh.maxr", "Hh.maxprob-Dh.maxprob",
+    # D9 objective on the pointwise prompt: + listwise term, K balance, RCR vs BT, vs RCR on the listing prompt
+    "PRh.maxr-PBh.maxr", "PRh.maxr-PUh.maxr", "PRh.maxr-Hh.maxr", "PRh.maxr-Rh.maxr",
+    # D10 head: MLP and LM-head init under the same loss
+    "P2h.maxr-PRh.maxr", "PLh.maxr-PRh.maxr",
+    # D11 against Kev's own readouts
+    "PRh.maxr-Ah.maxprob", "PRh.maxr-Ah.pnone", "PBh.maxr-Ah.maxprob")
 FIT_SUITE, APPLY_SUITE = "decision-v7", "transfer-v4"   # D6: threshold fit on the first, applied unchanged to the second
 B, SEED = 2000, 0
 
@@ -70,6 +86,13 @@ def auroc(pos, neg):
     """P(a positive scores above a negative), ties half."""
     rk = avg_ranks(np.concatenate([pos, neg])); n1, n0 = len(pos), len(neg)
     return float((rk[:n1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0))
+
+
+def fpr_at_tpr(pos, neg, tpr=0.95):
+    """Flag s >= t with the highest t that flags at least `tpr` of the positives (ties flagged together) -> the fraction
+    of negatives flagged."""
+    t = np.sort(pos)[int(np.floor((1 - tpr) * len(pos)))]
+    return float(np.mean(neg >= t))
 
 
 def risk_coverage(conf, hit):
@@ -118,14 +141,24 @@ def load_T(run):
 
 
 def load_dev(run):
-    """Decision-v7 development top1 and softmax NLL (scripts/pref/reward_report.py raw.overall), None before eval_arm.sh."""
-    p = Path(run) / "eval" / "decision-v7-development" / "reward_report.json"
-    if not p.exists(): return None
-    o = json.load(open(p))["raw"]["overall"]; return {"top1": o["top1"], "nll": o["nll"]}
+    """Development top1, softmax NLL and sigmoid ECE per suite (scripts/pref/reward_report.py raw.overall); a suite is
+    None before eval_arm.sh scored it."""
+    out = {}
+    for suite in ("decision-v7", "transfer-v4"):
+        p = Path(run) / "eval" / f"{suite}-development" / "reward_report.json"
+        if not p.exists(): out[suite] = None; continue
+        o = json.load(open(p))["raw"]["overall"]; out[suite] = {"top1": o["top1"], "nll": o["nll"], "ece_sigmoid": o.get("ece_sigmoid")}
+    return out
+
+
+def stratum(k):
+    return next(name for name, lo, hi in K_STRATA if lo <= k <= hi)
 
 
 def readouts(run, suite):
-    """-> (keys present in every condition, {readout: {"ans": arr, "bad": arr}}, {"ans_hit", "ansnone_hit", "badnone_hit"}, T)."""
+    """-> (keys present in every condition, {readout: {"ans": arr, "bad": arr}},
+    {"ans_hit", "ansnone_hit", "badnone_hit", "K" (original option count), "shared_diff" (max |reward difference| of the
+    options the pair's answerable and allwrong rows share)}, T)."""
     base = Path(run) / "eval" / f"allwrong-{suite}"
     rows = {c: load_rows(base / c) for c in CONDITIONS}
     keys = sorted(set.intersection(*(set(v) for v in rows.values())))
@@ -144,9 +177,15 @@ def readouts(run, suite):
         if t is None: continue
         out[name] = {"ans": np.array([softmax(z / t)[i] for z, i in zip(r["answerable_none"], none_idx)]),
                      "bad": np.array([softmax(z / t)[i] for z, i in zip(r["allwrong_none"], none_idx)])}
+    def shared_diff(k, za, zb):
+        ka, kb = rows["answerable"][k]["keys"], rows["allwrong"][k]["keys"]
+        d = [abs(za[ka.index(o)] - zb[kb.index(o)]) for o in set(ka) & set(kb)]
+        return max(d) if d else np.nan
     hits = {"ans_hit": np.array([int(np.argmax(z)) == rows["answerable"][k]["label"] for z, k in zip(r["answerable"], keys)], float),
             "ansnone_hit": np.array([int(np.argmax(z)) == rows["answerable_none"][k]["label"] for z, k in zip(r["answerable_none"], keys)], float),
-            "badnone_hit": np.array([int(np.argmax(z)) == i for z, i in zip(r["allwrong_none"], none_idx)], float)}
+            "badnone_hit": np.array([int(np.argmax(z)) == i for z, i in zip(r["allwrong_none"], none_idx)], float),
+            "K": np.array([len(rows["answerable"][k]["keys"]) + 1 for k in keys]),
+            "shared_diff": np.array([shared_diff(k, za, zb) for k, za, zb in zip(keys, r["answerable"], r["allwrong"])], float)}
     return keys, out, hits, T
 
 
@@ -154,6 +193,11 @@ def detection(ro, name):
     """AUROC with allwrong positive: low confidence flags it, except pnone where high mass on none does."""
     s = 1 if name in NONE_READOUTS else -1
     return auroc(s * ro["bad"], s * ro["ans"])
+
+
+def fpr95(ro, name):
+    s = 1 if name in NONE_READOUTS else -1
+    return fpr_at_tpr(s * ro["bad"], s * ro["ans"])
 
 
 def win_rate(ro, name):
@@ -213,17 +257,19 @@ def main():
     ap.add_argument("--arm", action="append", required=True, help="NAME=RUN_DIR (repeat)")
     ap.add_argument("--compare", action="append", help="X.readout-Y.readout (repeat; default: the hypothesis doc's list)")
     ap.add_argument("--out", required=True)
-    ap.add_argument("--risk", type=float, default=0.10, help=f"D6 target risk on the {FIT_SUITE} pool (answerable + allwrong)")
+    ap.add_argument("--risk", default="0.05,0.10", help=f"comma-separated target risks on the {FIT_SUITE} pool (answerable + allwrong) for threshold transfer")
     a = ap.parse_args()
     arms = dict(s.split("=", 1) for s in a.arm)
     suites = sorted({p.name[len("allwrong-"):] for run in arms.values() for p in (Path(run) / "eval").glob("allwrong-*")})
     if not suites: raise SystemExit("no RUN/eval/allwrong-* dirs: run eval_allwrong.sh first")
     compares = a.compare or [c for c in DEFAULT_COMPARE if {c.split("-")[0].split(".")[0], c.split("-")[1].split(".")[0]} <= set(arms)]
     out = Path(a.out); out.mkdir(parents=True, exist_ok=True)
+    risks = [float(x) for x in a.risk.split(",") if x]
     rng = np.random.default_rng(SEED); res = {"arms": arms, "dev": {name: load_dev(run) for name, run in arms.items()}, "suites": {}}
-    print("decision-v7 development (reward_report.json raw.overall):")
-    for name, d in res["dev"].items(): print(f"  {name:5}" + ("not evaluated" if d is None else f"top1 {d['top1']:.4f}  nll {d['nll']:.4f}"))
-    pools = {}   # (suite, arm, readout) -> (conf, hit, n answerable) on that suite's common pairs
+    print("development (reward_report.json raw.overall): top1 / softmax NLL / sigmoid ECE")
+    show = lambda d: "not evaluated" if d is None else f"{d['top1']:.4f} / {d['nll']:.4f} / " + ("n/a" if d["ece_sigmoid"] is None else f"{d['ece_sigmoid']:.4f}")
+    for name, d in res["dev"].items(): print(f"  {name:5} decision-v7 {show(d['decision-v7'])}   transfer-v4 {show(d['transfer-v4'])}")
+    pools = {}   # (suite, arm, readout) -> (conf, hit, n answerable, original K per pool row) on that suite's common pairs
     for suite in suites:
         per = {name: readouts(run, suite) for name, run in arms.items()}
         common = sorted(set.intersection(*(set(k) for k, _, _, _ in per.values())))
@@ -234,22 +280,36 @@ def main():
         S = res["suites"][suite] = {"pairs": len(common), "arms": {}, "compare": {}}
         curves = {}
         print(f"\n== {suite}: {len(common)} pairs scored by every arm")
-        print(f"{'arm':5}{'readout':11}{'auroc':>8}{'win':>8}{'aurc':>8}{'oracle':>8}" + "".join(f"{'acc@' + format(c, 'g'):>9}" for c in COVERAGES))
+        Ks = next(iter(sel.values()))[1]["K"]
+        strata = [s for s, _, _ in K_STRATA if any(stratum(k) == s for k in Ks)]
+        print("strata (original K): " + ", ".join(f"{s} {sum(stratum(k) == s for k in Ks)}" for s in strata))
+        print(f"{'arm':5}{'readout':11}{'auroc':>8}{'fpr95':>8}{'win':>8}{'aurc':>8}{'oracle':>8}" + "".join(f"{'acc@' + format(c, 'g'):>9}" for c in COVERAGES)
+              + "".join(f"{'auc_' + s:>11}" for s in strata))
         for name, (ro, hits, T, n_own) in sel.items():
             ah = hits["ans_hit"]; m = len(ah)
             oracle = rc_metrics(np.cumsum(np.sort(np.concatenate([ah, np.zeros(m)]))[::-1]) / np.arange(1, 2 * m + 1))["aurc"]
+            sd = hits["shared_diff"]; sd = sd[~np.isnan(sd)]
             A = S["arms"][name] = {"T": T, "pairs_own": n_own, "top1_answerable": float(ah.mean()),
                                    "top1_answerable_none": float(hits["ansnone_hit"].mean()),
-                                   "top1_allwrong_none": float(hits["badnone_hit"].mean()), "aurc_oracle": oracle, "readouts": {}}
+                                   "top1_allwrong_none": float(hits["badnone_hit"].mean()), "aurc_oracle": oracle,
+                                   "top1_answerable_strata": {s: float(ah[[stratum(k) == s for k in hits["K"]]].mean()) for s in strata},
+                                   "shared_option_diff": {"max": float(sd.max()) if len(sd) else None, "mean": float(sd.mean()) if len(sd) else None},
+                                   "readouts": {}}
             print(f"{name}: top1 answerable {ah.mean():.4f}  with none offered: answerable {hits['ansnone_hit'].mean():.4f}, "
-                  f"allwrong picks none {hits['badnone_hit'].mean():.4f}  (T={T})")
+                  f"allwrong picks none {hits['badnone_hit'].mean():.4f}  (T={T})  shared-option |dr| max "
+                  + ("n/a" if not len(sd) else f"{sd.max():.2e} mean {sd.mean():.2e}"))
             for r, d in ro.items():
-                m_ = {"auroc": detection(d, r), "win": win_rate(d, r)}
+                m_ = {"auroc": detection(d, r), "fpr95": fpr95(d, r), "win": win_rate(d, r), "auroc_strata": {}}
+                for s in strata:
+                    mk = np.array([stratum(k) == s for k in hits["K"]])
+                    m_["auroc_strata"][s] = detection({x: v[mk] for x, v in d.items()}, r)
                 if r in CURVE_READOUTS:
                     conf, hit = pool(d, ah); acc = risk_coverage(conf, hit); m_.update(rc_metrics(acc)); curves[(name, r)] = acc
-                    pools[(suite, name, r)] = (conf, hit, len(ah))
+                    pools[(suite, name, r)] = (conf, hit, len(ah), np.concatenate([hits["K"], hits["K"]]))
                 A["readouts"][r] = m_
-                print(f"{'':5}{r:11}{m_['auroc']:8.4f}{m_['win']:8.4f}" + (f"{m_['aurc']:8.4f}{oracle:8.4f}" + "".join(f"{m_['acc@' + format(c, 'g')]:9.4f}" for c in COVERAGES) if "aurc" in m_ else ""))
+                print(f"{'':5}{r:11}{m_['auroc']:8.4f}{m_['fpr95']:8.4f}{m_['win']:8.4f}"
+                      + (f"{m_['aurc']:8.4f}{oracle:8.4f}" + "".join(f"{m_['acc@' + format(c, 'g')]:9.4f}" for c in COVERAGES) if "aurc" in m_ else " " * (16 + 9 * len(COVERAGES)))
+                      + "".join(f"{m_['auroc_strata'][s]:11.4f}" for s in strata))
         for c in compares:
             (xa, xr), (ya, yr) = (s.split(".") for s in c.split("-"))
             if xr not in sel[xa][0] or yr not in sel[ya][0]:
@@ -259,21 +319,31 @@ def main():
             print(f"{c:22} dAUROC {fmt(d['d_auroc'], d['d_auroc_ci'])}   dAURC {fmt(d['d_aurc'], d['d_aurc_ci'])}")
         svg({k: v for k, v in curves.items() if k[1] in ("maxprob", "maxr")}, f"{suite}: answerable + all-wrong pool", out / f"rc-{suite}.svg")
     if {FIT_SUITE, APPLY_SUITE} <= set(suites):
-        # D6: a threshold fit for --risk on one suite's pool, applied unchanged to the other's; "oracle" = the coverage the
-        # same readout reaches on the apply suite with a threshold fit there (the best that readout's ranking allows)
-        res["threshold_transfer"] = T6 = {"risk": a.risk, "fit": FIT_SUITE, "apply": APPLY_SUITE, "arms": {}}
-        print(f"\n== threshold transfer: fit on {FIT_SUITE} at risk <= {a.risk:g}, applied to {APPLY_SUITE}")
-        print(f"{'arm':5}{'readout':11}{'fit_cov':>9}{'cov':>8}{'risk':>8}{'ans_ok':>8}{'ans_bad':>8}{'oracle':>8}")
-        for name in arms:
-            for r in CURVE_READOUTS:
-                if (FIT_SUITE, name, r) not in pools: continue
-                fc, fh, fn = pools[(FIT_SUITE, name, r)]; tc, th, tn = pools[(APPLY_SUITE, name, r)]
-                t = fit_threshold(fc, fh, a.risk)
-                m_ = {"fit": apply_threshold(fc, fh, t, fn), "apply": apply_threshold(tc, th, t, tn),
-                      "apply_oracle_coverage": apply_threshold(tc, th, fit_threshold(tc, th, a.risk), tn)["coverage"]}
-                T6["arms"].setdefault(name, {})[r] = m_; p = m_["apply"]
-                print(f"{name:5}{r:11}{m_['fit']['coverage']:9.4f}{p['coverage']:8.4f}{p['risk']:8.4f}{p['answered_answerable']:8.4f}"
-                      f"{p['answered_allwrong']:8.4f}{m_['apply_oracle_coverage']:8.4f}")
+        # D6 / gate 3: a threshold fit for each target risk on one suite's whole pool, applied unchanged to the other's pool
+        # and to each K stratum of both; "oracle" = the coverage the same readout reaches on the apply suite with a threshold
+        # fit there (the best that readout's ranking allows)
+        res["threshold_transfer"] = T6 = {"fit": FIT_SUITE, "apply": APPLY_SUITE, "risks": {}}
+        def stratum_pool(c, h, n, K, s):   # keeps the pool's order: answerable rows first
+            mk = np.array([stratum(k) == s for k in K]); return c[mk], h[mk], int(mk[:n].sum())
+        for risk in risks:
+            R = T6["risks"][f"{risk:g}"] = {}
+            print(f"\n== threshold transfer: fit on {FIT_SUITE} at risk <= {risk:g}, applied to {APPLY_SUITE} and to each K stratum")
+            print(f"{'arm':5}{'readout':11}{'fit_cov':>9}{'cov':>8}{'risk':>8}{'ans_ok':>8}{'ans_bad':>8}{'oracle':>8}   per stratum (suite:stratum cov/risk)")
+            for name in arms:
+                for r in CURVE_READOUTS:
+                    if (FIT_SUITE, name, r) not in pools: continue
+                    fc, fh, fn, fK = pools[(FIT_SUITE, name, r)]; tc, th, tn, tK = pools[(APPLY_SUITE, name, r)]
+                    t = fit_threshold(fc, fh, risk)
+                    m_ = {"fit": apply_threshold(fc, fh, t, fn), "apply": apply_threshold(tc, th, t, tn),
+                          "apply_oracle_coverage": apply_threshold(tc, th, fit_threshold(tc, th, risk), tn)["coverage"], "strata": {}}
+                    for su, (c, h, n, K) in ((FIT_SUITE, (fc, fh, fn, fK)), (APPLY_SUITE, (tc, th, tn, tK))):
+                        for s, _, _ in K_STRATA:
+                            sc, sh, sn = stratum_pool(c, h, n, K, s)
+                            if sn: m_["strata"][f"{su}:{s}"] = apply_threshold(sc, sh, t, sn)
+                    R.setdefault(name, {})[r] = m_; p = m_["apply"]
+                    print(f"{name:5}{r:11}{m_['fit']['coverage']:9.4f}{p['coverage']:8.4f}{p['risk']:8.4f}{p['answered_answerable']:8.4f}"
+                          f"{p['answered_allwrong']:8.4f}{m_['apply_oracle_coverage']:8.4f}   "
+                          + "  ".join(f"{k} {v['coverage']:.3f}/{v['risk']:.3f}" for k, v in m_["strata"].items()))
     json.dump(res, open(out / "report.json", "w"), indent=1)
 
 

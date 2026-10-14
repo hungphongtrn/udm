@@ -132,6 +132,30 @@ def test_rcr_drops_none_rows_when_asked():
     assert rcr_loss(z[:1], {"options": [none], "label": 0}, "cpu", 0.5, drop_none=True) is None
 
 
+def test_rcr_balanced_point_is_k_invariant_and_beta_weights_hard_negatives():
+    """--rcr_point balanced: alpha = 0 is balanced_bce_loss (none rows dropped). For a score that cannot tell the options
+    apart (every r_i = c), the mean term is stationary at c = logit(1/K), so its level sinks with K (log 76 below K = 2's at
+    K = 77), while the balanced term is stationary at c = 0 for every K. beta > 0 puts the negative half's weight on the
+    highest-scored wrong option; beta = 0 is uniform; large rewards stay finite."""
+    none = sorted(NONE_TEXTS)[0]
+    z = torch.tensor([0.3, -1.2, 0.8, 2.0]); q = {"options": ["a", "b", "c", none], "label": 2}
+    loss, point, _ = rcr_loss(z, q, "cpu", 0.0, drop_none=True, point="balanced")
+    assert torch.isclose(loss, balanced_bce_loss(z, q, "cpu")) and torch.isclose(loss, point)
+    def dc(k, c, point):   # d loss / d c at r = c * ones
+        c = torch.tensor(float(c), requires_grad=True)
+        return torch.autograd.grad(rcr_loss(c * torch.ones(k), {"options": [str(i) for i in range(k)], "label": 0}, "cpu", 0.0, drop_none=False, point=point)[0], c)[0].item()
+    for k in (2, 77):
+        assert abs(dc(k, math.log(1 / (k - 1)), "mean")) < 1e-5 and abs(dc(k, 0.0, "balanced")) < 1e-6
+    assert abs(dc(77, 0.0, "mean")) > 0.4
+    zr = torch.tensor([0.0, 3.0, -3.0, -3.0], requires_grad=True); q4 = {"options": list("abcd"), "label": 0}
+    g = lambda b: torch.autograd.grad(rcr_loss(zr, q4, "cpu", 0.0, drop_none=False, point="balanced", beta=b)[0], zr)[0]
+    assert torch.isclose(g(0.0)[1] / g(0.0)[2], torch.sigmoid(torch.tensor(3.0)) / torch.sigmoid(torch.tensor(-3.0)))
+    assert g(2.0)[1] / g(2.0)[2] > 100 * g(0.0)[1] / g(0.0)[2]
+    big = rcr_loss(torch.tensor([0.0, 80.0, -80.0]), {"options": list("abc"), "label": 0}, "cpu", 0.0, drop_none=False, point="balanced", beta=5.0)[0]
+    assert torch.isfinite(big)
+    with pytest.raises(ValueError): rcr_loss(z, q, "cpu", 0.5, drop_none=True, point="sum")
+
+
 def test_mlp_head_starts_at_zero_and_learns():
     """Step 0 gives r = 0 for every option (zero output layer); the hidden layer starts learning once the output moves."""
     torch.manual_seed(0)
@@ -497,6 +521,9 @@ def test_train_mlp_rcr_half_data_then_stage2(tiny_base, tmp_path, monkeypatch, c
                                   ("--loss", "pref", "--label_smoothing", "0.1"),
                                   ("--input_format", "chat", "--head", "scalar", "--loss", "rcr", "--bce_w", "0.5"),
                                   ("--input_format", "chat", "--head", "scalar", "--loss", "pref", "--rcr_alpha", "0.3"),
+                                  ("--input_format", "chat", "--head", "scalar", "--loss", "bce", "--rcr_point", "balanced"),
+                                  ("--input_format", "chat", "--head", "scalar", "--loss", "rcr", "--rcr_beta", "1"),
+                                  ("--input_format", "chat", "--head", "scalar", "--loss", "rcr", "--rcr_point", "balanced", "--rcr_beta", "-1"),
                                   ("--input_format", "chat_yesno", "--head", "mlp", "--head_init", "yesno"),
                                   ("--train_frac", "0")])
 def test_train_rejects_invalid_flag_combinations(tiny_base, tmp_path, monkeypatch, args):

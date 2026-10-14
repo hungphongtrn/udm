@@ -47,7 +47,7 @@ Defaults keep upstream behaviour bit-identical (`--head pointer`, `--input_forma
 - `kev/pref.py` (new): Bradley-Terry pair loss from hard or soft labels, per-option BCE, class-balanced per-option BCE
   (`--loss bce`), RCR (`rcr_loss`, `--loss rcr`: per-option sigmoid CE + ListCE over sigmoid rewards, Bai et al. 2023),
   BSR / L2 reward regularizers. `kev/data.py`: `NONE_TEXTS`.
-- `kev/train.py`: flags `--head {pointer,scalar,mlp}`, `--input_format`, `--head_init`, `--loss {ce,pref,bce,rcr}`, `--ce_w`, `--rcr_alpha`,
+- `kev/train.py`: flags `--head {pointer,scalar,mlp}`, `--input_format`, `--head_init`, `--loss {ce,pref,bce,rcr}`, `--ce_w`, `--rcr_alpha`, `--rcr_point`, `--rcr_beta`,
   `--reg`, `--reg_w`, `--bce_w`, `--bce_types`, `--train_frac` (seeded per-source subsample of the training records);
   `objective` and `batch_loss` route to the pref losses; pref stats (`pair_acc`, reward mean/std/absmax, bce/listwise terms) in logs.
 - `tests/test_pref.py` (new): CPU tests of the pref losses, chat layout and checkpoint round-trip.

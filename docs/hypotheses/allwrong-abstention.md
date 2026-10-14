@@ -3,9 +3,10 @@
 Branch `idea/allwrong-abstention`, cut from `hyp/preference-reward-model` at `4668509` (its arms, checkpoints and
 wave-1 numbers: `docs/hypotheses/preference-reward-model.md`), with `idea/pointwise-chat-input` merged (arm HB, the
 chat_yesno prompt). Two parts: D1 reads the existing seed-0 checkpoints `runs/pref/{A,C,F}/seed0` (no training); D2-D7 are
-a half-data training screen of anchored recipes. Code: `kev/scripts/abstain/` (`build_allwrong.py`, `eval_allwrong.sh`,
-`allwrong_report.py`, `queue.sh`), `kev/scripts/pref/arms.sh` (the h arms), `kev/kev/pref.py` (`rcr_loss`),
-`kev/kev/model.py` (`MLPHead`), `kev/kev/train.py` (`--loss rcr`, `--rcr_alpha`, `--head mlp`, `--train_frac`); tests in
+a half-data training screen of anchored recipes; D8-D11 the prefix-forked RCR wave (PF-RCR, below). Code:
+`kev/scripts/abstain/` (`build_allwrong.py`, `eval_allwrong.sh`, `allwrong_report.py`, `fork_check.py`, `queue.sh`),
+`kev/scripts/pref/arms.sh` (the h arms), `kev/kev/pref.py` (`rcr_loss`), `kev/kev/model.py` (`MLPHead`),
+`kev/kev/train.py` (`--loss rcr`, `--rcr_alpha`, `--rcr_point`, `--rcr_beta`, `--head mlp`, `--train_frac`); tests in
 `kev/tests/test_allwrong.py` and `kev/tests/test_pref.py`. Everything below (arms, readouts, thresholds, rules) is fixed
 before any run.
 
@@ -38,7 +39,8 @@ The tempting comparison (F's sigmoid(max r) vs A's max softmax) mixes three thin
 | F.maxr - C.maxr | BCE vs no anchor. Prediction: C near A.maxprob. F starts from C, so F - C is the BCE stage alone. |
 | F.maxr - A.pnone | The product's existing mechanism: Kev trains with none options (`--p_none 0.1`, `--p_none_pair 0.25`), so A offered a "None of these" option already has a direct abstention signal. If A.pnone matches F.maxr, the anchor buys abstention only where no none option is offered. |
 
-Arm D (BSR) is dropped (K1): an anchor at 0 is not a level, and every D question is answered by C and F.
+Arm D (BSR) is dropped from D1 (K1): an anchor at 0 is not a level, and every D question is answered by C and F. Its half
+version Dh returns in the PF-RCR wave only as Hh's listing reference.
 
 AURC (risk-coverage) mixes detection with top1: an arm with a lower answerable top1 has a worse oracle AURC. AUROC is the
 detection-only number and the one the rule uses; AURC and its oracle are reported beside it.
@@ -47,7 +49,9 @@ detection-only number and the one the rule uses; AURC and its oracle are reporte
 
 From decision-v7 development and transfer-v4 development: every clean Choice question (not `unknowable`) with a hard
 label, >= 3 options and no none-of-the-above key: 448 questions on v7 (banking77, agnews, mnli, trec, dbpedia14 80 each,
-legacy_policy 48; K = 3/4/6/10) and 240 on t4 (mmlu, emotion, sciq 80 each; K = 4/6), counted from the frozen partitions.
+contrastive 48; original K = 77 / 4 / 3 / 6 / 14 / 3) and 240 on t4 (mmlu, emotion, sciq 80 each; K = 4 / 6 / 4),
+counted from the frozen partitions. The report's K strata: small K <= 4 (agnews, mnli, contrastive; mmlu, sciq), mid
+5-14 (trec, dbpedia14; emotion), large >= 15 (banking77, v7 only).
 Each is a minimal pair plus a none pair:
 
 | Condition | Options | Label |
@@ -72,11 +76,14 @@ Per question, from the rewards r the benchmark records (`rows.json` logits):
 | lse | logsumexp(r) | energy score |
 | pnone | softmax(r)[none] in the none conditions | the existing mechanism |
 
-Metrics per (suite, arm, readout): AUROC (allwrong = positive), paired win rate (a question's answerable twin more
-confident than its allwrong twin), and on the pool answerable + allwrong (one each per question; answering an allwrong
-question is always wrong): AURC, accuracy at coverage 0.3/0.5/0.7/0.9/1.0, the oracle AURC. Only pairs every arm scored in
-every condition count (rejected = over context, never truncated; counts printed). Differences: paired bootstrap over
-questions, 2,000 resamples, 95% percentile CI (question sampling only, not seed variance).
+Metrics per (suite, arm, readout): AUROC (allwrong = positive), FPR@95TPR (answerable rows flagged at the threshold that
+flags 95% of allwrong rows), AUROC per K stratum, paired win rate (a question's answerable twin more confident than its
+allwrong twin), and on the pool answerable + allwrong (one each per question; answering an allwrong question is always
+wrong): AURC, accuracy at coverage 0.3/0.5/0.7/0.9/1.0, the oracle AURC. Per arm also: answerable top1 per stratum and
+the shared-option |d reward| (an option scored in both the answerable and the allwrong set: 0 up to rounding for a
+set-independent pointwise grader, nonzero for the listing prompt). Only pairs every arm scored in every condition count
+(rejected = over context, never truncated; counts printed). Differences: paired bootstrap over questions, 2,000
+resamples, 95% percentile CI (question sampling only, not seed variance).
 
 ## Training screen (D2-D7): half data, seed 0
 
@@ -124,34 +131,103 @@ reported beside it; it breaks ties only.
   term's share (alpha 0.5 vs 0), reported.
 - **D5 prompt.** RYh vs HBh: RCR vs class-balanced BCE on the yes/no prompt; RYh vs Rh: yes/no prompt + init vs the
   listing prompt. The better of each pair by the beats rule; neither beating: not worse both ways, the cheaper (Rh) stays.
-- **D6 threshold transfer.** For each arm and readout, the lowest threshold with risk <= 0.10 on the v7 pool (answerable +
-  allwrong) is applied unchanged to the t4 pool. An anchored readout transfers if its t4 risk is <= 0.15 and its t4
-  coverage is >= 0.8 x the coverage a threshold fit on t4 would reach; reported for every arm, judged on the D2-D5 winner
-  against Ah.maxprob.
+- **D6 threshold transfer.** For each arm, readout and target risk (0.05 and 0.10), the lowest threshold with that risk
+  on the v7 pool (answerable + allwrong) is applied unchanged to the t4 pool and to each K stratum of both pools. An
+  anchored readout transfers if, at risk 0.10, its t4 risk is <= 0.15 and its t4 coverage is >= 0.8 x the coverage a
+  threshold fit on t4 would reach; reported for every arm, judged on the D2-D5 winner against Ah.maxprob. The strata
+  (and risk 0.05) are reported, not judged.
 - **D7 against the none option.** The D2-D5 winner's maxr (no none option in the set) vs Ah.pnone (none offered): it
   matches the existing mechanism if AUROC >= Ah.pnone - 0.02 on both sets.
 
 Predictions recorded before the run (not verdicts): C.maxr within 0.05 of A.maxprob; F.maxprob below F.maxr; Rh within
 0.02 of Fh; Sh the highest AUROC and the lowest top1 of the MLP arms.
 
+## PF-RCR wave (D8-D11): the option listing out of the prompt, then one change per step
+
+A grader that sees one option at a time (`chat_pointwise`: state + instruction, then the option and the reward token;
+no listing) is invariant to the option count and order, so the same reward serves a K = 1 best-of-N verifier and a
+K = 77 question. On Qwen3.5 each question's prefix runs once and its K options are branches continuing it (gradients
+included, `kev/kev/shared_prefix.py`; inference: `DecisionModel.chat_hidden` / CUDA graphs); every chat arm trains this
+way already. The pointwise term of RCR needs balancing for that: the mean sigmoid CE over a question's options is
+minimised at sigmoid(r_i) = P(option i right), so a K = 77 question's rewards sit ~log 76 below a K = 2 question's and one
+threshold cannot serve both. `--rcr_point balanced` gives the positives and the wrong options half the question each
+(alpha 0 = `--loss bce`); `--rcr_beta` (0 here) would weigh wrong options by exp(beta r_j), detached.
+
+| Phase | Arm | Prompt | Head | Loss | Changes vs |
+|---|---|---|---|---|---|
+| 0 | (A seeds 0-2, C, F full) | - | - | - | all-wrong eval (E0.2: maxr / lse of A) and Decision Index subset of A seeds (E0.1), no training |
+| 1 | Dh | chat (listing) | linear | BT + BSR | D on half data: Hh's reference |
+| 1 | Hh | chat_pointwise | linear | BT + BSR | Dh: the listing removed (H-BT) |
+| 2 | PBh | chat_pointwise | linear | K-balanced BCE | pointwise only (H-BCE) |
+| 2 | PRh | chat_pointwise | linear | RCR, balanced point, alpha 0.5 | PBh: + ListCE; Hh: the loss (H-RCR) |
+| 2 | PUh | chat_pointwise | linear | RCR, mean point, alpha 0.5 | PRh: no K balance (H-RCR-U) |
+| 2 | P2h | chat_pointwise | MLP | as PRh | PRh: the head (H-RCR-2L) |
+| 2 | PLh | chat_yesno | linear, W_yes - W_no init | as PRh | PRh: the init, and with it the prompt (H-RCR-LM) |
+
+`--rcr_alpha` weighs the listwise term here (the plan's alpha weighs the pointwise one; 0.5 is the same either way).
+PLh changes two things: `--head_init yesno` reads W_yes - W_no, which is only meaningful after the Yes/No question, so
+the yes/no prompt comes with it; RYh vs Rh already measured that pair on the listing prompt.
+
+Gates (each a printed line of `fork_check.py` or a column of the report):
+
+- **G0 fork exactness** (before training; `fork_check.py parity`, Qwen3.5-0.8B-Base, 10 development records including a
+  banking77 one, fp32, checkpointing on): rewards within 1e-4 and the relative error of every LoRA and head gradient
+  within 1e-3 of one naive causal row per option. On CUDA fla rounds fp32 dots like TF32, so the fork is read against
+  the floor of the naive rows batched differently (printed beside it). A failure stops the PF arms' interpretation, not
+  the queue.
+- **G1 ranking** = the top1 guard: v7 development top1 within 2 points of Ah (t4 top1 printed beside it).
+- **G2 detection**: AUROC and FPR@95TPR on the minimal pairs (v7 and t4). The allwrong condition is a real forward pass
+  without the true option for every arm; for a pointwise arm it equals masking the true option's reward (checked by the
+  shared-option |d reward|).
+- **G3 threshold transfer**: D6, with the K strata.
+- **G4 K = 1**: `fork_check.py k1` on each pointwise checkpoint: every option scored alone vs the K together, max |d
+  sigmoid| < 1e-3 and no argmax change.
+
+Rules (half data, seed 0; beats / not worse / guard as above):
+
+- **D8 topology.** Hh replaces Dh as the scalar vehicle if Hh.maxr is not worse than Dh.maxr, Hh passes the guard and
+  its banking77 (large stratum) answerable top1 is not below Dh's by more than 2 points. Hh.maxprob - Dh.maxprob is
+  reported.
+- **D9 objective.** PRh is the pointwise recipe if it beats Hh and is not worse than PBh with the guard passed; PBh
+  beats PRh: the listwise term costs detection. PRh - PUh is the K balance: adopted if PRh beats PUh or is not worse with
+  a smaller small-vs-large gap in D6 stratum coverage at risk 0.10. PRh - Rh (pointwise vs listing prompt, same RCR
+  alpha, different point term) is reported.
+- **D10 head.** P2h replaces PRh if it beats it, or is not worse with a higher dev top1; PLh the same against PRh.
+- **D11 against Kev.** The D9-D10 winner's maxr vs Ah.maxprob and Ah.pnone, as D7.
+
+Not built: a two-stage GradCache (prefix under no_grad, suffix chunks backpropagated to a detached prefix state, then a
+second prefix pass with grad). It runs the prefix twice, not once; it is exact only up to summation order; and memory is
+not the constraint here (arm C peaked at 19.7 GB at one record per pass, with per-layer checkpointing through the fork).
+`--row_budget` already splits a record whose question rows do not fit a pass.
+
+Predictions (not verdicts): Hh within 1 point of Dh's top1 overall and above it on banking77; PUh's large-stratum
+coverage at the v7 threshold far below its small-stratum coverage, PRh's close to it; P2h and PLh within noise of PRh.
+
 ## Commands (training machine, from `kev/`)
 
 ```bash
 .venv/bin/python -m pytest tests/test_allwrong.py tests/test_pref.py
-# everything (data build, D1 evals, the nine h arms with eval_arm.sh + eval_allwrong.sh) on GPUs 0,1,2, ~13 h:
+# G0 alone (minutes; queue.sh runs it first):
+.venv/bin/python scripts/abstain/fork_check.py parity --base Qwen/Qwen3.5-0.8B-Base --format chat_pointwise --n 10
+# everything (data build, G0, D1/E0 evals, the 16 h arms with eval_arm.sh + eval_allwrong.sh, the Decision Index subset
+# of A seeds 0-2 (DI=0 skips), G4) on GPUs 0,1,2:
 nohup scripts/abstain/queue.sh > runs/queue.log 2>&1 &
-# progress: runs/queue.log; per arm runs/queue/<arm>.log and .done/.failed. Then the two reports (queue.sh prints them):
-.venv/bin/python scripts/abstain/allwrong_report.py --arm A=runs/pref/A/seed0 --arm C=runs/pref/C/seed0 \
-  --arm F=runs/pref/F/seed0 --out runs/allwrong/report-full
-.venv/bin/python scripts/abstain/allwrong_report.py --arm Ah=runs/pref/Ah/seed0 --arm Ch=runs/pref/Ch/seed0 \
-  --arm Fh=runs/pref/Fh/seed0 --arm HBh=runs/pref/HBh/seed0 --arm Rh=runs/pref/Rh/seed0 --arm R2h=runs/pref/R2h/seed0 \
-  --arm Sh=runs/pref/Sh/seed0 --arm STh=runs/pref/STh/seed0 --arm RYh=runs/pref/RYh/seed0 --out runs/allwrong/report-half
+# progress: runs/queue.log; per arm runs/queue/<arm>.log and .done/.failed; gates: runs/queue/G0-parity.log, G4-*.log.
+# Then the two reports (queue.sh prints them):
+.venv/bin/python scripts/abstain/allwrong_report.py --arm A=runs/pref/A/seed0 --arm A1=runs/pref/A/seed1 \
+  --arm A2=runs/pref/A/seed2 --arm C=runs/pref/C/seed0 --arm F=runs/pref/F/seed0 --out runs/allwrong/report-full
+.venv/bin/python scripts/abstain/allwrong_report.py $(for a in Ah Ch Fh HBh Rh R2h Sh STh RYh Dh Hh PBh PRh PUh P2h PLh; \
+  do printf -- '--arm %s=runs/pref/%s/seed0 ' $a $a; done) --out runs/allwrong/report-half
 ```
 
-Lanes (`queue.sh`): GPU 0 the D1 all-wrong evals, then Ah, Ch, HBh; GPU 1 Sh, STh, Rh; GPU 2 R2h, RYh, then Fh once Ch
-is done. A single arm by hand: `scripts/pref/run_arm.sh Rh 0 1` (arm, seed, GPU index). Outputs:
-`runs/allwrong/report-*/report.json` (every number above, `dev` top1/NLL, `threshold_transfer`), `rc-decision-v7.svg` /
-`rc-transfer-v4.svg` (accuracy vs coverage; solid = maxr, dashed = maxprob).
+Lanes (`queue.sh`; chat arms at `BATCH_FALLBACK=1`, 1 record x accum 8 as C-F trained): GPU 0 G0, the D1/E0 all-wrong
+evals, Ah, Ch, Hh, Dh, PLh, then the A Decision Index subsets; GPU 1 PRh, PUh, PBh, Sh, STh, HBh; GPU 2 P2h, Rh, R2h,
+RYh, then Fh once Ch is done; then G4. Wall time [estimate from C-F's full-data 9.1 h and A's 2.4 h]: ~4.5 h per half
+chat arm, ~1.2 h Ah, ~2.3 h per stage 2, ~2 h per Decision Index subset: ~25-30 h. A single arm by hand:
+`BATCH_FALLBACK=1 scripts/pref/run_arm.sh PRh 0 1` (arm, seed, GPU index). Outputs: `runs/allwrong/report-*/report.json`
+(every number above; `dev` per suite top1/NLL/sigmoid ECE; `threshold_transfer.risks.<risk>.<arm>.<readout>` with
+`fit`, `apply`, `apply_oracle_coverage`, `strata`), `rc-decision-v7.svg` / `rc-transfer-v4.svg` (accuracy vs coverage;
+solid = maxr, dashed = maxprob).
 
 ## Risks
 
@@ -163,7 +239,9 @@ is done. A single arm by hand: `scripts/pref/run_arm.sh Rh 0 1` (arm, seed, GPU 
   their training distribution for both.
 - One seed, one checkpoint per arm; CIs are question sampling only.
 - K = 3 questions become 2-option pairs; allwrong mnli is "neither of the remaining two relations", a natural case;
-  banking77's 10-option subsets lose one of ten.
+  banking77 keeps 76 of its 77 options, so its stratum is one source: a large-K effect and a banking77 effect are the
+  same number here.
+- Dh and Hh compute BSR per pass: both run at the same microbatch (queue.sh: `BATCH_FALLBACK=1`).
 
 ## Results
 

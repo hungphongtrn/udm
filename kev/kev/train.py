@@ -22,7 +22,7 @@ from .device import DEVICE_HELP, DEVICES, allocated_bytes, empty_cache, select, 
 from .data import EVAL_ONLY, build, augment, load_records, materialize, none_pair, source_seed
 from .suite import SYNTHETIC_SOURCES, digest, load_split, read_json, read_manifest, validate_training, write_json
 from .model import CHAT_FORMATS, HEAD_KINDS, INPUT_FORMATS, MAX_STATE, MAX_TRAIN_STATE, SCALAR_HEADS, DecisionModel, chat_lists_options, fits, load_tokenizer, rows_of, training_context, user_tokens
-from .pref import REGS, balanced_bce_loss, bce_loss, preference_loss, rcr_loss, reward_reg
+from .pref import RCR_POINTS, REGS, balanced_bce_loss, bce_loss, preference_loss, rcr_loss, reward_reg
 
 
 # --- losses -----------------------------------------------------------------------------------------------------------
@@ -76,7 +76,8 @@ def objective(z, q, dev, a, terms, members, weight):
             c = question_loss(z, q, dev, a.ord_w); loss = loss + a.ce_w * c; terms["listwise"] += c.item() * weight; terms["listwise_n"] += weight
     elif a.loss == "rcr":
         # none rows are left out where an option is graded without the others (the pointwise prompts), as for --loss bce
-        out = rcr_loss(z, q, dev, a.rcr_alpha, drop_none=a.input_format in CHAT_FORMATS and not chat_lists_options(a.input_format))
+        out = rcr_loss(z, q, dev, a.rcr_alpha, drop_none=a.input_format in CHAT_FORMATS and not chat_lists_options(a.input_format),
+                       point=a.rcr_point, beta=a.rcr_beta)
         if out is None: loss = z.sum() * 0.0
         else:
             loss, point, listwise = out; terms["bce"] += point.item() * weight; terms["bce_n"] += weight
@@ -467,6 +468,9 @@ def parse_args():
                                                                                       "rcr: (1 - alpha) per-option sigmoid CE + alpha ListCE(sigmoid) (Bai et al. 2023, kev.pref.rcr_loss)")
     ap.add_argument("--ce_w", type=float, default=0.0, help="with --loss bce: weight of Kev's softmax cross-entropy over the options (the listwise term; 0 = off)")
     ap.add_argument("--rcr_alpha", type=float, default=0.5, help="with --loss rcr: weight alpha of the listwise term (0 = per-option sigmoid CE alone)")
+    ap.add_argument("--rcr_point", choices=RCR_POINTS, default="mean", help="with --loss rcr: the pointwise term. mean: mean per-option sigmoid CE (learns each "
+                                                                         "question's 1/K prior); balanced: positives and wrong options half each, whatever K (kev.pref.rcr_loss)")
+    ap.add_argument("--rcr_beta", type=float, default=0.0, help="with --rcr_point balanced: wrong option j weighs exp(beta * r_j) (detached) in the negative half; 0 = uniform")
     ap.add_argument("--reg", choices=REGS, default="none", help="reward regularizer per micro-batch over the preference pairs' rewards (kev.pref): bsr = mean^2, l2 = mean of squares")
     ap.add_argument("--reg_w", type=float, default=1e-3, help="weight of --reg")
     ap.add_argument("--bce_w", type=float, default=0.0, help="weight of per-option BCE on sigmoid(reward) against the hard label (Stage 2; 0 = off)")
@@ -532,6 +536,8 @@ def parse_args():
         ap.error("--loss rcr: no CE modifiers (--ord_w / --label_smoothing / --brier_w / --focal_gamma), no --bce_w (its pointwise term is the BCE)")
     if not (math.isfinite(a.rcr_alpha) and 0 <= a.rcr_alpha <= 1) or (a.rcr_alpha != 0.5 and a.loss != "rcr"):
         ap.error("--rcr_alpha is in [0, 1] and weights the listwise term of --loss rcr")
+    if (a.rcr_point != "mean" and a.loss != "rcr") or not (math.isfinite(a.rcr_beta) and a.rcr_beta >= 0) or (a.rcr_beta and a.rcr_point != "balanced"):
+        ap.error("--rcr_point needs --loss rcr; --rcr_beta is finite, >= 0 and needs --rcr_point balanced")
     if a.reg != "none" and a.loss != "pref":
         ap.error("--reg regularizes the preference pairs' rewards: needs --loss pref")
     if not (math.isfinite(a.reg_w) and a.reg_w >= 0 and math.isfinite(a.bce_w) and a.bce_w >= 0) or not set(a.bce_types) <= {"choice", "noul", "score"}:

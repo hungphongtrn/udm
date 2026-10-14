@@ -23,6 +23,11 @@ HP also reads the preference pairs that `convert_pref_data.py` writes (see "Poin
 | R2h / Sh | Rh with `--head mlp`; Sh with `--rcr_alpha 0` (sigmoid CE only) |
 | STh | Stage 2 on Sh: `--loss pref --bce_w 0.5`, 1 epoch (F's stage 2) |
 | RYh | RCR on `chat_yesno` with `--head_init yesno` (linear head) |
+| Dh / Hh | D / H (BT + BSR on `chat` / `chat_pointwise`) on half data: the listing-removal pair |
+| PBh | `chat_pointwise`, linear head, `--loss bce` (class-balanced per-option BCE) |
+| PRh / PUh | `chat_pointwise`, linear head, `--loss rcr --rcr_alpha 0.5`, `--rcr_point balanced` / `mean` |
+| P2h | PRh with `--head mlp` |
+| PLh | PRh's loss on `chat_yesno` with `--head_init yesno` |
 
 The h arms are the all-wrong abstention screen ([`docs/hypotheses/allwrong-abstention.md`](../../docs/hypotheses/allwrong-abstention.md));
 `scripts/abstain/queue.sh` runs them on three GPUs. `run_arm.sh` also scores every arm on the all-wrong minimal pairs
