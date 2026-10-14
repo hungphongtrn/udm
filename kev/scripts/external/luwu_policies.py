@@ -1,8 +1,8 @@
 """Lu & Wu's rejection-policy protocol on our checkpoints' frozen-benchmark run (scripts/external/luwu_run.py).
 
-    ./kev.sh scripts/external/luwu_policies.py --run runs/dmb/ah-core \
-        --subsets /path/to/Decision_Model_Benchmark/decision_benchmark/resources/subsets.json \
-        --reference /path/to/Decision_Model_Benchmark/decision_benchmark/resources --out runs/dmb/ah-core-policies
+    ./kev.sh scripts/external/luwu_policies.py --run runs/dmb/ah-s0-core --overlap runs/dmb/overlap-core.json \
+        --subsets ~/dmb/Decision_Model_Benchmark/decision_benchmark/resources/subsets.json \
+        --reference ~/dmb/Decision_Model_Benchmark/decision_benchmark/resources --out runs/dmb/ah-s0-core-policies
 
 Thresholds are fit the way their scorer fits them (systematic/confirmation_analysis.py: select_threshold_weighted,
 release 0.2.0): 80 fixed calibration texts per task from decision_benchmark/resources/subsets.json

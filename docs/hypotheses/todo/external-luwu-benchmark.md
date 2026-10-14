@@ -39,20 +39,16 @@ seed 0, `A` seed 0, then the arm the all-wrong screen selects (D9-D10 winner; P2
 ## Cost [estimate]
 
 `core` profile: 1,456 cases, 39,168 requests (`kev/scripts/external/README.md`); a few GPU-hours per arm on one 3090
-[estimate, not measured]. Needs their package in its own venv (`/opt/dmb-venv`).
+[estimate, not measured]. Needs their package in its own venv (`~/dmb/venv`, made by `core.sh`).
 
 ## Commands
 
-Training machine; their package steps use their venv, ours go through `./kev.sh` (paths kev-relative):
+Training machine, from the repo root. `core.sh` does setup (clone v0.2.0, venv, verify, prepare, contamination gate),
+then per arm our adapter, their scorer and our policies, skipping finished steps (manual steps: the scripts' README):
 
 ```bash
-/opt/dmb-venv/bin/decision-benchmark prepare --profile core --with-text --output-dir /data/dmb/core-inputs
-./kev.sh scripts/external/overlap.py --cases /data/dmb/core-inputs --suite evals/v7/decision-v7 --split train --out runs/dmb/overlap-core.json
-./kev.sh scripts/external/luwu_run.py --inputs /data/dmb/core-inputs --ckpt runs/pref/Ah/seed0 --out runs/dmb/ah-core
-./kev.sh /opt/dmb-venv/bin/decision-benchmark score --profile core --run-dir runs/dmb/ah-core --output-dir runs/dmb/ah-core-scored
-./kev.sh scripts/external/luwu_policies.py --run runs/dmb/ah-core --overlap runs/dmb/overlap-core.json \
-    --subsets /opt/Decision_Model_Benchmark/decision_benchmark/resources/subsets.json \
-    --reference /opt/Decision_Model_Benchmark/decision_benchmark/resources --out runs/dmb/ah-core-policies
+./kev.sh scripts/external/core.sh                                                       # setup + overlap gate (CPU)
+GPU=<free GPU> nohup ./kev.sh scripts/external/core.sh A Ah > kev/runs/dmb-core.log 2>&1 &   # outputs runs/dmb/<arm>-s0-core*
 ```
 
 ## Results

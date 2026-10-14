@@ -1,7 +1,7 @@
 """Run one of our checkpoints on Lu & Wu's frozen Decision Model Benchmark (luckykevvv/Decision_Model_Benchmark).
 
-    .venv/bin/python scripts/external/luwu_run.py --inputs runs/dmb/core-inputs --ckpt runs/pref/Ah/seed0 \
-        --out runs/dmb/ah-core
+    ./kev.sh scripts/external/luwu_run.py --inputs runs/dmb/core-inputs --ckpt runs/pref/Ah/seed0 \
+        --out runs/dmb/ah-s0-core
 
 Reads a `decision-benchmark prepare --profile {core,controlled,intent} --with-text --output-dir DIR` directory and writes
 a run directory their `decision-benchmark score --profile P --run-dir DIR --output-dir NEW` accepts: cases.jsonl and

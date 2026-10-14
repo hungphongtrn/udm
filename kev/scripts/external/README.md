@@ -14,14 +14,21 @@ carries their released numbers from `resources/reference/core-{jev,laya,qwen}/me
 
 ## Environment
 
-Their package must run in its own venv (it pins `laya==0.3.21`, `transformers`, etc.). Our side runs in our own venv as
-every other `kev/scripts` entry point does. On the training machine:
+Their package runs in its own venv; our side runs in our own venv as every other `kev/scripts` entry point does.
+`core.sh` runs every step below in order, skipping finished ones (env `GPU`, `SEED`, `DMB_HOME`, default `~/dmb`):
 
 ```bash
-git clone https://github.com/luckykevvv/Decision_Model_Benchmark /opt/Decision_Model_Benchmark
-python3 -m venv /opt/dmb-venv
-/opt/dmb-venv/bin/pip install -e "/opt/Decision_Model_Benchmark[data]"      # [data] = dataset download helpers
-/opt/dmb-venv/bin/decision-benchmark --version                              # 0.2.0
+./kev.sh scripts/external/core.sh                                     # setup: clone, venv, verify, prepare, overlap
+GPU=0 nohup ./kev.sh scripts/external/core.sh A Ah > kev/runs/dmb-core.log 2>&1 &   # + adapter, scorer, policies per arm
+```
+
+The manual steps, with `core.sh`'s paths:
+
+```bash
+git clone --depth 1 --branch v0.2.0 https://github.com/luckykevvv/Decision_Model_Benchmark ~/dmb/Decision_Model_Benchmark
+python3 -m venv ~/dmb/venv
+~/dmb/venv/bin/pip install -e "$HOME/dmb/Decision_Model_Benchmark[data]"      # [data] = dataset download helpers
+~/dmb/venv/bin/decision-benchmark --version                                  # 0.2.0
 ```
 
 `luwu_run.py` and `overlap.py` never import their package; only `decision-benchmark prepare` and
@@ -30,8 +37,8 @@ python3 -m venv /opt/dmb-venv
 ## 1. Frozen inputs (their package, once per profile)
 
 ```bash
-/opt/dmb-venv/bin/decision-benchmark prepare --profile core --with-text \
-    --output-dir /data/dmb/core-inputs
+~/dmb/venv/bin/decision-benchmark prepare --profile core --with-text \
+    --output-dir runs/dmb/core-inputs --cache-dir ~/dmb/cache/datasets      # from kev/
 ```
 
 `--with-text` is required: without it the cases carry `case_representation: 'text-index-v1'` and both our scripts refuse
@@ -41,7 +48,7 @@ them (their own `run_model` refuses them too). `--profile intent` instead of `co
 
 ```bash
 ./kev.sh scripts/external/luwu_run.py \
-    --inputs /data/dmb/core-inputs --ckpt runs/pref/Ah/seed0 --out runs/dmb/ah-core
+    --inputs runs/dmb/core-inputs --ckpt runs/pref/Ah/seed0 --out runs/dmb/ah-s0-core
 ```
 
 It writes `cases.jsonl` / `requests.jsonl` byte-identical to the prepared ones, `manifest.json`
@@ -66,8 +73,8 @@ tune `--budget-tokens` until a case fits one or two chunks (the log line reports
 ## 3. Their scorer (their venv)
 
 ```bash
-./kev.sh /opt/dmb-venv/bin/decision-benchmark score --profile core \
-    --run-dir runs/dmb/ah-core --output-dir runs/dmb/ah-core-scored
+./kev.sh ~/dmb/venv/bin/decision-benchmark score --profile core \
+    --run-dir runs/dmb/ah-s0-core --output-dir runs/dmb/ah-s0-core-scored
 ```
 
 It validates the run (`protocol`, both file digests, exactly one prediction per request, offered-key probabilities
@@ -78,10 +85,10 @@ readouts off our probability map.
 
 ```bash
 ./kev.sh scripts/external/luwu_policies.py \
-    --run runs/dmb/ah-core \
-    --subsets /opt/Decision_Model_Benchmark/decision_benchmark/resources/subsets.json \
-    --reference /opt/Decision_Model_Benchmark/decision_benchmark/resources \
-    --out runs/dmb/ah-core-policies
+    --run runs/dmb/ah-s0-core --overlap runs/dmb/overlap-core.json \
+    --subsets ~/dmb/Decision_Model_Benchmark/decision_benchmark/resources/subsets.json \
+    --reference ~/dmb/Decision_Model_Benchmark/decision_benchmark/resources \
+    --out runs/dmb/ah-s0-core-policies
 ```
 
 Writes `policies.json` (every group's `calibration_split` and 80-text `equal_budget` thresholds plus their rate families,
@@ -98,7 +105,7 @@ and `pnone` / `pnone_T` from the with-NONE calls. Our `maxprob_T` / `entropy_T` 
 
 ```bash
 ./kev.sh scripts/external/overlap.py \
-    --cases /data/dmb/core-inputs --suite evals/v7/decision-v7 --split train \
+    --cases runs/dmb/core-inputs --suite evals/v7/decision-v7 --split train \
     --out runs/dmb/overlap-core.json
 ```
 
