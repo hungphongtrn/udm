@@ -1,7 +1,9 @@
 # Hypothesis: an anchored reward knows when no option is right (all-wrong detection, readout and training screen)
 
+Status: in-progress (see ../README.md). Commands below are kev-relative: run them from the repo root as ./kev.sh <command>.
+
 Branch `idea/allwrong-abstention`, cut from `hyp/preference-reward-model` at `4668509` (its arms, checkpoints and
-wave-1 numbers: `docs/hypotheses/preference-reward-model.md`), with `idea/pointwise-chat-input` merged (arm HB, the
+wave-1 numbers: `docs/hypotheses/done/preference-reward-model.md`), with `idea/pointwise-chat-input` merged (arm HB, the
 chat_yesno prompt). Two parts: D1 reads the existing seed-0 checkpoints `runs/pref/{A,C,F}/seed0` (no training); D2-D7 are
 a half-data training screen of anchored recipes; D8-D11 the prefix-forked RCR wave (PF-RCR, below). Code:
 `kev/scripts/abstain/` (`build_allwrong.py`, `eval_allwrong.sh`, `allwrong_report.py`, `fork_check.py`, `queue.sh`),

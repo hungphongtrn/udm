@@ -26,15 +26,16 @@ HP also reads the preference pairs that `convert_pref_data.py` writes (see "Poin
 | Dh / Hh | D / H (BT + BSR on `chat` / `chat_pointwise`) on half data: the listing-removal pair |
 | PBh | `chat_pointwise`, linear head, `--loss bce` (class-balanced per-option BCE) |
 | PRh / PUh | `chat_pointwise`, linear head, `--loss rcr --rcr_alpha 0.5`, `--rcr_point balanced` / `mean` |
-| P2h | PRh with `--head mlp` |
+| P2h | PRh with `--head mlp` (Linear 1024 -> SiLU -> Linear, zero-init output) |
+| P2Bh / R2Bh | P2h's leave-one-out ablations: P2Bh = P2h with Hh's loss (`--loss pref --reg bsr --reg_w 1e-3`); R2Bh = P2h on the listing prompt (`--input_format chat`) = R2h with `--rcr_point balanced` |
 | PLh | PRh's loss on `chat_yesno` with `--head_init yesno` |
 
-The h arms are the all-wrong abstention screen ([`docs/hypotheses/allwrong-abstention.md`](../../docs/hypotheses/allwrong-abstention.md));
+The h arms are the all-wrong abstention screen ([`docs/hypotheses/in-progress/allwrong-abstention.md`](../../../docs/hypotheses/in-progress/allwrong-abstention.md));
 `scripts/abstain/queue.sh` runs them on three GPUs. `run_arm.sh` also scores every arm on the all-wrong minimal pairs
 (`scripts/abstain/eval_allwrong.sh`; `ALLWRONG=0` skips it).
 
 H and HP belong to branch `idea/pointwise-chat-input` (pre-registered in
-[`docs/hypotheses/pointwise-chat-input.md`](../../docs/hypotheses/pointwise-chat-input.md), which also holds the rule and
+[`docs/hypotheses/done/pointwise-chat-input.md`](../../../docs/hypotheses/done/pointwise-chat-input.md), which also holds the rule and
 the RewardBench 2 comparison); `wave1.sh` does not run them. H's only difference from D is the input format, HP's only
 difference from H is the preference data.
 
@@ -68,7 +69,7 @@ TEST=1 scripts/pref/eval_arm.sh runs/pref/C/seed0     # each finished run; skips
 is graded on its own (state + instruction + that option): the pointwise score Bradley-Terry trains on, and the score a
 reward model is asked for. It is recorded in the checkpoint like `chat` (`input_format`, `chat_template_sha256`) and every
 format check accepts it (`kev.model.CHAT_FORMATS`). Recipe, rule and thresholds:
-[`docs/hypotheses/pointwise-chat-input.md`](../../docs/hypotheses/pointwise-chat-input.md).
+[`docs/hypotheses/done/pointwise-chat-input.md`](../../../docs/hypotheses/done/pointwise-chat-input.md).
 ```bash
 # HP's data (once, CPU): HelpSteer3 preference pairs -> Kev --data records + a manifest (dataset revision, admission
 # counts and drop reasons, sha256). Admission is the trainer's own rule with kev.suite.ADMISSION_BRANCH_HEADROOM reserved

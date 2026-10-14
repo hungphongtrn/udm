@@ -1,4 +1,4 @@
-"""Preference-first reward objectives (hypothesis branch hyp/preference-reward-model; docs/hypotheses/preference-reward-model.md).
+"""Preference-first reward objectives (hypothesis branch hyp/preference-reward-model; docs/hypotheses/done/preference-reward-model.md).
 
 Each option's head output is an unbounded scalar reward r_i (ScalarHead), or the pointer logit (PointerHead) for arm B.
 kev.train --loss pref replaces question_loss's cross-entropy with a Bradley-Terry loss over pairs derived from the label:

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# The all-wrong abstention screen on three GPUs (docs/hypotheses/allwrong-abstention.md). One line, from kev/:
-#   nohup scripts/abstain/queue.sh > runs/queue.log 2>&1 &
+# The all-wrong abstention screen on three GPUs (docs/hypotheses/in-progress/allwrong-abstention.md). One line, from
+# the repo root:   nohup ./kev.sh scripts/abstain/queue.sh > kev/runs/queue.log 2>&1 &
 # env: GPUS (default 0,1,2: overrides an exported CUDA_VISIBLE_DEVICES), SEED (0), HALF_FRAC (0.5), DI (1; 0 skips the
 # Decision Index subsets), plus run_arm.sh's. Chat-format arms run at BATCH_FALLBACK=1 (1 record x accum 8, what C-F
 # trained at; 2 x 4 risks running out on a 24 GB 3090), the Kev-format Ah at the default 4 x 2.
 # Builds the all-wrong data once (CPU), then three lanes in parallel, each arm trained + evaluated by run_arm.sh
 # (eval_arm.sh, then eval_allwrong.sh):
-#   GPU 0: G0 fork parity (0.8B, minutes) -> all-wrong eval of the full A seeds 0-2, C, F (D1 / E0.2, no training)
-#          -> Ah -> Ch -> Hh -> Dh -> PLh -> Decision Index subset of A seeds 0-2 (E0.1)
-#   GPU 1: PRh -> PUh -> PBh -> Sh -> STh (stage 2 on Sh) -> HBh
-#   GPU 2: P2h -> Rh -> R2h -> RYh -> Fh (waits for Ch's marker; stage 2 on Ch)
+# P2h (docs/hypotheses/todo/pointwise-rcr-mlp.md) and its leave-one-out arms go first in each lane:
+#   GPU 0: G0 fork parity (0.8B, minutes) -> Hh -> Dh -> all-wrong eval of the full A seeds 0-2, C, F (D1 / E0.2, no
+#          training) -> Ah -> Ch -> PLh -> Decision Index subset of A seeds 0-2 (E0.1)
+#   GPU 1: PRh -> P2Bh -> PUh -> PBh -> Sh -> STh (stage 2 on Sh) -> HBh
+#   GPU 2: P2h -> R2Bh -> R2h -> Rh -> RYh -> Fh (waits for Ch's marker; stage 2 on Ch)
 # Then G4 (K=1 vs K) on the pointwise arms. Each arm leaves runs/queue/<arm>.done or .failed and its output in
 # runs/queue/<arm>.log; a failed arm does not stop its lane. Rerunning is safe: run_arm.sh only evaluates arms already
 # trained, and evaluation skips finished splits.
@@ -47,16 +48,16 @@ dindex() {  # E0.1: Kev's softmax on the shared Decision Index subset, every A s
 wait_for() { until [ -e "$Q/$1.done" ] || [ -e "$Q/$1.failed" ]; do sleep 300; done; }
 
 ( step G0-parity 0 .venv/bin/python scripts/abstain/fork_check.py parity --device cuda
-  full; arm Ah 0; arm Ch 0; arm Hh 0; arm Dh 0; arm PLh 0; dindex ) &
-( arm PRh 1; arm PUh 1; arm PBh 1; arm Sh 1; arm STh 1; arm HBh 1 ) &
-( arm P2h 2; arm Rh 2; arm R2h 2; arm RYh 2; wait_for Ch; arm Fh 2 ) &
+  arm Hh 0; arm Dh 0; full; arm Ah 0; arm Ch 0; arm PLh 0; dindex ) &
+( arm PRh 1; arm P2Bh 1; arm PUh 1; arm PBh 1; arm Sh 1; arm STh 1; arm HBh 1 ) &
+( arm P2h 2; arm R2Bh 2; arm R2h 2; arm Rh 2; arm RYh 2; wait_for Ch; arm Fh 2 ) &
 wait
 S=runs/pref; s=seed$SEED
-for a in Hh PBh PRh PUh P2h PLh; do
+for a in Hh PBh PRh PUh P2h P2Bh PLh; do
   [ -f "$S/$a/$s/head.pt" ] && step "G4-$a" 0 .venv/bin/python scripts/abstain/fork_check.py k1 --run "$S/$a/$s" --device cuda
 done
 echo "[$(date -Is)] queue finished: $(ls "$Q" | grep -c '\.done$') done, failed: $(cd "$Q" && ls *.failed 2>/dev/null | tr '\n' ' ')"
 echo "gates: $(cd "$Q" && grep -h -E 'G[04] (PASS|FAIL)' G0-parity.log G4-*.log 2>/dev/null | tr '\n' ' ')"
-echo "reports:"
-echo ".venv/bin/python scripts/abstain/allwrong_report.py --arm A=$S/A/seed0 --arm A1=$S/A/seed1 --arm A2=$S/A/seed2 --arm C=$S/C/$s --arm F=$S/F/$s --out runs/allwrong/report-full"
-echo ".venv/bin/python scripts/abstain/allwrong_report.py$(for a in Ah Ch Fh HBh Rh R2h Sh STh RYh Dh Hh PBh PRh PUh P2h PLh; do printf ' --arm %s=%s/%s/%s' $a $S $a $s; done) --out runs/allwrong/report-half"
+echo "reports (from the repo root):"
+echo "./kev.sh scripts/abstain/allwrong_report.py --arm A=$S/A/seed0 --arm A1=$S/A/seed1 --arm A2=$S/A/seed2 --arm C=$S/C/$s --arm F=$S/F/$s --out runs/allwrong/report-full"
+echo "./kev.sh scripts/abstain/allwrong_report.py$(for a in Ah Ch Fh HBh Rh R2h R2Bh Sh STh RYh Dh Hh PBh PRh PUh P2h P2Bh PLh; do printf ' --arm %s=%s/%s/%s' $a $S $a $s; done) --out runs/allwrong/report-half"

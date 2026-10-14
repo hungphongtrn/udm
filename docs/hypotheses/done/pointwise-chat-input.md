@@ -1,7 +1,9 @@
 # Hypothesis: pointwise chat input (arms H, HP, HL, HB, HBL)
 
+Status: done (see ../README.md). Commands below are kev-relative: run them from the repo root as ./kev.sh <command>.
+
 Branch `idea/pointwise-chat-input`, cut from `hyp/preference-reward-model` after its wave-1 and seeds-1-2 results
-(`docs/hypotheses/preference-reward-model.md`, HEAD `c47005e`, whose "Deferred" note points here). Code:
+(`docs/hypotheses/done/preference-reward-model.md`, HEAD `c47005e`, whose "Deferred" note points here). Code:
 `kev/kev/model.py` (the `chat_pointwise` input format), `kev/scripts/pref/` (`arms.sh`, `convert_pref_data.py`,
 `rewardbench2.py`), `kev/tests/test_pref.py`. Everything below (arms, thresholds, rule) is fixed before any run.
 

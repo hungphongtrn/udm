@@ -1,20 +1,21 @@
 @AGENTS.md
 
-## One branch per hypothesis
+## Branches and hypothesis docs
 
-Branches are how we track hypotheses. Each hypothesis gets its own branch, named `hyp/<short-slug>`
-(e.g. `hyp/preference-reward-model`), cut from the branch whose results it builds on.
+`dev` is the integration branch: it holds every hypothesis doc and all shared code. Each hypothesis that needs code
+gets its own branch, named `hyp/<short-slug>` (e.g. `hyp/preference-reward-model`), cut from `dev`.
 
-- **State it before writing code.** The first commit on the branch adds `docs/hypotheses/<slug>.md`. It lists the
-  claim being tested, the arms (ID, what changes, what stays fixed), the metrics and the decision rule. Record these
-  before any run.
+- **State it before writing code.** Commit `docs/hypotheses/todo/<slug>.md` on `dev` first. It lists the claim being
+  tested, the arms (ID, what changes, what stays fixed), the metrics and the decision rule. Record these before any
+  run, and pick evals from `docs/data-eval.md` (same splits and rows for every arm).
+- **Status is the folder.** `git mv` the doc to `docs/hypotheses/in-progress/` when its first run launches and to
+  `docs/hypotheses/done/` with its verdict; keep the index in `docs/hypotheses/README.md` in sync.
 - **One hypothesis per branch.** Unrelated changes (fixes, infra, other ideas) go on their own branch. A side
-  question that comes up mid-study becomes a new `hyp/` branch.
-- **Results stay on the branch.** Results go into the hypothesis doc as they come in (run IDs, seeds, numbers,
-  deviations from the plan), plus `docs/studies/` per AGENTS.md. The branch ends with a verdict: supported, refuted
-  or inconclusive, and why.
-- **Merging.** A concluded branch is merged back to its parent with its verdict, whatever the outcome; negative
-  results are kept. An abandoned branch gets a final commit that says why it stopped.
+  question that comes up mid-study becomes a new `todo/` doc.
+- **Results go in the doc.** Run IDs, seeds, numbers, deviations from the plan, plus `docs/studies/` per AGENTS.md.
+  The doc ends with a verdict: supported, refuted or inconclusive, and why.
+- **Merging.** A concluded branch is merged back to `dev` with its verdict, whatever the outcome; negative results are
+  kept. An abandoned branch gets a final commit that says why it stopped.
 - **Machines.** Code is written and reviewed on the dev box and runs only on the training machine. Do not run training,
   feature extraction or downloads on the dev box. Each `hyp/` branch's doc lists the exact commands to run there.
 

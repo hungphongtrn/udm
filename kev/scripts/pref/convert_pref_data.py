@@ -2,7 +2,7 @@
 
     .venv/bin/python scripts/pref/convert_pref_data.py --out runs/pref/data/pref-helpsteer3.jsonl
 
-Arm HP (docs/hypotheses/pointwise-chat-input.md) is arm H plus general preference pairs: `--data <jsonl> --replay 12576`
+Arm HP (docs/hypotheses/done/pointwise-chat-input.md) is arm H plus general preference pairs: `--data <jsonl> --replay 12576`
 mixes them with the decision-v7 training partition, so the preference loss also sees the chat pointwise format on real
 human preference judgements (and `--replay` keeps the released recipe in the run).
 

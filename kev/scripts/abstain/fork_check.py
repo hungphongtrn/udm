@@ -1,4 +1,4 @@
-"""Two GPU checks of the prefix-forked chat path (docs/hypotheses/allwrong-abstention.md, gates G0 and G4).
+"""Two GPU checks of the prefix-forked chat path (docs/hypotheses/in-progress/allwrong-abstention.md, gates G0 and G4).
 
     # G0, before training the pointwise wave: the forked training forward (kev.shared_prefix: each question's prefix once,
     # its K options as branches from it) against one naive causal row per option, rewards and every trainable gradient

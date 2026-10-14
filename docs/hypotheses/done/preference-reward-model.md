@@ -1,7 +1,9 @@
 # Hypothesis: preference reward model on Kev's recipe
 
+Status: done (see ../README.md). Commands below are kev-relative: run them from the repo root as ./kev.sh <command>.
+
 Branch `hyp/preference-reward-model`. Code: `kev/kev/pref.py`, `kev/kev/model.py` (ScalarHead, chat format),
-`kev/kev/train.py`, `kev/scripts/pref/`, `kev/tests/test_pref.py`. Fork provenance: [`kev/UPSTREAM.md`](../../kev/UPSTREAM.md).
+`kev/kev/train.py`, `kev/scripts/pref/`, `kev/tests/test_pref.py`. Fork provenance: [`kev/UPSTREAM.md`](../../../kev/UPSTREAM.md).
 Everything below (arms, thresholds, rule) is fixed before any run.
 
 ## Claim
@@ -11,7 +13,7 @@ Bradley-Terry (BT) preferences (optionally regularized, then optionally adding B
 accurate as Kev, with better-behaved reward scale / calibration and permutation robustness.
 
 Prior: our earlier BT-only LoRA on our own SCRM stack scored 27.61 DI vs 36.33 for a frozen sigmoid head, and strong
-peers use CE/Brier/softmax ([studies/README.md](../studies/README.md), [external_comparison.md](../studies/external_comparison.md)).
+peers use CE/Brier/softmax ([studies/README.md](../../studies/README.md), [external_comparison.md](../../studies/external_comparison.md)).
 That run differed from Kev in backbone setup, head and data; this study tests BT in a controlled setting on Kev's recipe.
 
 Sub-claims, one per comparison:
@@ -156,7 +158,7 @@ use the same `ROW_BUDGET` for every D/E run and seed.
 - bf16 weights vs released fp32: A may differ from the published Kev number.
 - F's LR schedule restarts from the C checkpoint.
 - BT is shift-invariant: only softmax probabilities are comparable across arms.
-- DI validation top1 is a weak DI proxy in earlier work ([studies/README.md](../studies/README.md) conclusion 1).
+- DI validation top1 is a weak DI proxy in earlier work ([studies/README.md](../../studies/README.md) conclusion 1).
 
 ## Results
 

@@ -63,7 +63,9 @@ DEFAULT_COMPARE = (
     # D10 head: MLP and LM-head init under the same loss
     "P2h.maxr-PRh.maxr", "PLh.maxr-PRh.maxr",
     # D11 against Kev's own readouts
-    "PRh.maxr-Ah.maxprob", "PRh.maxr-Ah.pnone", "PBh.maxr-Ah.maxprob")
+    "PRh.maxr-Ah.maxprob", "PRh.maxr-Ah.pnone", "PBh.maxr-Ah.maxprob",
+    # P2h leave-one-out (docs/hypotheses/todo/pointwise-rcr-mlp.md): listing back in, BT + BSR for RCR, linear head
+    "P2h.maxr-R2Bh.maxr", "P2h.maxr-P2Bh.maxr", "P2h.maxr-Dh.maxr")
 FIT_SUITE, APPLY_SUITE = "decision-v7", "transfer-v4"   # D6: threshold fit on the first, applied unchanged to the second
 B, SEED = 2000, 0
 

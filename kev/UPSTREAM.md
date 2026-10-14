@@ -55,7 +55,7 @@ Defaults keep upstream behaviour bit-identical (`--head pointer`, `--input_forma
   (see `scripts/pref/README.md`).
 - `scripts/abstain/` and `tests/test_allwrong.py` (new, branch `idea/allwrong-abstention`): all-wrong minimal pairs from a
   frozen suite, their benchmark passes, the cross-arm detection / risk-coverage / threshold-transfer report and the
-  three-GPU screen queue (see `docs/hypotheses/allwrong-abstention.md`).
+  three-GPU screen queue (see `docs/hypotheses/in-progress/allwrong-abstention.md`).
 
 ## Reproduce the diff
 

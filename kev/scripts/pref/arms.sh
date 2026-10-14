@@ -18,8 +18,8 @@ else _KEV="--batch 4 --accum 2" _CHAT="--batch 2 --accum 4"; fi
 if [ "${ROW_BUDGET:-0}" != 0 ]; then _CHAT="$_CHAT --row_budget $ROW_BUDGET"; fi
 COMMON="--suite evals/v7/decision-v7 --base Qwen/Qwen3.5-4B-Base --base_revision 1001bb4d826a52d1f399e183466143f4da7b741b \
 --epochs 2 --lr 5e-5 --dtype bf16 --checkpointing 1 --p_none_pair 0.25 --weights_dtype bf16 --device cuda"
-ARMS_ALL="A B C0 C D E F H HP HL HB HBL Ah Ch Fh HBh Rh R2h Sh STh RYh Dh Hh PBh PRh PUh P2h PLh"
-# Half-data screen (docs/hypotheses/allwrong-abstention.md): an arm name ending in a lowercase "h" trains on the
+ARMS_ALL="A B C0 C D E F H HP HL HB HBL Ah Ch Fh HBh Rh R2h R2Bh Sh STh RYh Dh Hh PBh PRh PUh P2h P2Bh PLh"
+# Half-data screen (docs/hypotheses/in-progress/allwrong-abstention.md): an arm name ending in a lowercase "h" trains on the
 # HALF_FRAC (default 0.5) per-source subsample of the training records (kev.train --train_frac, keyed on --seed, so every
 # h arm of a seed, and a warm start from one, sees the same records). Everything else is the full arm's recipe.
 _H="--train_frac ${HALF_FRAC:-0.5}"
@@ -34,7 +34,7 @@ arm_flags() {
     C)  echo "$COMMON --seed $seed $c" ;;
     D)  echo "$COMMON --seed $seed $c --reg bsr --reg_w 1e-3" ;;
     E)  echo "$COMMON --seed $seed $c --reg l2 --reg_w 1e-3" ;;
-    H)  # H = arm D in the pointwise chat format (docs/hypotheses/pointwise-chat-input.md): the option listing is dropped
+    H)  # H = arm D in the pointwise chat format (docs/hypotheses/done/pointwise-chat-input.md): the option listing is dropped
         # from the prompt, the one difference from D. Same recipe, seed and microbatch (D/E's --reg is per pass).
         echo "$COMMON --seed $seed $cp --reg bsr --reg_w 1e-3" ;;
     HP) # Ranking study: H + general preference pairs from an open dataset. Convert it first, then pass the JSONL as
@@ -47,7 +47,7 @@ arm_flags() {
         # option rewards (RankLLaMA's listwise contrastive loss) instead of Bradley-Terry + BSR. Serving is unchanged: one
         # scalar per option; probabilities come from the softmax at the temperature G fits on the calibration split.
         echo "$COMMON --seed $seed --head scalar --input_format chat_pointwise --loss ce $_CHAT" ;;
-    HB) # Absolute grader (docs/hypotheses/pointwise-chat-input.md, stage 1): each option asked "Is this option a correct
+    HB) # Absolute grader (docs/hypotheses/done/pointwise-chat-input.md, stage 1): each option asked "Is this option a correct
         # answer? Answer Yes or No." on its own (chat_yesno), the scalar head started at the LM head's W_yes - W_no (so step 0
         # reads the base's own Yes/No logit), trained with class-balanced per-option BCE (positives and negatives weigh half
         # each, none wordings masked): a reward on one scale across questions, no softmax over the question.
@@ -67,13 +67,15 @@ arm_flags() {
          echo "$COMMON --seed $seed --head scalar --input_format chat --loss rcr --rcr_alpha 0.5 $_CHAT $_H" ;;
     R2h) # Rh with the MLP head (Linear 1024 -> SiLU -> Linear, zero-init output)
          echo "$COMMON --seed $seed --head mlp --input_format chat --loss rcr --rcr_alpha 0.5 $_CHAT $_H" ;;
+    R2Bh) # R2h with P2h's K-balanced pointwise term: P2h with the option listing back in (P2h's listing-removal ablation)
+         echo "$COMMON --seed $seed --head mlp --input_format chat --loss rcr --rcr_alpha 0.5 --rcr_point balanced $_CHAT $_H" ;;
     Sh)  # R2h with a = 0: per-option sigmoid CE only (the absolute stage); STh's stage 1
          echo "$COMMON --seed $seed --head mlp --input_format chat --loss rcr --rcr_alpha 0 $_CHAT $_H" ;;
     STh) # Stage 2 on Sh: Bradley-Terry + 0.5 x BCE for one epoch (F's stage 2 recipe on the absolute-first model)
          echo "$COMMON --seed $seed --head mlp --input_format chat --loss pref $_CHAT --init_from runs/pref/Sh/seed$seed --bce_w ${BCE_W:-0.5} --epochs ${F_EPOCHS:-1} $_H" ;;
     RYh) # RCR on the yes/no prompt, linear head started at W_yes - W_no (vs HBh: the loss; vs Rh: the prompt + init)
          echo "$COMMON --seed $seed --head scalar --input_format chat_yesno --head_init yesno --loss rcr --rcr_alpha 0.5 $_CHAT $_H" ;;
-    # PF-RCR wave (docs/hypotheses/allwrong-abstention.md, phase 1-2): the option listing leaves the prompt (chat_pointwise,
+    # PF-RCR wave (docs/hypotheses/in-progress/allwrong-abstention.md, phase 1-2): the option listing leaves the prompt (chat_pointwise,
     # each question's prefix runs once and its options are branches from it, kev.shared_prefix), then one thing changes
     # per step. Dh/Hh carry D's --reg bsr, computed per pass: run both at the same microbatch (BATCH_FALLBACK) and ROW_BUDGET.
     Dh)  echo "$(arm_flags D "$seed") $_H" ;;                                    # listing + BT + BSR (Hh's reference)
@@ -85,6 +87,8 @@ arm_flags() {
          echo "$COMMON --seed $seed --head scalar --input_format chat_pointwise --loss rcr --rcr_alpha 0.5 --rcr_point mean $_CHAT $_H" ;;
     P2h) # H-RCR-2L: PRh with the MLP head
          echo "$COMMON --seed $seed --head mlp --input_format chat_pointwise --loss rcr --rcr_alpha 0.5 --rcr_point balanced $_CHAT $_H" ;;
+    P2Bh) # Hh with the MLP head: P2h with Hh's loss (BT + BSR) instead of RCR (P2h's loss ablation)
+         echo "$COMMON --seed $seed --head mlp --input_format chat_pointwise --loss pref --reg bsr --reg_w 1e-3 $_CHAT $_H" ;;
     PLh) # H-RCR-LM: PRh's loss on the yes/no prompt, linear head started at W_yes - W_no. --head_init yesno needs the
          # chat_yesno prompt (the Yes/No question is what makes W_yes - W_no meaningful), so prompt and init change together.
          echo "$COMMON --seed $seed --head scalar --input_format chat_yesno --head_init yesno --loss rcr --rcr_alpha 0.5 --rcr_point balanced $_CHAT $_H" ;;
