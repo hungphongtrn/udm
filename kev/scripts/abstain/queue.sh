@@ -17,6 +17,7 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."            # kev/
 export CUDA_VISIBLE_DEVICES=${GPUS:-0,1,2}
+export CUDA_DEVICE_ORDER=${CUDA_DEVICE_ORDER:-PCI_BUS_ID}   # as run_arm.sh: steps and arms index the same physical GPUs
 SEED=${SEED:-0}; Q=runs/queue
 mkdir -p "$Q"; rm -f "$Q"/*.done "$Q"/*.failed
 scripts/abstain/eval_allwrong.sh --build || { echo "all-wrong data build failed" >&2; exit 1; }
