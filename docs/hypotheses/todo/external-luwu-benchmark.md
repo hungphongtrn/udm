@@ -73,4 +73,38 @@ cases).** TREC flagged and dropped from every comparison per rule 1; the other t
 - Surviving transfer rows: those among DBpedia, Emotion and AG News. `luwu_policies.py --overlap` drops TREC by default
   (`core.sh` uses that); `--drop-overlapping-cases` (only the 23 ids) is a sensitivity view only, not the decision.
 
-Arms: not run yet.
+**A seed 0 (2026-10-14; `kev/runs/dmb/a-s0-core{-scored,-policies}`).** Reference arm, not the selected arm (that waits
+on D9), so this row does not decide rule 2.
+
+- Rule 3 passes: 39,168 predictions for 39,168 requests, 0 interface failures, their scorer accepted the run.
+- Our `luwu_policies.py` reproduces their scorer exactly where both compute the same thing: every transfer row's
+  threshold, test D and test F for `maxprob_T`/`entropy_T`/`pnone_T` match their `negative_max`/`normalized_entropy`/
+  `none_probability` (e.g. DBpedia k2 → Emotion k2 `negative_max`: -0.95970, D 0.837, F 0.578 in both). Their
+  "frozen-threshold calibration" table differs on DBpedia/Emotion because it fits on the whole calibration split
+  (280/120 texts), not the 80-text subset the transfer protocol uses.
+- Cross-task transfer, k2 natural, the 6 surviving rows (D = detection on target test, F = false rejection, local =
+  target-local detection; pass = F ≤ 0.15 and D ≥ local − 0.10):
+
+|Source → target|`maxr_k` D / F (local)|`maxprob_T` D / F (local)|`pnone_T` D / F (local)|
+|---|---|---|---|
+|AG News → DBpedia|0.995 / 0.019 (0.976) pass|0.812 / 0.002 (0.962) fail|0.988 / 0.019 (0.981) pass|
+|AG News → Emotion|0.765 / **0.361** (0.367) fail|0.614 / **0.337** (0.187) fail|0.771 / **0.398** (0.301) fail|
+|DBpedia → AG News|**0.667** / 0.008 (0.883) fail|0.942 / 0.150 (0.683) edge|0.817 / 0.025 (0.917) edge|
+|DBpedia → Emotion|0.566 / **0.223** (0.367) fail|0.837 / **0.578** (0.187) fail|0.669 / **0.277** (0.301) fail|
+|Emotion → AG News|**0.475** / 0.000 (0.883) fail|**0.158** / 0.017 (0.683) fail|**0.250** / 0.000 (0.917) fail|
+|Emotion → DBpedia|0.938 / 0.007 (0.976) pass|**0.326** / 0.000 (0.962) fail|0.912 / 0.007 (0.981) pass|
+|**Passing rows**|**2/6**|0–1/6|2–3/6|
+
+  "edge" = on the boundary at 3 decimals (0.150 vs ≤ 0.15; 0.817 vs 0.917 − 0.10). Had A been the selected arm,
+  `maxr_k` would not be supported (2/6); refuted-vs-inconclusive needs Jev's false rejection per row, which
+  `policies.md` now prints beside Jev's detection (`luwu_policies.py`, reference columns "D / F").
+- Raw reward does not carry one threshold across tasks: the 80-text `maxr_k` thresholds are 3.74 (AG News), 5.89
+  (DBpedia), 7.17 (Emotion). A low source threshold over-rejects Emotion (F 0.22–0.36); Emotion's high one under-detects
+  elsewhere (AG News D 0.475). `maxr_k` cuts the headline DBpedia → Emotion false rejection from 0.578 (`maxprob_T`;
+  the paper reports 0.693 for Jev) to 0.223, still above the 0.15 bar.
+- Emotion is A's weak task, not just a shifted scale: full-label accuracy 0.556 (AG News 0.930, DBpedia 0.989), and
+  local detection is 0.10–0.37 for every readout. Their F counts every rejected covered input, including the ones A
+  gets wrong, so part of Emotion's F is rejections that are arguably right.
+- Within-task transfer (count k2 → k3/k4/k5/k13 and name natural → neutral, 13 rows): `maxr_k` passes 13/13,
+  `maxprob_T` 10/13 (Emotion k2 → k4/k5 F 0.31/0.38; Emotion k5 F 0.157), `pnone_T` 10/13 (DBpedia k2 → k13 D 0.705;
+  Emotion k2 → k4/k5 D ≤ 0.006).

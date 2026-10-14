@@ -648,13 +648,16 @@ def markdown(result, reference, args):
         for model in models:
             reference_row = reference[model]["transfer"].get("|".join([row["source"], row["target"],
                                                                        row["their_score"] or ""])) or {}
-            reference_test = (reference_row.get("target_test") or {}).get("detection") or {}
-            cells.append(fmt(reference_test.get("text_mean")))
+            reference_test = (reference_row.get("target_test") or {})
+            cells.append(f"{fmt((reference_test.get('detection') or {}).get('text_mean'))} / "
+                         f"{fmt((reference_test.get('false_rejection') or {}).get('text_mean'))}")
         target_test = row["target_test"]
         local = (row.get("local_reference") or {}).get("target_test") or {}
         lines.append(f"| {row['source']} -> {row['target']} | {row['readout']} | {fmt(row['threshold'])} | "
                      f"{fmt_rate(target_test.get('detection'))} | {fmt_rate(target_test.get('false_rejection'))} | "
                      f"{fmt_rate(local.get('detection'))} | " + " | ".join(cells) + " |")
+    lines += ["", "their columns: detection / false rejection at their source threshold on the target test split "
+                  "(same readout mapping as above)."]
     if result["contamination"]:
         lines += ["", "## Contamination gate", "",
                   "| dataset | cases | overlap (overlap.py) | flagged by overlap.py | excluded from this run |",
