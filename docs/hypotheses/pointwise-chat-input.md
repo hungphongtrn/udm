@@ -340,6 +340,52 @@ scripts/pref/pack_results.sh pref-H-HP.tgz                # logs, metrics, eval 
 To be filled after the runs, in the parent doc's format (per arm and seed: dev top1 / ECE / flip rate, then the RB2
 table, the probe, and H's DI subset row).
 
+### Seed 0, partial (HP, HL dev; A, D, HP RewardBench 2; H Decision Index)
+
+Pasted from the training machine (no archive yet). Missing for the rules: H's dev eval (`eval_arm.sh runs/pref/H/seed0`),
+H's and HL's RewardBench 2, the `dindex_subset.py pair` log for H. Clean rows as in the parent doc (v7 n = 1264, t4
+n = 656); G = temperature / Platt fit on the run's decision-v7 calibration split (n = 1148).
+
+| Arm | v7 top1 | t4 top1 | v7 ECE raw / G | t4 ECE raw / G | v7 NLL raw / G | t4 NLL raw / G | T | Flip v7 / t4 | v7 \|r\| p99 |
+|---|---|---|---|---|---|---|---|---|---|
+| D (parent, seed 0) | 87.42 | 79.73 | .053 / .036 | .124 / .088 | .430 / .374 | | 1.47 | 0 / 1 | 7.1 |
+| HP | 86.55 | 76.52 | .059 / .032 | .152 / .107 | .464 / .385 | .852 / .631 | 1.60 | 0 / 0 (n 60 / 36) | 8.0 |
+| HL | 86.63 | 77.29 | .075 / .030 | .146 / .087 | .476 / .356 | .838 / .569 | 1.90 | 0 / 0 (n 60 / 36) | 11.0 |
+
+Per type, t4 top1 (HP / HL): choice 73.81 / 75.60 (n 336), noul 83.57 / 82.86 (n 280), score 50.0 / 52.5 (n 40).
+Sigmoid ECE after Platt, v7 / t4: HP .009 / .077, HL .014 / .066 (D .010 / .063 in the parent doc).
+
+RewardBench 2, candidates shuffled per prompt (`--order_seed 0`), 0 unsupported prompts for every arm:
+
+| Arm | Factuality | Precise IF | Math | Safety | Focus | Ties | Overall | no-Ties | Probe mean / max \|Δ\|, flips | Wall |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A (pointer, kev) | 0.3747 | 0.3063 | 0.4481 | 0.5556 | 0.8545 | 0.5289 | 0.5113 | 0.5078 | 1.04 / 4.02, 13 of 64 | 622 s |
+| D (scalar, chat) | 0.6232 | 0.3500 | 0.5792 | 0.7733 | 0.8970 | 0.7618 | 0.6641 | 0.6445 | 0.577 / 1.64, 6 of 64 | 1,527 s |
+| HP (pointwise + pairs) | 0.7137 | 0.3187 | 0.7268 | 0.6556 | 0.8646 | 0.6309 | 0.6517 | 0.6559 | 0 / 0, 0 of 64 | 1,988 s |
+
+Decision Index 0.3 subset (same 15,000 rows): H **35.78** (raw 51.91, breadth 34.89; 15,000 ok) vs D 36.91 eager /
+37.01 graphed and v7-base 33.60: H - D = -1.1 to -1.2, H - v7-base = +2.2.
+
+Readings:
+
+- Shuffling is what the A/D RewardBench 2 numbers needed: A falls 0.755 -> 0.511 (Factuality 0.81 -> 0.37, Math
+  0.91 -> 0.45), D 0.696 -> 0.664. A's dataset-order score was mostly a first-position preference.
+- Set independence holds where it was built to: HP's probe Δ is exactly 0 (rule 3's implementation check passes for the
+  pointwise format; H's own probe not yet seen), and HP / HL flip 0 of 60 / 36 permutations.
+- HP vs D on RewardBench 2: -1.24 overall, +1.14 no-Ties. Gains Factuality +9.1, Math +14.8; losses Safety -11.8,
+  Ties -13.1, Focus -3.2, Precise IF -3.1. [INFERENCE] HelpSteer3's helpfulness preferences reward compliance, which
+  Safety's refusal-preferred prompts penalize. The data claim compares HP with H, whose RB2 is not in yet.
+- HP and HL are both 0.8-0.9 below D seed 0 on v7 (inside D's own seed spread: 3-seed mean 86.76) but 3.2 / 2.4 below on
+  t4 (D's 3-seed mean 78.81, sd .91). Both are H plus one change, so [INFERENCE] H's t4 is likely below D's as well; rule
+  1 needs H's t4 >= 78.73 and v7 >= 86.42.
+- HL vs H (loss rule) once H is in: supported if H's t4 <= 76.29 with H's v7 <= 87.63, or both within 1 point and H's
+  G NLL above .356 (v7) and .569 (t4); refuted if H's v7 > 87.63 or t4 > 78.29.
+- HP vs H (data rule): HP within 1 point of H on dev needs H in [85.55, 87.55] on v7 and [75.52, 77.52] on t4; the RB2
+  clause needs H's overall <= 0.6417 and HP ahead on >= 4 subsets.
+- Calibration: after G, HL has the lowest v7 / t4 softmax NLL and ECE of HP / HL / D (v7 .356 vs D .374; t4 ECE .087 vs
+  D .088); A is still lower (v7 G NLL .348, t4 G ECE .070).
+- Decision Index: H trails D by ~1.1 index points and keeps most of D's gain over v7-base; per-benchmark pairing pending.
+
 ### RewardBench 2, dataset order (superseded)
 
 The first A/D runs (seed 0) showed every prompt's chosen response as option `a`, before the shuffle above existed.
