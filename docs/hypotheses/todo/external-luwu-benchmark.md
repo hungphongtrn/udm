@@ -73,8 +73,10 @@ cases).** TREC flagged and dropped from every comparison per rule 1; the other t
 - Surviving transfer rows: those among DBpedia, Emotion and AG News. `luwu_policies.py --overlap` drops TREC by default
   (`core.sh` uses that); `--drop-overlapping-cases` (only the 23 ids) is a sensitivity view only, not the decision.
 
-**A seed 0 (2026-10-14; `kev/runs/dmb/a-s0-core{-scored,-policies}`).** Reference arm, not the selected arm (that waits
-on D9), so this row does not decide rule 2.
+**A seed 0 (2026-10-14; `kev/runs/dmb/a-s0-core{-scored,-policies}`).** A is the Kev baseline (pointer head + CE,
+`scripts/pref/arms.sh`), not a rewarder: its `r` is a softmax-trained logit, so `maxr`/`maxr_k` here test the Kev
+logit, not the rewarder claim. It is the in-house counterpart of the paper's softmax models and the pipeline check; the
+rewarder rows come from the selected arm (D9) and the trained full-data rewarder arms C/F.
 
 - Rule 3 passes: 39,168 predictions for 39,168 requests, 0 interface failures, their scorer accepted the run.
 - Our `luwu_policies.py` reproduces their scorer exactly where both compute the same thing: every transfer row's
@@ -98,7 +100,7 @@ on D9), so this row does not decide rule 2.
   "edge" = on the boundary at 3 decimals (0.150 vs ≤ 0.15; 0.817 vs 0.917 − 0.10). Had A been the selected arm,
   `maxr_k` would not be supported (2/6); refuted-vs-inconclusive needs Jev's false rejection per row, which
   `policies.md` now prints beside Jev's detection (`luwu_policies.py`, reference columns "D / F").
-- Raw reward does not carry one threshold across tasks: the 80-text `maxr_k` thresholds are 3.74 (AG News), 5.89
+- A's logit does not carry one threshold across tasks: the 80-text `maxr_k` thresholds are 3.74 (AG News), 5.89
   (DBpedia), 7.17 (Emotion). A low source threshold over-rejects Emotion (F 0.22–0.36); Emotion's high one under-detects
   elsewhere (AG News D 0.475). `maxr_k` cuts the headline DBpedia → Emotion false rejection from 0.578 (`maxprob_T`;
   the paper reports 0.693 for Jev) to 0.223, still above the 0.15 bar.
