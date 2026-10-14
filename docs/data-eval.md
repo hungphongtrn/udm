@@ -237,14 +237,18 @@ Suites: `evals/v7/decision-v7` (primary) and `evals/v4/transfer-v4` (eval-only, 
   `allwrong`, `answerable_none`, `allwrong_none`, as minimal pairs (`kev/scripts/abstain/build_allwrong.py`;
   `kev/scripts/abstain/eval_allwrong.sh` runs one `kev.benchmark --data` pass per condition).
 - Readouts per question from the recorded rewards `r` (`kev/scripts/abstain/allwrong_report.py`): `maxprob`,
-  `maxprob_G` (T = the arm's G fit), `maxr`, `lse`, `pnone`, `pnone_G`.
+  `maxprob_G` (T = the arm's G fit), `maxr`, `maxr_k` (max r − log(n − 1): removes the K-balanced loss's log(K − 1)
+  optimum shift), `noisy_or` (1 − Π(1 − σ(r_i))), `mass` (Σ σ(r_i), Li et al. 2609.33209: ~1 answerable, ~0 all-wrong),
+  `lse`, `pnone`, `pnone_G`.
 - Metrics per (suite, arm, readout): AUROC (allwrong positive), FPR@95TPR, paired win rate; on the answerable+allwrong
   pool: AURC, selective accuracy at coverages 0.3/0.5/0.7/0.9/1.0, oracle AURC; AUROC per K stratum (small ≤ 4, mid
   5–14, large ≥ 15, inclusive bounds); shared-option |Δ reward|; paired bootstrap differences (2,000 resamples)
   (`kev/scripts/abstain/allwrong_report.py`; `K_STRATA`, `COVERAGES`).
 - Threshold transfer (D6): per arm/readout/target risk (0.05, 0.10), the lowest threshold with that risk on the v7 pool,
   applied unchanged to the t4 pool and each K stratum; fit suite decision-v7, apply suite transfer-v4
-  (`kev/scripts/abstain/allwrong_report.py`: `FIT_SUITE`, `APPLY_SUITE`).
+  (`kev/scripts/abstain/allwrong_report.py`: `FIT_SUITE`, `APPLY_SUITE`). Reported beside it, not judged: zero-fit
+  policies (accept iff `maxr > 0` / `maxr_k > 0`) and Lu & Wu's rule (max detection s.t. answerable false rejection
+  ≤ 5%, strict `score > threshold`), fit on the whole v7 pool and on a seeded 80-question sample, applied frozen to t4.
 - K = 1 check (G4): `fork_check.py k1` scores each option alone vs all K together, `max |Δ sigmoid| < 1e-3` and no argmax
   change (`kev/scripts/abstain/fork_check.py`; `docs/hypotheses/in-progress/allwrong-abstention.md` gate G4).
 - Commands: build `./kev.sh scripts/abstain/build_allwrong.py --suite evals/v7/decision-v7 --out
@@ -281,11 +285,35 @@ construction (one request per candidate). No separate command — the analysis i
   A failed parity stops the PF arms' interpretation, not the queue (`docs/hypotheses/in-progress/allwrong-abstention.md`
   gates G0/G4).
 
-### g. Additional evaluation aspects (to add)
+### g. Evaluation aspects: what each one asks, where it is measured
 
-The user's list of further evaluation aspects is **pending**. Each new one gets a row in the same format as (a)–(f):
-name, what it measures, n, split policy, command (`./kev.sh …`), output files, metrics read, cost/wall — with a source
-path for every number.
+Summary of every evaluation aspect raised in the study notes and the literature they cite (the LTR survey note, the
+"shift, not scale" note, the correctness-vs-preference note, the PF-RCR component plan with its four gates, and the
+typed-decision-model audits: Lu & Wu 2610.03387, Zhong et al. 2609.39496, Li et al. 2609.33209, Lall's option-channel
+attack, the Decision 1.0 paper's own limitation). Status: **built** = code exists on `dev`; **not built** = no code.
+
+| # | Aspect | Question it answers | Source of the aspect | Measured by | Status |
+|---|---|---|---|---|---|
+| 1 | Ranking non-inferiority | does the change keep top-1 (gate 1)? | PF-RCR gate 1 (≥ −0.5 vs A on v7 dev, t4 dev, DI 15k) | 2a top1, 2b DI subset; the allwrong screen's guard is 2 points vs `Ah` (`in-progress/allwrong-abstention.md`) | built |
+| 2 | Many-option task loss | is banking77 (K = 77) still below A (D: −5.8 on v7 dev)? | PF-RCR component 1; `done/preference-reward-model.md` | per-task top1 in `reward_report.json`; D8 clause on banking77 | built |
+| 3 | All-wrong detection | does the score flag a set with no right option? | LTR note #3, "shift" note, gate 2, Zhong et al. (menu choice rejects 7% vs 99% for isolated verification) | 2d AUROC, FPR@95TPR, paired win rate | built |
+| 4 | Shift, not scale | can the score tell "best of good" from "best of bad"? softmax is shift-invariant, so is BT | "shift" note | 2d `maxr` / `mass` vs `maxprob`; `pnone` with a none option offered (D7/D11) | built |
+| 5 | Free logit baselines | do Energy / MaxLogit on A already detect all-wrong? | LTR note #2, E0.2 | 2d `lse`, `maxr` on A seeds 0–2 (queue `full`) | built |
+| 6 | Risk–coverage | accuracy vs share answered automatically | LTR note #3, "shift" note | 2d AURC, selective accuracy at 0.3–1.0 coverage, `rc-<suite>.svg` | built |
+| 7 | Cross-task threshold transfer | does one threshold fit on v7 hold on t4? Lu & Wu: a Jev threshold from DBpedia falsely rejects 69.3% of covered Emotion inputs | gate 3, Lu & Wu | 2d D6 (risk 0.05/0.10), zero-fit policies, Lu & Wu ≤ 5% FRR rule, 80-question fit | built |
+| 8 | Cross-K threshold | is the threshold stable from K = 3 to K = 77? | gate 3, K-balance argument | 2d strata small/mid/large, `maxr_k`; PRh vs PUh (D9) | built |
+| 9 | K = 1 vs K consistency | does an option score the same alone as in its set? | gate 4, Zhong et al. (choice vs verification) | 2f `fork_check.py k1` (G4) | built |
+| 10 | Candidate-order invariance | does reordering options change the answer? | Decision 1.0 limitation ("neither architecture enforces candidate-order invariance"); our RB2 primacy finding | 2a `permutation.flip_rate`; 2e position table (A strong primacy, D mild, pointwise none) | built |
+| 11 | Set independence / option channel | does adding, removing or renaming one option move the others' scores? | Lall (option-channel attack); Li et al. | 2d shared-option \|Δ reward\| (all-wrong minimal pairs); 2c RB2 `--probe 64` | built for remove/add; renamed or injected adversarial distractor **not built** |
+| 12 | Probability coherence | do probabilities obey the axioms across query forms? | Li et al. 2609.33209 | 2d `mass` (single-label sum) only; negation complementarity, description invariance, partition (split/merge) consistency **not built** | partly built |
+| 13 | External abstention benchmark | how do we compare with published Jev / Laya / Qwen on TREC, DBpedia, Emotion, CLINC150 (omission, retrieval miss, out-of-scope), 80-pair transfer protocol? | Lu & Wu, `github.com/luckykevvv/Decision_Model_Benchmark` 0.2.0 | `kev/scripts/external/` (`luwu_run.py` adapter, `luwu_policies.py` local protocol, `overlap.py` contamination gate: TREC and DBpedia are our trainable sources, so run the gate first); commands in `kev/scripts/external/README.md` | built, not run |
+| 14 | Correctness → preference transfer | does a correctness-trained reward transfer to open-ended responses (helpfulness, style, safety, partial credit)? | correctness-vs-preference note | 2c RewardBench 2 zero-shot, accuracy + calibration (`rb2_pooled.py` pooled AUROC, sigmoid ECE); HP tested preference data (refuted) | built |
+| 15 | Held-out tasks | do numbers hold on sources never trained on? | correctness-vs-preference note | transfer-v4 (eval-only sources mmlu, emotion, sciq, …); DI subset | built |
+| 16 | Format gap (short labels vs long responses) | does the model learn "short option = scoreable"? | correctness-vs-preference note | RB2 is the long-form check; mixing long-form data into training is a data question, no arm yet | eval built, data **not built** |
+| 17 | Serving / numerical parity | do forked, graphed and K = 1 paths give the training path's numbers? | PF-RCR component 2 unit test | 2f G0 `fork_check.py parity`, `chat_speed_check.py` | built |
+
+Not taken up: the base-vs-instruct refusal gap (96.5% vs ~8% all-wrong refusal, LTR note #5) is context for using the
+base model, which every arm already does. A new aspect gets a row here and, if it needs code, a `todo/` hypothesis doc.
 
 ---
 

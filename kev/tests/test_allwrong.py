@@ -86,3 +86,11 @@ def test_apply_threshold_splits_answerable_and_allwrong():
     got = report.apply_threshold([0.85, 0.4, 0.95, 0.3], np.array([1.0, 1.0, 0.0, 0.0]), 0.8, 2)
     assert got == {"threshold": 0.8, "coverage": 0.5, "risk": 0.5, "answered_answerable": 0.5, "answered_allwrong": 0.5}
     assert report.apply_threshold([0.1, 0.2], np.array([1.0, 0.0]), float("inf"), 1)["coverage"] == 0.0
+
+
+def test_maxr_k_n1_is_max_r():
+    """n = 1 option: log(n - 1) is undefined, so maxr_k is defined as max r (documented in the Readouts table).
+    n = 2 is the other edge: log(1) = 0, so maxr_k = maxr there too."""
+    assert report.maxr_k([1.7]) == 1.7
+    assert report.maxr_k(np.array([-2.5])) == -2.5
+    assert report.maxr_k([3.0, 1.0]) == 3.0

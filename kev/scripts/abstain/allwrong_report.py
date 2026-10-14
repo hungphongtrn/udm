@@ -12,9 +12,17 @@ are reported). Readouts of a row's rewards r (the logits rows.json records):
     maxprob_G   max softmax(r / T), T = arm's G       (T from RUN/eval/decision-v7-development/reward_report.json)
     maxr        max r                                 the absolute level; sigmoid(max r) and Platt sigmoid(a max r + b)
                                                       (a > 0) rank identically, so every number below is the same for them
+    maxr_k      max r - log(n - 1), n options scored   the K-balanced level with the r* = logit(q) + log(n - 1) optimum
+                                                      shift (kev.pref.rcr_loss) removed; n = 1 is defined as max r
+    noisy_or    1 - prod_i (1 - sigmoid(r_i))         some option is right (log space: log(1 - sigmoid(r)) = -softplus(r))
+    mass        sum_i sigmoid(r_i)                    single-label option mass (Li et al. 2609.33209): ~1 answerable, ~0
+                                                      allwrong; per arm its answerable/allwrong mean and median print beside it
     lse         logsumexp(r)                          the energy score: the level read through every option
     pnone       softmax(r)[none]  (none conditions)   the product's own mechanism: offer a none option, read its mass
     pnone_G     softmax(r / T)[none]
+
+maxr_k, noisy_or and mass are read off any arm's logits; they are the calibrated confidence only for a scalar (sigmoid)
+arm -- for the pointer arm (A/Ah) they are computed the same way but its sigmoid is not a calibrated probability.
 
 Per (suite, arm, readout): AUROC of separating allwrong (positive) from answerable by low confidence (pnone: high),
 FPR@95TPR (the fraction of answerable rows flagged at the threshold that flags 95% of allwrong rows), the paired win
@@ -33,15 +41,23 @@ decision-v7 and transfer-v4 (reward_report.json raw.overall) is printed beside i
 arm, curve readout and target risk in --risk (0.05,0.10), the lowest threshold whose decision-v7 pool risk is <= the
 target (whole tie blocks), applied unchanged to the transfer-v4 pool and to each K stratum of both pools: coverage, risk,
 the fractions of answerable and of allwrong rows answered, and the coverage a threshold fit on transfer-v4 itself would
-reach (the ceiling). Writes <out>/report.json and <out>/rc-<suite>.svg.
+reach (the ceiling). Beside it (reported, not judged): two zero-fit policies (accept iff maxr > 0, i.e. sigmoid 0.5, and
+iff maxr_k > 0) on both pools and every stratum, and a Lu & Wu 2610.03387 policy per arm and curve readout -- the
+threshold maximising allwrong detection subject to a false rejection rate of answerable rows <= 5% (accept iff
+score > threshold; the largest qualifying score, so a tie block is rejected or accepted whole), fit on the decision-v7
+pool and on a fixed seeded 80-question sample of it (their 80-pair protocol), applied frozen to transfer-v4 and the
+strata, with false rejection and detection reported on the fit and apply sets. Writes <out>/report.json and
+<out>/rc-<suite>.svg.
 """
 import argparse, json
 from pathlib import Path
 import numpy as np
 
 CONDITIONS = ("answerable", "allwrong", "answerable_none", "allwrong_none")
-CURVE_READOUTS = ("maxprob", "maxprob_G", "maxr", "lse")
+CURVE_READOUTS = ("maxprob", "maxprob_G", "maxr", "maxr_k", "noisy_or", "mass", "lse")
 NONE_READOUTS = ("pnone", "pnone_G")
+ZERO_FIT_READOUTS = ("maxr", "maxr_k")   # accept iff the readout > 0 (maxr's 0 = sigmoid 0.5): no fitting
+FRR_MAX, LUWU_SAMPLE = 0.05, 80   # Lu & Wu 2610.03387: answerable false rejection <= 5%; their 80-pair protocol
 COVERAGES = (0.3, 0.5, 0.7, 0.9, 1.0)
 K_STRATA = (("small", 0, 4), ("mid", 5, 14), ("large", 15, 10 ** 9))   # original option count, inclusive bounds
 # The hypothesis doc's decisions (arm names cannot contain "-"; compares naming an arm not given are skipped).
@@ -60,6 +76,9 @@ DEFAULT_COMPARE = (
     "Hh.maxr-Dh.maxr", "Hh.maxprob-Dh.maxprob",
     # D9 objective on the pointwise prompt: + listwise term, K balance, RCR vs BT, vs RCR on the listing prompt
     "PRh.maxr-PBh.maxr", "PRh.maxr-PUh.maxr", "PRh.maxr-Hh.maxr", "PRh.maxr-Rh.maxr",
+    # D9 K balance read two ways: the calibrated level (maxr_k, the log(K-1) optimum shift removed) vs the unbalanced
+    # level, and the stable-confidence readouts beside the raw one
+    "PRh.maxr_k-PUh.maxr", "PRh.noisy_or-PRh.maxr", "PUh.noisy_or-PUh.maxr", "PBh.maxr_k-PBh.maxr",
     # D10 head: MLP and LM-head init under the same loss
     "P2h.maxr-PRh.maxr", "PLh.maxr-PRh.maxr",
     # D11 against Kev's own readouts
@@ -76,6 +95,28 @@ def softmax(z):
 
 def lse(z):
     m = z.max(); return float(m + np.log(np.exp(z - m).sum()))
+
+
+def maxr_k(z):
+    """max r - log(n - 1), n = the options scored in the row: the K-balanced optimum is r* = logit(q) + log(n - 1)
+    (kev.pref.rcr_loss point=balanced), so removing that shift leaves a K-invariant calibrated level. n = 1 (log 0) is
+    defined as max r; a single option carries no count to correct."""
+    z = np.asarray(z, float)
+    return float(z.max()) if len(z) < 2 else float(z.max() - np.log(len(z) - 1))
+
+
+def noisy_or(z):
+    """1 - prod_i (1 - sigmoid(r_i)): the confidence that some option is right, computed in log space
+    (log(1 - sigmoid(r)) = -softplus(r)) so it stays exact for large |r|."""
+    z = np.asarray(z, float)
+    return float(-np.expm1(-np.logaddexp(0.0, z).sum()))
+
+
+def mass(z):
+    """sum_i sigmoid(r_i): the single-label option mass (Li et al. 2609.33209); ~1 on an answerable row, ~0 on an
+    all-wrong one for a calibrated arm, whatever K."""
+    z = np.asarray(z, float)
+    return float(np.exp(-np.logaddexp(0.0, -z)).sum())
 
 
 def avg_ranks(x):
@@ -118,11 +159,32 @@ def fit_threshold(conf, hit, risk):
     return float(c[ok[-1]]) if len(ok) else float("inf")
 
 
-def apply_threshold(conf, hit, t, n_ans):
-    """The first n_ans rows of the pool are answerable, the rest allwrong (pool()). -> coverage, risk and answer rates."""
-    on = np.asarray(conf, float) >= t
+def apply_threshold(conf, hit, t, n_ans, strict=False):
+    """The first n_ans rows of the pool are answerable, the rest allwrong (pool()). Answer iff conf >= t (strict: > t).
+    -> coverage, risk and answer rates."""
+    on = np.asarray(conf, float) > t if strict else np.asarray(conf, float) >= t
     return {"threshold": t, "coverage": float(on.mean()), "risk": float(1 - hit[on].mean()) if on.any() else 0.0,
             "answered_answerable": float(on[:n_ans].mean()), "answered_allwrong": float(on[n_ans:].mean())}
+
+
+def fit_frr_threshold(conf, n_ans, max_frr=FRR_MAX):
+    """Lu & Wu 2610.03387 threshold policy: accept iff score > threshold, the threshold chosen to maximise detection
+    of allwrong rows (they are rejected) subject to a false rejection rate of answerable rows <= max_frr. Deterministic:
+    the candidates are the pool's own scores, a score equal to the threshold is rejected (so a tie block is decided
+    whole), and among the qualifying candidates the largest is taken (detection is nondecreasing in the threshold, so it
+    is maximal there). threshold = -inf (accept everything) is always available. -> threshold."""
+    conf = np.asarray(conf, float); ans = conf[:n_ans]
+    best = -np.inf
+    for v in np.sort(np.unique(conf)):
+        if float((ans <= v).mean()) <= max_frr + 1e-12:
+            best = float(v)   # ascending: the last qualifying v is the largest
+    return float(best)
+
+
+def frr_rates(conf, n_ans, t):
+    """Accept iff score > t -> coverage, false rejection of answerable rows, detection of allwrong rows."""
+    on = np.asarray(conf, float) > t
+    return {"coverage": float(on.mean()), "false_rejection": float(1 - on[:n_ans].mean()), "detection": float(1 - on[n_ans:].mean())}
 
 
 def rc_metrics(acc):
@@ -170,7 +232,8 @@ def readouts(run, suite):
     if any(rows["answerable_none"][k]["keys"][i] != rows["allwrong_none"][k]["keys"][i] for k, i in zip(keys, none_idx)):
         raise SystemExit(f"{base}: the none option is not at the same position in the two none conditions")
     out = {}
-    for name, f in (("maxprob", lambda z: softmax(z).max()), ("maxr", lambda z: z.max()), ("lse", lse)):
+    for name, f in (("maxprob", lambda z: softmax(z).max()), ("maxr", lambda z: z.max()), ("maxr_k", maxr_k),
+                    ("noisy_or", noisy_or), ("mass", mass), ("lse", lse)):
         out[name] = {"ans": np.array([f(z) for z in r["answerable"]]), "bad": np.array([f(z) for z in r["allwrong"]])}
     if T is not None:
         out["maxprob_G"] = {"ans": np.array([softmax(z / T).max() for z in r["answerable"]]),
@@ -297,9 +360,14 @@ def main():
                                    "top1_answerable_strata": {s: float(ah[[stratum(k) == s for k in hits["K"]]].mean()) for s in strata},
                                    "shared_option_diff": {"max": float(sd.max()) if len(sd) else None, "mean": float(sd.mean()) if len(sd) else None},
                                    "readouts": {}}
+            if "mass" in ro:   # Li et al. 2609.33209 coherence: the single-label mass sums to ~1 on answerable rows, ~0 on allwrong
+                A["mass_summary"] = {w: {"mean": float(ro["mass"][k].mean()), "median": float(np.median(ro["mass"][k]))}
+                                     for w, k in (("answerable", "ans"), ("allwrong", "bad"))}
             print(f"{name}: top1 answerable {ah.mean():.4f}  with none offered: answerable {hits['ansnone_hit'].mean():.4f}, "
                   f"allwrong picks none {hits['badnone_hit'].mean():.4f}  (T={T})  shared-option |dr| max "
-                  + ("n/a" if not len(sd) else f"{sd.max():.2e} mean {sd.mean():.2e}"))
+                  + ("n/a" if not len(sd) else f"{sd.max():.2e} mean {sd.mean():.2e}")
+                  + (f"  mass (mean/median) answerable {A['mass_summary']['answerable']['mean']:.3f}/{A['mass_summary']['answerable']['median']:.3f}"
+                     f" allwrong {A['mass_summary']['allwrong']['mean']:.3f}/{A['mass_summary']['allwrong']['median']:.3f}" if "mass" in ro else ""))
             for r, d in ro.items():
                 m_ = {"auroc": detection(d, r), "fpr95": fpr95(d, r), "win": win_rate(d, r), "auroc_strata": {}}
                 for s in strata:
@@ -346,6 +414,52 @@ def main():
                     print(f"{name:5}{r:11}{m_['fit']['coverage']:9.4f}{p['coverage']:8.4f}{p['risk']:8.4f}{p['answered_answerable']:8.4f}"
                           f"{p['answered_allwrong']:8.4f}{m_['apply_oracle_coverage']:8.4f}   "
                           + "  ".join(f"{k} {v['coverage']:.3f}/{v['risk']:.3f}" for k, v in m_["strata"].items()))
+        # zero-fit policies: accept iff the readout > 0 (maxr's 0 = sigmoid 0.5; maxr_k's 0 = its balanced level), no
+        # fitting, applied to both pools and every K stratum (reported, not judged)
+        T6["zero_fit"] = ZF = {}
+        print(f"\n== zero-fit policies (accept iff readout > 0): {FIT_SUITE} / {APPLY_SUITE} coverage/risk")
+        for name in arms:
+            for r in ZERO_FIT_READOUTS:
+                if (FIT_SUITE, name, r) not in pools: continue
+                fc, fh, fn, fK = pools[(FIT_SUITE, name, r)]; tc, th, tn, tK = pools[(APPLY_SUITE, name, r)]
+                m_ = {"threshold": 0.0, FIT_SUITE: apply_threshold(fc, fh, 0.0, fn, strict=True),
+                      APPLY_SUITE: apply_threshold(tc, th, 0.0, tn, strict=True), "strata": {}}
+                for su, (c, h, n, K) in ((FIT_SUITE, (fc, fh, fn, fK)), (APPLY_SUITE, (tc, th, tn, tK))):
+                    for s, _, _ in K_STRATA:
+                        sc, sh, sn = stratum_pool(c, h, n, K, s)
+                        if sn: m_["strata"][f"{su}:{s}"] = apply_threshold(sc, sh, 0.0, sn, strict=True)
+                ZF.setdefault(name, {})[r] = m_
+                print(f"{name:5}{r:11}{m_[FIT_SUITE]['coverage']:9.4f}/{m_[FIT_SUITE]['risk']:.4f}"
+                      f"{m_[APPLY_SUITE]['coverage']:9.4f}/{m_[APPLY_SUITE]['risk']:.4f}   "
+                      + "  ".join(f"{k} {v['coverage']:.3f}/{v['risk']:.3f}" for k, v in m_["strata"].items()))
+        # Lu & Wu 2610.03387 threshold policy: accept iff score > t, t maximising allwrong detection subject to an
+        # answerable false rejection rate <= FRR_MAX, fit on the v7 pool and on a fixed seeded 80-question sample of it
+        # (their 80-pair protocol), applied frozen to t4 and the strata; reported, not judged
+        n_v7 = res["suites"][FIT_SUITE]["pairs"]
+        samp = np.random.default_rng(SEED).choice(n_v7, size=min(LUWU_SAMPLE, n_v7), replace=False)
+        def frr_policy(fc, fn, tc, tn, fK, tK, idx=None):
+            if idx is None: cc, cn = fc, fn
+            else: cc, cn = np.concatenate([fc[idx], fc[n_v7 + idx]]), len(idx)   # the sample's answerable then allwrong rows
+            t = fit_frr_threshold(cc, cn)
+            m_ = {"threshold": t, "fit": frr_rates(cc, cn, t), "apply": frr_rates(tc, tn, t), "strata": {}}
+            for su, (c, n, K) in ((FIT_SUITE, (fc, fn, fK)), (APPLY_SUITE, (tc, tn, tK))):
+                for s, _, _ in K_STRATA:
+                    mk = np.array([stratum(k) == s for k in K])
+                    if mk[:n].any(): m_["strata"][f"{su}:{s}"] = frr_rates(c[mk], int(mk[:n].sum()), t)
+            return m_
+        T6["frr_policy"] = FR = {}; T6["frr_policy_80"] = FRP = {}
+        print(f"\n== Lu & Wu 2610.03387 policy (accept iff readout > t; max allwrong detection, answerable FRR <= {FRR_MAX:g}): "
+              f"fit on {FIT_SUITE} and a seeded {len(samp)}-question sample, applied frozen to {APPLY_SUITE} and the strata")
+        for name in arms:
+            for r in CURVE_READOUTS:
+                if (FIT_SUITE, name, r) not in pools: continue
+                fc, fh, fn, fK = pools[(FIT_SUITE, name, r)]; tc, th, tn, tK = pools[(APPLY_SUITE, name, r)]
+                FR.setdefault(name, {})[r] = m_ = frr_policy(fc, fn, tc, tn, fK, tK)
+                FRP.setdefault(name, {})[r] = m80 = frr_policy(fc, fn, tc, tn, fK, tK, idx=samp); m80["n"], m80["seed"] = len(samp), SEED
+                f_, a_, f8, a8 = m_["fit"], m_["apply"], m80["fit"], m80["apply"]
+                print(f"{name:5}{r:11} v7 t={m_['threshold']:+.3f} fit frr {f_['false_rejection']:.3f} det {f_['detection']:.3f} "
+                      f"-> t4 frr {a_['false_rejection']:.3f} det {a_['detection']:.3f} | 80q t={m80['threshold']:+.3f} "
+                      f"fit frr {f8['false_rejection']:.3f} det {f8['detection']:.3f} -> t4 frr {a8['false_rejection']:.3f} det {a8['detection']:.3f}")
     json.dump(res, open(out / "report.json", "w"), indent=1)
 
 

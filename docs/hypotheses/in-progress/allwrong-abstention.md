@@ -75,8 +75,14 @@ Per question, from the rewards r the benchmark records (`rows.json` logits):
 | maxprob | max softmax(r) | what a softmax cascade thresholds |
 | maxprob_G | max softmax(r / T), T = the arm's G fit on decision-v7 calibration | temperature changes the order across questions |
 | maxr | max r | = sigmoid(max r) = Platt sigmoid(a max r + b) for ranking |
+| maxr_k | max r - log(n - 1), n = the options scored in the row | the K-balanced level: `kev.pref.rcr_loss` point=balanced has optimum r* = logit(q) + log(K-1), so this removes that shift; n = 1 (log 0) is defined as max r |
+| noisy_or | 1 - prod_i (1 - sigmoid(r_i)), in log space | confidence that some option is right |
+| mass | sum_i sigmoid(r_i) | single-label option mass (Li et al. 2609.33209, their sum); ~1 on answerable rows, ~0 on allwrong, whatever K. Per arm its answerable/allwrong mean and median are reported |
 | lse | logsumexp(r) | energy score |
 | pnone | softmax(r)[none] in the none conditions | the existing mechanism |
+
+maxr_k, noisy_or and mass are the calibrated confidence only for a scalar (sigmoid) arm; for the pointer arm (A/Ah) they
+are computed from its logits the same way and reported, but its sigmoid is not a calibrated probability.
 
 Metrics per (suite, arm, readout): AUROC (allwrong = positive), FPR@95TPR (answerable rows flagged at the threshold that
 flags 95% of allwrong rows), AUROC per K stratum, paired win rate (a question's answerable twin more confident than its
@@ -137,7 +143,13 @@ reported beside it; it breaks ties only.
   on the v7 pool (answerable + allwrong) is applied unchanged to the t4 pool and to each K stratum of both pools. An
   anchored readout transfers if, at risk 0.10, its t4 risk is <= 0.15 and its t4 coverage is >= 0.8 x the coverage a
   threshold fit on t4 would reach; reported for every arm, judged on the D2-D5 winner against Ah.maxprob. The strata
-  (and risk 0.05) are reported, not judged.
+  (and risk 0.05) are reported, not judged. Reported beside the fitted threshold, not judged: two zero-fit policies
+  (accept iff maxr > 0, i.e. sigmoid 0.5, and iff maxr_k > 0) on both pools and every stratum; and a Lu & Wu 2610.03387
+  threshold rule per arm and curve readout (accept iff score > threshold) -- the threshold maximising allwrong detection
+  subject to a false rejection rate of answerable rows <= 5% (deterministic: the candidates are the pool's own scores,
+  a score equal to the threshold is rejected, and the largest qualifying score is taken), fit on the v7 pool and on a
+  fixed seeded 80-question sample of it (their 80-pair protocol), applied frozen to t4 and the strata, with the false
+  rejection and detection printed on the fit and apply sets.
 - **D7 against the none option.** The D2-D5 winner's maxr (no none option in the set) vs Ah.pnone (none offered): it
   matches the existing mechanism if AUROC >= Ah.pnone - 0.02 on both sets.
 
@@ -153,7 +165,10 @@ included, `kev/kev/shared_prefix.py`; inference: `DecisionModel.chat_hidden` / C
 way already. The pointwise term of RCR needs balancing for that: the mean sigmoid CE over a question's options is
 minimised at sigmoid(r_i) = P(option i right), so a K = 77 question's rewards sit ~log 76 below a K = 2 question's and one
 threshold cannot serve both. `--rcr_point balanced` gives the positives and the wrong options half the question each
-(alpha 0 = `--loss bce`); `--rcr_beta` (0 here) would weigh wrong options by exp(beta r_j), detached.
+(alpha 0 = `--loss bce`); its optimum is r* = logit(q) + log(K-1), so the level still moves with K (the line r = 0 is one
+class-balanced boundary, not one threshold: it corresponds to q = 1/K), and the readout `maxr_k` = max r - log(n-1)
+removes that shift, which is what makes a threshold comparable across K. `--rcr_beta` (0 here) would weigh wrong options
+by exp(beta r_j), detached.
 
 | Phase | Arm | Prompt | Head | Loss | Changes vs |
 |---|---|---|---|---|---|
@@ -191,9 +206,11 @@ Rules (half data, seed 0; beats / not worse / guard as above):
   its banking77 (large stratum) answerable top1 is not below Dh's by more than 2 points. Hh.maxprob - Dh.maxprob is
   reported.
 - **D9 objective.** PRh is the pointwise recipe if it beats Hh and is not worse than PBh with the guard passed; PBh
-  beats PRh: the listwise term costs detection. PRh - PUh is the K balance: adopted if PRh beats PUh or is not worse with
-  a smaller small-vs-large gap in D6 stratum coverage at risk 0.10. PRh - Rh (pointwise vs listing prompt, same RCR
-  alpha, different point term) is reported.
+  beats PRh: the listwise term costs detection. PRh.maxr_k - PUh.maxr is the K balance at the calibrated level (maxr_k
+  removes PRh's log(K-1) optimum shift, so this compares like with like; PRh.maxr - PUh.maxr is the same comparison on
+  the raw level and is reported beside it): adopted if PRh.maxr_k beats PUh.maxr or is not worse with a smaller
+  small-vs-large gap in D6 stratum coverage at risk 0.10. PRh - Rh (pointwise vs listing prompt, same RCR alpha,
+  different point term) is reported.
 - **D10 head.** P2h replaces PRh if it beats it, or is not worse with a higher dev top1; PLh the same against PRh.
 - **D11 against Kev.** The D9-D10 winner's maxr vs Ah.maxprob and Ah.pnone, as D7.
 
@@ -202,8 +219,8 @@ second prefix pass with grad). It runs the prefix twice, not once; it is exact o
 not the constraint here (arm C peaked at 19.7 GB at one record per pass, with per-layer checkpointing through the fork).
 `--row_budget` already splits a record whose question rows do not fit a pass.
 
-Predictions (not verdicts): Hh within 1 point of Dh's top1 overall and above it on banking77; PUh's large-stratum
-coverage at the v7 threshold far below its small-stratum coverage, PRh's close to it; P2h and PLh within noise of PRh.
+Predictions (not verdicts): Hh within 1 point of Dh's top1 overall and above it on banking77; PRh.maxr over-accepts on
+the large stratum at the v7 threshold, PRh.maxr_k and PUh.maxr do not; P2h and PLh within noise of PRh.
 
 ## Commands (training machine, from `kev/`)
 
@@ -228,8 +245,9 @@ RYh, then Fh once Ch is done; then G4. Wall time [estimate from C-F's full-data 
 chat arm, ~1.2 h Ah, ~2.3 h per stage 2, ~2 h per Decision Index subset: ~25-30 h. A single arm by hand:
 `BATCH_FALLBACK=1 scripts/pref/run_arm.sh PRh 0 1` (arm, seed, GPU index). Outputs: `runs/allwrong/report-*/report.json`
 (every number above; `dev` per suite top1/NLL/sigmoid ECE; `threshold_transfer.risks.<risk>.<arm>.<readout>` with
-`fit`, `apply`, `apply_oracle_coverage`, `strata`), `rc-decision-v7.svg` / `rc-transfer-v4.svg` (accuracy vs coverage;
-solid = maxr, dashed = maxprob).
+`fit`, `apply`, `apply_oracle_coverage`, `strata`; `threshold_transfer.zero_fit.<arm>.<readout>` and
+`threshold_transfer.frr_policy[_80].<arm>.<readout>` with the zero-fit and Lu & Wu policies), `rc-decision-v7.svg` /
+`rc-transfer-v4.svg` (accuracy vs coverage; solid = maxr, dashed = maxprob).
 
 ## Risks
 
@@ -244,6 +262,21 @@ solid = maxr, dashed = maxprob).
   banking77 keeps 76 of its 77 options, so its stratum is one source: a large-K effect and a banking77 effect are the
   same number here.
 - Dh and Hh compute BSR per pass: both run at the same microbatch (queue.sh: `BATCH_FALLBACK=1`).
+
+## External context
+
+- Decision 1.0 (https://vllm-sr.ai/decision-paper.pdf) sec 3.2: "This supports variable output cardinality without
+  enforcing permutation invariance."; sec 5: "Neither architecture enforces candidate-order invariance, and a closed
+  candidate set cannot express an abstention outcome that the application has not supplied." The second sentence is
+  why this eval is built rather than assumed: detection here reads the reward, not a supplied none option.
+- Lu & Wu 2610.03387 report cross-task threshold transfer failure for their Jev policy (69.3% false rejection transferring
+  DBpedia -> Emotion); D6 and the `frr_policy` numbers are our copy of that test, fit on v7 and applied frozen to t4.
+- Zhong et al. 2609.39496: menu rejection collapse is arithmetic-dependent; their pNONE threshold fix is our `pnone`
+  readout (offer a none option and threshold its mass).
+- Li et al. 2609.33209: single-label coherence -- the readout `mass` sums the per-option sigmoids sigmoid(r_i), ~1 on an
+  answerable row and ~0 on an allwrong one; its per-arm mean/median summary is the coherence check.
+- Azizi et al. 2610.12292 (option-channel attack): option isolation does NOT defend it -- the attack edits the scored
+  option's own name or the judged text. Stated as a non-claim: nothing here measures or claims robustness to that.
 
 ## Results
 
