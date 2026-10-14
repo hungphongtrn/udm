@@ -401,6 +401,24 @@ HL -1.5 / -2.5 / -6.0 / -6.7 / +4.4 / -7.1 (subset order as in the table).
 Same 15,000 rows: H **35.78** (raw 51.91, breadth 34.89; 15,000 ok) vs D 36.91 eager / 37.01 graphed and v7-base
 33.60: H - D = -1.1 to -1.2, H - v7-base = +2.2. The `dindex_subset.py pair` log is not in the archive.
 
+### Position effect on RewardBench 2 (A / D, shuffled runs)
+
+The shuffled runs store scores in the dataset's order, and the shuffle is `random.Random(f"order:0:{id}")`, so each
+prompt's displayed order can be rebuilt offline. Non-Ties prompts with one chosen and three rejected (n 1763), strict
+win (chosen above all three):
+
+| Arm | Win, chosen shown 1st / 2nd / 3rd / 4th (n 404 / 415 / 465 / 479) | Top-scored candidate shown 1st / 2nd / 3rd / 4th | Dataset-order run (chosen always 1st) |
+|---|---|---|---|
+| A | .822 / .547 / .462 / .434 | .458 / .217 / .176 / .149 | .837 |
+| D | .750 / .747 / .697 / .653 | .272 / .263 / .247 / .218 | .767 |
+
+The rebuild checks out: each arm's win with the chosen shown first matches its dataset-order run (.822 vs .837, .750 vs
+.767). A prefers the first position strongly (top-scored shown first 46% vs 25% chance; win falls 39 points from 1st to
+4th). D's effect is a mild primacy: top-scored share 27 -> 22%, win -10 points from 1st to 4th (z about 3.2;
+chi-square on the top-scored positions 12.1 on 3 df, p .007). Pointwise H has none by
+construction (one request per candidate). On the dev sets' short options the same effect is small (D 0-3 of 60 / 36
+permutation flips across seeds).
+
 ### Readings
 
 - Dropping the listing costs decision accuracy where the pre-registered risks put it: the score type on v7 (amazon /
