@@ -48,7 +48,7 @@ dindex() {  # E0.1: Kev's softmax on the shared Decision Index subset, every A s
 }
 wait_for() { until [ -e "$Q/$1.done" ] || [ -e "$Q/$1.failed" ]; do sleep 300; done; }
 
-( step G0-parity 0 .venv/bin/python scripts/abstain/fork_check.py parity --device cuda
+( step G0-parity 0 .venv/bin/python scripts/abstain/fork_check.py parity --kernels reference --device cuda
   arm Hh 0; arm Dh 0; full; arm Ah 0; arm Ch 0; arm PLh 0; dindex ) &
 ( arm PRh 1; arm P2Bh 1; arm PUh 1; arm PBh 1; arm Sh 1; arm STh 1; arm HBh 1 ) &
 ( arm P2h 2; arm R2Bh 2; arm R2h 2; arm Rh 2; arm RYh 2; wait_for Ch; arm Fh 2 ) &

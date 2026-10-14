@@ -187,11 +187,12 @@ the yes/no prompt comes with it; RYh vs Rh already measured that pair on the lis
 
 Gates (each a printed line of `fork_check.py` or a column of the report):
 
-- **G0 fork exactness** (before training; `fork_check.py parity`, Qwen3.5-0.8B-Base, 10 development records including a
-  banking77 one, fp32, checkpointing on): rewards within 1e-4 and the relative error of every LoRA and head gradient
-  within 1e-3 of one naive causal row per option. On CUDA fla rounds fp32 dots like TF32, so the fork is read against
-  the floor of the naive rows batched differently (printed beside it). A failure stops the PF arms' interpretation, not
-  the queue.
+- **G0 fork exactness** (before training; `fork_check.py parity --kernels reference`, Qwen3.5-0.8B-Base, 10 development
+  records including a banking77 one, fp32, checkpointing on): rewards within 1e-4 and the relative error of every LoRA and
+  head gradient within 1e-3 of one naive causal row per option, with transformers' PyTorch DeltaNet kernels and no TF32.
+  With the bound CUDA kernels (fla, causal-conv1d) even naive vs naive1 misses these thresholds, so that run is only
+  read against its floor; causal-conv1d is CUDA-only, so `--device cpu` cannot give the reference either. A failure stops
+  the PF arms' interpretation, not the queue.
 - **G1 ranking** = the top1 guard: v7 development top1 within 2 points of Ah (t4 top1 printed beside it).
 - **G2 detection**: AUROC and FPR@95TPR on the minimal pairs (v7 and t4). The allwrong condition is a real forward pass
   without the true option for every arm; for a pointwise arm it equals masking the true option's reward (checked by the
@@ -227,7 +228,7 @@ the large stratum at the v7 threshold, PRh.maxr_k and PUh.maxr do not; P2h and P
 ```bash
 .venv/bin/python -m pytest tests/test_allwrong.py tests/test_pref.py
 # G0 alone (minutes; queue.sh runs it first):
-.venv/bin/python scripts/abstain/fork_check.py parity --base Qwen/Qwen3.5-0.8B-Base --format chat_pointwise --n 10
+.venv/bin/python scripts/abstain/fork_check.py parity --kernels reference --base Qwen/Qwen3.5-0.8B-Base --format chat_pointwise --n 10
 # everything (data build, G0, D1/E0 evals, the 16 h arms with eval_arm.sh + eval_allwrong.sh, the Decision Index subset
 # of A seeds 0-2 (DI=0 skips), G4) on GPUs 0,1,2:
 nohup scripts/abstain/queue.sh > runs/queue.log 2>&1 &
@@ -280,4 +281,7 @@ chat arm, ~1.2 h Ah, ~2.3 h per stage 2, ~2 h per Decision Index subset: ~25-30 
 
 ## Results
 
-Not run.
+- **G0 PASS** (2026-10-14, jason, one 3090, `--kernels reference`): fork vs naive max |d reward| 2.03e-05, gradient
+  relative error 8.13e-06 (worst tensor 1.89e-05), against naive1's floor of 2.48e-05 / 8.17e-06 (worst 2.08e-05); 10
+  questions, K 2/4/77. The bound-kernel run on CUDA printed FAIL with naive1 itself at 3.25e-03 / 1.40e-03 and the fork
+  at 7.60e-03 / 2.19e-03: TF32-class kernel rounding, not a fork error. Everything else: not run.
