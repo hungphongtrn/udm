@@ -337,54 +337,88 @@ scripts/pref/pack_results.sh pref-H-HP.tgz                # logs, metrics, eval 
 
 ## Results
 
-To be filled after the runs, in the parent doc's format (per arm and seed: dev top1 / ECE / flip rate, then the RB2
-table, the probe, and H's DI subset row).
+Archive `pref-results.tgz` (`pack_results.sh`, code at `fc08457`). Clean rows as in the parent doc (v7 n = 1264, t4
+n = 656); G = temperature / Platt fit on the run's decision-v7 calibration split (n = 1148). HB / HBL not run.
 
-### Seed 0, partial (HP, HL dev; A, D, HP RewardBench 2; H Decision Index)
+### Verdict (seed 0)
 
-Pasted from the training machine (no archive yet). Missing for the rules: H's dev eval (`eval_arm.sh runs/pref/H/seed0`),
-H's and HL's RewardBench 2, the `dindex_subset.py pair` log for H. Clean rows as in the parent doc (v7 n = 1264, t4
-n = 656); G = temperature / Platt fit on the run's decision-v7 calibration split (n = 1148).
+| Claim | Rule | Numbers | Verdict |
+|---|---|---|---|
+| Format (H vs D) | 1: within 1 point of D seed 0 on both dev sets | v7 85.84 vs 87.42 (-1.58), t4 78.51 vs 79.73 (-1.22) | **refuted**; seeds 1-2 not run |
+| Format, gain clauses | 3: probe Δ exactly 0; t4 >= D or fewer flips | probe 0 / 0, 0 of 64; flips v7 0/60 vs 0/60, t4 0/36 vs 1/36 | probe passes; flip clause a sign only |
+| Ranking (H vs D) | 4: H's RB2 >= D's - 0.5 | 0.6653 vs 0.6641 (+0.12) | passes |
+| Data (HP vs H) | 4 + 5: HP >= H + 1 on RB2 and on 4 of 6 subsets; within 1 point on dev | RB2 0.6517 vs 0.6653 (-1.36), ahead on 3 of 6; t4 -1.98 | **refuted** (loses >= 1 point overall) |
+| Loss (HL vs H) | 5: refuted if HL > 1 point below H on either dev set | v7 +0.79, t4 -1.22 | **refuted** |
 
-| Arm | v7 top1 | t4 top1 | v7 ECE raw / G | t4 ECE raw / G | v7 NLL raw / G | t4 NLL raw / G | T | Flip v7 / t4 | v7 \|r\| p99 |
-|---|---|---|---|---|---|---|---|---|---|
-| D (parent, seed 0) | 87.42 | 79.73 | .053 / .036 | .124 / .088 | .430 / .374 | | 1.47 | 0 / 1 | 7.1 |
-| HP | 86.55 | 76.52 | .059 / .032 | .152 / .107 | .464 / .385 | .852 / .631 | 1.60 | 0 / 0 (n 60 / 36) | 8.0 |
-| HL | 86.63 | 77.29 | .075 / .030 | .146 / .087 | .476 / .356 | .838 / .569 | 1.90 | 0 / 0 (n 60 / 36) | 11.0 |
+The format refutation rests on D's seed 0, its best seed on both sets. Paired by question, H vs D seed 0 is
+-1.58 ± 1.07 on v7 (McNemar p .006, 14 H-only vs 34 D-only right) and -1.22 ± 1.93 on t4 (p .28). Against D seeds
+1 / 2, H is -0.47 / -0.71 on v7 and +0.61 / -0.30 on t4, and against D's 3-seed means -0.92 / -0.30, inside the bound.
+The rule fixed seed 0 before the runs, so the verdict stands; rule 2's H seeds 1-2 are what would test the 3-seed
+means, and the rule does not allow them after a seed-0 failure.
 
-Per type, t4 top1 (HP / HL): choice 73.81 / 75.60 (n 336), noul 83.57 / 82.86 (n 280), score 50.0 / 52.5 (n 40).
-Sigmoid ECE after Platt, v7 / t4: HP .009 / .077, HL .014 / .066 (D .010 / .063 in the parent doc).
+### Development sets
 
-RewardBench 2, candidates shuffled per prompt (`--order_seed 0`), 0 unsupported prompts for every arm:
-
-| Arm | Factuality | Precise IF | Math | Safety | Focus | Ties | Overall | no-Ties | Probe mean / max \|Δ\|, flips | Wall |
+| Arm | v7 top1 | t4 top1 | v7 ECE raw / G | t4 ECE raw / G | v7 NLL raw / G | t4 NLL raw / G | T | Flip v7 / t4 | v7 / t4 pooled AUROC | v7 \|r\| p99 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| A (pointer, kev) | 0.3747 | 0.3063 | 0.4481 | 0.5556 | 0.8545 | 0.5289 | 0.5113 | 0.5078 | 1.04 / 4.02, 13 of 64 | 622 s |
-| D (scalar, chat) | 0.6232 | 0.3500 | 0.5792 | 0.7733 | 0.8970 | 0.7618 | 0.6641 | 0.6445 | 0.577 / 1.64, 6 of 64 | 1,527 s |
-| HP (pointwise + pairs) | 0.7137 | 0.3187 | 0.7268 | 0.6556 | 0.8646 | 0.6309 | 0.6517 | 0.6559 | 0 / 0, 0 of 64 | 1,988 s |
+| D (parent, seed 0) | 87.42 | 79.73 | .054 / .036 | .124 / .088 | .430 / .374 | .708 / .561 | 1.47 | 0 / 1 (n 60 / 36) | | 7.1 |
+| H | 85.84 | 78.51 | .062 / .035 | .125 / .092 | .442 / .375 | .771 / .592 | 1.56 | 0 / 0 | .981 / .898 | 7.5 |
+| HP | 86.55 | 76.52 | .059 / .032 | .150 / .107 | .464 / .385 | .852 / .630 | 1.60 | 0 / 0 | .979 / .903 | 8.0 |
+| HL | 86.63 | 77.29 | .075 / .030 | .146 / .087 | .476 / .356 | .838 / .569 | 1.90 | 0 / 0 | .982 / .882 | 11.0 |
 
-Decision Index 0.3 subset (same 15,000 rows): H **35.78** (raw 51.91, breadth 34.89; 15,000 ok) vs D 36.91 eager /
-37.01 graphed and v7-base 33.60: H - D = -1.1 to -1.2, H - v7-base = +2.2.
+D seeds 1 / 2: v7 86.31 / 86.55, t4 77.90 / 78.81. Sigmoid ECE after Platt, v7 / t4: H .009 / .062, HP .009 / .077,
+HL .014 / .066, D .010 / .063.
 
-Readings:
+Per type, top1 (H / D seed 0 / D 3-seed mean):
 
-- Shuffling is what the A/D RewardBench 2 numbers needed: A falls 0.755 -> 0.511 (Factuality 0.81 -> 0.37, Math
-  0.91 -> 0.45), D 0.696 -> 0.664. A's dataset-order score was mostly a first-position preference.
-- Set independence holds where it was built to: HP's probe Δ is exactly 0 (rule 3's implementation check passes for the
-  pointwise format; H's own probe not yet seen), and HP / HL flip 0 of 60 / 36 permutations.
-- HP vs D on RewardBench 2: -1.24 overall, +1.14 no-Ties. Gains Factuality +9.1, Math +14.8; losses Safety -11.8,
-  Ties -13.1, Focus -3.2, Precise IF -3.1. [INFERENCE] HelpSteer3's helpfulness preferences reward compliance, which
-  Safety's refusal-preferred prompts penalize. The data claim compares HP with H, whose RB2 is not in yet.
-- HP and HL are both 0.8-0.9 below D seed 0 on v7 (inside D's own seed spread: 3-seed mean 86.76) but 3.2 / 2.4 below on
-  t4 (D's 3-seed mean 78.81, sd .91). Both are H plus one change, so [INFERENCE] H's t4 is likely below D's as well; rule
-  1 needs H's t4 >= 78.73 and v7 >= 86.42.
-- HL vs H (loss rule) once H is in: supported if H's t4 <= 76.29 with H's v7 <= 87.63, or both within 1 point and H's
-  G NLL above .356 (v7) and .569 (t4); refuted if H's v7 > 87.63 or t4 > 78.29.
-- HP vs H (data rule): HP within 1 point of H on dev needs H in [85.55, 87.55] on v7 and [75.52, 77.52] on t4; the RB2
-  clause needs H's overall <= 0.6417 and HP ahead on >= 4 subsets.
-- Calibration: after G, HL has the lowest v7 / t4 softmax NLL and ECE of HP / HL / D (v7 .356 vs D .374; t4 ECE .087 vs
-  D .088); A is still lower (v7 G NLL .348, t4 G ECE .070).
-- Decision Index: H trails D by ~1.1 index points and keeps most of D's gain over v7-base; per-benchmark pairing pending.
+| Set | choice | noul | score |
+|---|---|---|---|
+| v7 (n 576 / 448 / 240) | 90.97 / 91.67 / 91.61 | 91.74 / 92.63 / 92.41 | 62.50 / 67.50 / 64.58 |
+| t4 (n 336 / 280 / 40) | 76.49 / 78.27 / 76.69 | 85.00 / 86.43 / 85.60 | 50.00 / 45.00 / 49.17 |
+
+Where H's gap to D is (tasks >= 2 points off D's 3-seed mean): v7 amazon 57.5 vs 62.9 (n 80), yelp 67.5 vs 70.0,
+banking77 81.25 vs 83.75, composition_conditional 75.0 vs 81.25 (n 16); t4 mmlu 62.5 vs 71.7 (n 80, -1.1 points of the
+overall), composition_held_or_not 78.1 vs 83.3; H ahead on t4 composition_held_conditional 90.6 vs 74.0 (n 32) and
+emotion 58.75 vs 55.0. `none_present` on t4: H .722 vs D .528 (all three D seeds; n 36).
+
+### RewardBench 2
+
+Candidates shuffled per prompt for A / D (`--order_seed 0`); H / HP / HL score each candidate alone. 0 unsupported
+prompts for every arm; chat arms graphed.
+
+| Arm | Factuality | Precise IF | Math | Safety | Focus | Ties | Overall | no-Ties | Pooled AUROC (all / no-Ties) | Probe mean / max \|Δ\|, flips | Wall |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A (pointer, kev) | 0.3747 | 0.3063 | 0.4481 | 0.5556 | 0.8545 | 0.5289 | 0.5113 | 0.5078 | .780 / .734 | 1.04 / 4.02, 13 of 64 | 622 s |
+| D (scalar, chat) | 0.6232 | 0.3500 | 0.5792 | 0.7733 | 0.8970 | 0.7618 | 0.6641 | 0.6445 | .858 / .817 | 0.577 / 1.64, 6 of 64 | 1,527 s |
+| H (pointwise) | 0.6063 | 0.3125 | 0.6995 | 0.7622 | 0.9111 | 0.7004 | **0.6653** | 0.6583 | .855 / .803 | 0 / 0, 0 of 64 | 1,997 s |
+| HP (pointwise + pairs) | 0.7137 | 0.3187 | 0.7268 | 0.6556 | 0.8646 | 0.6309 | 0.6517 | 0.6559 | .836 / .810 | 0 / 0, 0 of 64 | 1,988 s |
+| HL (pointwise, listwise loss) | 0.5916 | 0.2875 | 0.6393 | 0.6956 | 0.9556 | 0.6297 | 0.6332 | 0.6339 | .828 / .780 | 0 / 0, 0 of 64 | 1,993 s |
+
+Differences from H, points: D +1.7 / +3.7 / -12.0 / +1.1 / -1.4 / +6.1; HP +10.7 / +0.6 / +2.7 / -10.7 / -4.6 / -6.9;
+HL -1.5 / -2.5 / -6.0 / -6.7 / +4.4 / -7.1 (subset order as in the table).
+
+### Decision Index 0.3 subset (secondary)
+
+Same 15,000 rows: H **35.78** (raw 51.91, breadth 34.89; 15,000 ok) vs D 36.91 eager / 37.01 graphed and v7-base
+33.60: H - D = -1.1 to -1.2, H - v7-base = +2.2. The `dindex_subset.py pair` log is not in the archive.
+
+### Readings
+
+- Dropping the listing costs decision accuracy where the pre-registered risks put it: the score type on v7 (amazon /
+  yelp ratings, -5.0 vs D seed 0 on n 240, about 0.95 of the 1.58-point gap), where the listing shows the scale
+  side by side, and mmlu on t4 (-9 to -10 points, n 80), whose options are meant to be compared. banking77, the
+  many-way listing case, costs only 1-2.5 points.
+- What it buys is set independence: probe Δ exactly 0 for H / HP / HL (D: 6 of 64 flips), 0 permutation flips on both
+  sets, and on t4 `none_present` 72 vs 53. That's the property the format was for; on these sets it doesn't pay
+  for the accuracy.
+- Ranking is a wash: H ties D on RewardBench 2 (+0.12 overall, pooled AUROC .855 vs .858), trading Math (+12.0)
+  against Ties (-6.1) and Precise IF (-3.7). Rule 4's H clause passes, so the ranking side doesn't reject the format.
+- Mixing HelpSteer3 pairs (HP) moves RB2 by subset, not overall: Factuality +10.7 and Math +2.7 against Safety -10.7,
+  Ties -6.9, Focus -4.6, and costs 2.0 t4 points (paired p .047). [INFERENCE] HelpSteer3's helpfulness preferences
+  reward compliance, which Safety's refusal-preferred prompts penalize.
+- The listwise loss (HL) gains nothing over H: +0.79 v7, -1.22 t4, -3.2 RB2 overall; its one gain is the lowest
+  softmax NLL after G (v7 .356 vs H .375, t4 .569 vs .592), at a larger reward scale (|r| p99 11.0) and T 1.90.
+- Absolute-grader arms (HB / HBL) are compared with H, now measured: t4 pooled AUROC .898, RB2 pooled AUROC .855
+  (`rb2_pooled.py`); HB is supported only at >= .908 and >= .865 with top1 >= 84.84 v7 / 77.51 t4.
 
 ### RewardBench 2, dataset order (superseded)
 

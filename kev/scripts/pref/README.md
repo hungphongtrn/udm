@@ -44,9 +44,6 @@ RUN_F=0 scripts/pref/wave1.sh 0         # skip F (run later: scripts/pref/run_ar
 
 # Download results: logs, training metrics, eval outputs (no weights) into one tgz; prints each run's splits and G's n_calib
 scripts/pref/pack_results.sh pref-AE.tgz
-# Pointwise review bundle: fill missing H eval + H/HL RewardBench 2 (GPU), CPU analyses into review/ (DI pair/flips of H,
-# H retempered at its G T, rb2_pooled, reward_report tables), then one tgz of runs/pref + runs/dindex (no weights/rows)
-GPU=0 scripts/pref/review_gpu.sh && scripts/pref/review_results.sh && scripts/pref/review_pack.sh
 
 # FINAL VERDICT ONLY (locked test split, read once):
 TEST=1 scripts/pref/eval_arm.sh runs/pref/C/seed0     # each finished run; skips splits already done
