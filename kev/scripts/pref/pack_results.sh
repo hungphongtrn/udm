@@ -9,7 +9,7 @@ OUT=${1:-pref-results-$(date +%Y%m%d-%H%M).tgz}
 git rev-parse HEAD > runs/pref/COMMIT
 LIST=$(mktemp)
 find runs/pref -name .ipynb_checkpoints -prune -o -type f \( -name COMMIT -o -name '*.train.log' -o -path '*/seed*/train.log' \
-  -o -path '*/seed*/training_*.json' -o -path '*/eval/*' -o -name '*.manifest.json' -o -name rewardbench2.json \) -print | sort > "$LIST"
+  -o -path '*/seed*/training_*.json' -o -path '*/eval/*' -o -name '*.manifest.json' -o -name 'rewardbench2*.json' \) -print | sort > "$LIST"
 tar czf "$OUT" -T "$LIST"
 for run in runs/pref/*/seed*/; do
   for split in "$run"eval/*/; do
