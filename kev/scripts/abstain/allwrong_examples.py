@@ -102,6 +102,9 @@ def main():
             sorted(keys, key=lambda k: -fb[k]["maxprob"])[:args.n],
         f"median maxr drop ({runs[0][0]})": by_drop[max(0, mid - args.n // 2):mid - args.n // 2 + args.n],
         f"maxr did not drop ({runs[0][0]}, largest rise)": [k for k in by_drop[::-1] if drop[k] >= 0][:args.n],
+        f"maxr misses with a shared option on top ({runs[0][0]}, allwrong maxr >= {t:+.2f}, highest first)":
+            sorted([k for k in keys if fb[k]["maxr"] >= t and f["allwrong"][k]["keys"][int(np.argmax(
+                f["allwrong"][k]["logits"]))] in f["answerable"][k]["keys"]], key=lambda k: -fb[k]["maxr"])[:args.n],
     }
     for title, ks in picks.items():
         print(f"\n## {title}")

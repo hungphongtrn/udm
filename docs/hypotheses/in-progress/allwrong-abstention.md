@@ -326,14 +326,15 @@ Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the t
   9430 Ah maxprob .993 on the allwrong row, maxr +3.31 → −10.05; mnli 1093 Ah 1.000, +6.25 → −8.53 (P2h .877, +4.93 →
   −7.07); agnews 536 Ah .963, +5.62 → −7.81. P2h's shared options keep their reward to ~0.02 (e.g. agnews 536 world
   −10.21 / −10.19), as a pointwise arm should; Ah's move with the set, both ways (dbpedia 17540 officeholder −2.90 →
-  −10.14; dbpedia 35579 plant −13.24 → −4.79). On v7, the Ah.maxr threshold that keeps 95% of the answerable rows Ah
-  gets right (−0.27) flags 92.0% of their allwrong rows. The misses seen so far share one pattern: the arm doubts
-  the gold option on the answerable row and rates the wrong option that only the allwrong row holds as right (dbpedia
-  35579 gold naturalplace Ah −10.58, allwrong-only village +8.54, P2h −6.42 / +6.50; mnli 5166 neutral −7.85,
-  contradiction +6.31; trec 99 entity −4.18, number +4.11). So the answerable row was "right" by elimination, and
-  the maxr there was already low, which flags it. Softmax gave that same row .999 (mnli 5166). These misses are the
-  arm's own wrong belief (or a mislabelled / ambiguous item); no readout of the option set can flag them. The script's
-  first print did not list that option; fixed since.
+  −10.14; dbpedia 35579 plant −13.24 → −4.79). Flag rates on the same 410 v7 pairs, each readout thresholded to keep
+  95% of the answerable rows: Ah maxr (−0.267) flags .920 of the allwrong rows, Ah maxprob (.925) .639; P2h maxr
+  (+1.419) .946, P2h maxprob (.879) .717. The reward flags 25-28 points more than softmax in both arms. Of Ah's 33
+  maxr misses, only 8 have the wrong option that only the allwrong row holds on top (P2h 9 of 22). Those 8 are the
+  arm believing that option over the gold one (dbpedia 35579 gold naturalplace Ah −10.58, allwrong-only village +8.54;
+  mnli 5166 neutral −7.85, contradiction +6.31; trec 99 entity −4.18, number +4.11). That is model error or a
+  mislabelled / ambiguous item, which no readout of the option set can flag. The other 25 (P2h 13) are a wrong
+  option present in both rows scoring above the threshold; the script's "maxr misses with a shared option on top"
+  section prints them (not yet read). The script's first print did not list the allwrong-only option; fixed since.
 - **D1 (anchored training) inconclusive.** F.maxr − A.maxprob +.0254 [+.0123, +.0391] / +.0953 [+.0655, +.1276]:
   positive on both, below the 0.05 bar on v7; F's top1 86.16 passes the guard vs A 87.74. The anchor adds nothing over
   the readout: A.maxr (.9721 / .8525) is at or above F.maxr (.9640 / .8438). A.maxprob across seeds 0-2: v7 .9342-.9445,
