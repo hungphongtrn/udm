@@ -1,6 +1,6 @@
 # External abstention benchmark: Lu & Wu's Decision Model Benchmark
 
-Status: todo (see ../README.md). Commands are kev-relative: run them from the repo root as ./kev.sh <command>.
+Status: in-progress (see ../README.md). Commands are kev-relative: run them from the repo root as ./kev.sh <command>.
 
 ## Question
 
@@ -20,9 +20,10 @@ models do not?
 
 ## Arms
 
-No training. Score existing checkpoints, in this order (`kev/scripts/external/README.md` "Arms to run first"): `Ah`
-seed 0, `A` seed 0, then the arm the all-wrong screen selects (D9-D10 winner; P2h if
-`../todo/pointwise-rcr-mlp.md` supports it).
+No training. Score existing checkpoints (`kev/scripts/external/README.md` "Arms to run first"): `A` seed 0 (done), the
+full-data `C`, `D`, `F` (done), then the half-data group `P2h`, `Ah`, `PRh`, `P2Bh` (launched 2026-10-15). P2h is not
+the screen's selected arm (`../done/pointwise-rcr-mlp.md`: not the contribution at seed 0); it runs here to test whether
+its pointwise scores carry a threshold across tasks better than its controls, with Ah as the matched half-data baseline.
 
 ## Decision rule (pre-registered)
 
@@ -110,3 +111,31 @@ rewarder rows come from the selected arm (D9) and the trained full-data rewarder
 - Within-task transfer (count k2 → k3/k4/k5/k13 and name natural → neutral, 13 rows): `maxr_k` passes 13/13,
   `maxprob_T` 10/13 (Emotion k2 → k4/k5 F 0.31/0.38; Emotion k5 F 0.157), `pnone_T` 10/13 (DBpedia k2 → k13 D 0.705;
   Emotion k2 → k4/k5 D ≤ 0.006).
+
+**C, D, F seed 0 (2026-10-15; `kev/runs/dmb/{c,d,f}-s0-core{-scored,-policies}`).** Rule 3 passes for all three
+(39,168 predictions each, 0 interface failures). Cross-task rows, k2 natural, `maxr_k` D / F; pass as above; target
+local detection in parentheses only where it decides the row:
+
+|Source → target|A|C|D|F|
+|---|---|---|---|---|
+|AG News → DBpedia|0.995 / 0.019 pass|pass|pass|pass|
+|AG News → Emotion|0.765 / **0.361**|0.873 / **0.554**|0.873 / **0.560**|0.783 / **0.422**|
+|DBpedia → AG News|**0.667** / 0.008|pass|pass|pass|
+|DBpedia → Emotion|0.566 / **0.223**|0.789 / **0.428**|0.825 / **0.470**|0.819 / **0.488**|
+|Emotion → AG News|**0.475** / 0.000|**0.450** / 0.008|**0.283**|**0.508**|
+|Emotion → DBpedia|0.938 / 0.007 pass|**0.860** (0.998)|**0.798** (0.993)|**0.893** (0.995)|
+|**Passing rows**|2/6|2/6|2/6|2/6|
+|Rows with F above Jev's published `negative_max` F|3/6|3/6|3/6|5/6|
+
+- No arm passes rule 2's bar: each passes 2 of 6 rows, and C/D/F pass a different two (AG News ↔ DBpedia) than A.
+  Training for an absolute score (C, F) or a direct one (D) did not give a task-independent threshold: Emotion as target
+  over-rejects (F 0.42-0.56, worse than A's 0.22-0.36), Emotion as source under-detects AG News.
+- Other readouts, cross-task passing rows: `maxprob_T` A 1, C 1, D 2, F 0; `pnone_T` A 3, C 2, D 2, F 3.
+- Within-task transfer (13 rows): `maxr_k` passes A 13, C 10, D 11, F 9; `maxprob_T` A 10, C 11, D 9, F 11; `pnone_T`
+  A 10, C 8, D 9, F 8.
+- Local (fit and apply on one task, 16 groups), mean detection `maxr` A .672, C .678, D .661, F .695 against `maxprob`
+  A .543, C .421, D .461, F .433: the raw-score readout is the gain on every arm, as on the all-wrong pairs.
+
+**Running (2026-10-15):** `GPU=GPU-76303229-... nohup ./kev.sh scripts/external/core.sh P2h Ah PRh P2Bh >
+kev/runs/dmb-core-h.log 2>&1 &` (full GPU id in the launch log). Question for P2h: on the cross-task rows, is its
+`maxr_k` false rejection at most Ah's while its detection is higher?

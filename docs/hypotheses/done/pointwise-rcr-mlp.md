@@ -1,6 +1,6 @@
 # Question: is P2h the contribution (pointwise prompt + MLP head + RCR), and which component carries the gain?
 
-Status: todo (see ../README.md). Commands below are kev-relative: run them from the repo root as ./kev.sh <command>.
+Status: done (see ../README.md): P2h is not the contribution at seed 0. Commands below are kev-relative: run them from the repo root as ./kev.sh <command>.
 
 **Priority: this is the novel contribution.** Pre-registered here before any P2h run; arms already built.
 
@@ -102,4 +102,26 @@ BATCH_FALLBACK=1 ./kev.sh scripts/pref/run_arm.sh P2h 0 2
 
 ## Results
 
-Not run.
+2026-10-15, seed 0, half data (`kev/runs/allwrong/report-half`; full tables in `../in-progress/allwrong-abstention.md`
+§Results). AUROC `maxr`, v7 / t4; dAUROC with the 95% CI:
+
+| Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 | P2h − arm, v7 | P2h − arm, t4 |
+|---|---|---|---|---|
+| **P2h** | 86.16 / 77.74 | .9572 / .8483 | | |
+| R2Bh | 85.76 / 77.59 | .9539 / .8492 | +.0033 [−.0059, +.0122] | −.0010 [−.0149, +.0137] |
+| P2Bh | 86.23 / 77.29 | .9390 / .8368 | +.0181 [+.0108, +.0265] | +.0115 [+.0018, +.0224] |
+| PRh | 86.63 / 77.13 | .9595 / .8393 | −.0023 [−.0086, +.0038] | +.0089 [+.0007, +.0178] |
+| Dh | 86.08 / 77.90 | .9197 / .8577 | +.0375 [+.0268, +.0493] | −.0094 [−.0232, +.0058] |
+
+- **Rule 1: not the contribution.** P2h beats no leave-one-out arm (largest gain +.0181 vs P2Bh, under 0.03). It is not
+  worse than all three, but its v7 dev top1 (86.16) is below PRh's (86.63) and P2Bh's (86.23).
+- **Rule 2:** removing the listing (P2h − R2Bh) is inside noise on both sets. The RCR loss (P2h − P2Bh) is the one
+  component with a CI above 0 on both sets, +.018 / +.012, below the 0.03 bar. The MLP head (P2h − PRh) is inside noise
+  on v7 and +.009 on t4; D10 does not adopt it (not worse, lower top1).
+- **Rule 3:** top1 guard passes (Ah 85.21). Threshold transfer at risk 0.10 (t4 coverage / risk / t4-fit coverage):
+  P2h.maxr .240 / .130 / .231; P2h.maxr_k .304 / .212 fails risk. Shared-option |Δ reward| on v7: max .081, mean .0041
+  (PRh .084), not the 0 a pointwise arm should give up to rounding; RewardBench 2 not run yet.
+- **Gates:** G0 passed (allwrong doc §Results). G4 (K = 1) is still queued; a G4 failure would void the pointwise
+  numbers above, not reverse this verdict.
+- The Lu & Wu benchmark still scores P2h with Ah, PRh and P2Bh (`../in-progress/external-luwu-benchmark.md`), to see
+  whether its pointwise score carries a threshold across tasks; that does not reopen this doc's rule.
