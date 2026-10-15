@@ -81,12 +81,20 @@ def main():
     drop = {k: fb[k]["maxr"] - fa[k]["maxr"] for k in keys}
     by_drop = sorted(keys, key=drop.get)
     mid = len(by_drop) // 2
-    # the maxr threshold that keeps 95% of answerable rows: below it the reward flags the allwrong row
+    # per run and readout: the threshold that keeps 95% of the answerable rows (flag iff score < it), the share of allwrong
+    # rows it flags, and of the maxr misses how many have the + option (only the allwrong row holds it) on top
+    for name, _ in runs:
+        d = data[name]
+        za = {k: np.array(d["answerable"][k]["logits"], float) for k in keys}
+        zb = {k: np.array(d["allwrong"][k]["logits"], float) for k in keys}
+        line = []
+        for ro in ("maxr", "maxprob"):
+            tt = float(np.quantile([stats(za[k])[ro] for k in keys], 0.05))
+            line.append(f"{ro} threshold {tt:+.3f} flags {np.mean([stats(zb[k])[ro] < tt for k in keys]):.3f}")
+            if ro == "maxr": miss = [k for k in keys if stats(zb[k])["maxr"] >= tt]
+        plus_top = sum(d["allwrong"][k]["keys"][int(np.argmax(zb[k]))] not in d["answerable"][k]["keys"] for k in miss)
+        print(f"  {name} at 95% answerable kept: {'; '.join(line)}; maxr misses {len(miss)}, + option on top in {plus_top}")
     t = float(np.quantile([fa[k]["maxr"] for k in keys], 0.05))
-    top_hidden = sum(int(np.argmax(f["allwrong"][k]["logits"])) == f["allwrong"][k]["keys"].index(
-        next(x for x in f["allwrong"][k]["keys"] if x not in f["answerable"][k]["keys"])) for k in keys)
-    print(f"  {runs[0][0]}: maxr 95%-keep threshold {t:+.2f}; allwrong rows flagged {np.mean([fb[k]['maxr'] < t for k in keys]):.3f}; "
-          f"allwrong top option is the + option on {top_hidden}/{len(keys)}")
     picks = {
         f"softmax confident, reward flags it (allwrong maxr < {t:+.2f}, top {args.n} allwrong maxprob, {runs[0][0]})":
             sorted([k for k in keys if fb[k]["maxr"] < t], key=lambda k: -fb[k]["maxprob"])[:args.n],
