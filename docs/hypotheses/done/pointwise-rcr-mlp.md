@@ -121,7 +121,7 @@ BATCH_FALLBACK=1 ./kev.sh scripts/pref/run_arm.sh P2h 0 2
 - **Rule 3:** top1 guard passes (Ah 85.21). Threshold transfer at risk 0.10 (t4 coverage / risk / t4-fit coverage):
   P2h.maxr .240 / .130 / .231; P2h.maxr_k .304 / .212 fails risk. Shared-option |Δ reward| on v7: max .081, mean .0041
   (PRh .084), not the 0 a pointwise arm should give up to rounding; RewardBench 2 not run yet.
-- **Gates:** G0 passed (allwrong doc §Results). G4 (K = 1) is still queued; a G4 failure would void the pointwise
-  numbers above, not reverse this verdict.
+- **Gates:** G0 passed and G4 (K = 1, reference kernels, fp32) passed on every pointwise arm here (P2h, P2Bh, PRh,
+  PLh, PUh, PBh, Hh): max |Δ sigmoid| < 1e-3, no argmax change (allwrong doc §Results).
 - The Lu & Wu benchmark still scores P2h with Ah, PRh and P2Bh (`../in-progress/external-luwu-benchmark.md`), to see
   whether its pointwise score carries a threshold across tasks; that does not reopen this doc's rule.

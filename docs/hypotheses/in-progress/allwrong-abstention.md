@@ -303,8 +303,7 @@ Every arm finished (no `.failed`), HBh last at 14:07 UTC. Numbers are AUROC on t
 the 95% CI from the reports; top1 is `reward_report.json raw.overall.top1` as the report prints it. `report-half` has no
 Fh − Ch row: that difference is from Fh's `eval/allwrong-*/rows.json` with the report's formulas (the reimplementation
 reproduces the report's Rh − Fh, STh − R2h and D6 rows to the printed digits; its CIs use another bootstrap stream).
-Open: G4 with reference kernels (the bound-kernel run is not a reading, below) and RewardBench 2 on the h arms (never
-queued); commands in §Commands.
+G4 passed with reference kernels (below). Open: RewardBench 2 on the h arms (never queued); commands in §Commands.
 
 | Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 | | Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 |
 |---|---|---|---|---|---|---|
@@ -411,18 +410,14 @@ Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the t
   holds; Rh within 0.02 of Fh holds (+.003 / +.003).
 - **Shared-option |Δ reward|** on pointwise arms: mean 3-8e-3 but max .08-.17 on v7 (HBh .110 / .111) and .558 for PRh
   on t4, more than rounding of an exact pass should give; listing arms 4-14.
-- **G4 not read yet.** The queue ran `fork_check.py k1` with the bound kernels (fla / causal-conv1d, fp32 weights), and
-  every pointwise arm printed FAIL: max |d sigmoid| Hh 1.56e-2, PBh 1.23e-2, PRh 4.71e-3, PUh 5.28e-3, P2h 1.29e-3, P2Bh
-  1.48e-2, PLh 4.14e-3; max |d reward| .05-.11; argmax flips 0/10 on every arm (10 records, 125 options). That is the
-  same situation as G0's bound-kernel FAIL: together (K rows batched and padded) and alone (one row) run different
-  shapes through TF32-class kernels, and k1 had no reference mode, so the run cannot separate rounding from a set
-  dependence. `k1 --kernels reference` (added after the run: PyTorch kernels, no TF32, graphs off, the backbone upcast
-  to fp32) applies the threshold as stated; until it runs, the pointwise arms' numbers (D5, D8-D11) stand
-  provisionally. Its first version left the backbone in bf16 (every arm trains with `--weights_dtype bf16`, which
-  `Checkpoint.load` keeps): RYh read max |d sigmoid| 1.96e-02, |d reward| 0.135, no flip in 10 questions, still bf16
-  rounding; the upcast was added after it. RYh and HBh
-  (chat_yesno, pointwise as well) were not in the queue's G4 list; the rerun covers them. The differences are ~1% of
-  the answerable → allwrong maxr gap (+6 → −7, above), so a rounding reading is unlikely to move an AUROC beyond its
-  CI [inference].
+- **G4 PASS** (2026-10-15, `fork_check.py k1 --kernels reference` at 34b44a2, exact fp32, on all nine pointwise arms:
+  Hh, PBh, PRh, PUh, P2h, P2Bh, PLh, RYh, HBh; 10 records, 125 options each): max |d sigmoid| < 1e-3 and 0 argmax
+  flips on every arm (`kev/runs/queue/G4ref-<arm>.log`). Each option scores the same alone as in its set, so the
+  pointwise arms' numbers (D5, D8-D11) stand. The queue's first G4 ran on the bound kernels (fla / causal-conv1d) and
+  printed FAIL on the seven arms it covered (max |d sigmoid| Hh 1.56e-2, PBh 1.23e-2, PRh 4.71e-3, PUh 5.28e-3, P2h
+  1.29e-3, P2Bh 1.48e-2, PLh 4.14e-3; |d reward| .05-.11; no argmax flip), and a first reference run with the
+  backbone still in bf16 (every arm trains with `--weights_dtype bf16`, which `Checkpoint.load` keeps) printed FAIL on
+  RYh (1.96e-2, |d reward| .135, no flip). Both were rounding: the together pass (K rows batched and padded) and the
+  alone pass (one row) round differently in TF32-class kernels or bf16, as in G0's bound-kernel FAIL.
 - Pointwise arms rarely pick a none option when it is offered on an allwrong row (v7 .57-.69, t4 .23-.37, HBh
   included) against .85-.91 on the listing arms: none rows are dropped from pointwise training.
