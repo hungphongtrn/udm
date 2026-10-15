@@ -163,7 +163,10 @@ def k1(a):
     if model.input_format not in CHAT_FORMATS: raise SystemExit(f"{a.run}: {model.input_format} is not a chat format")
     if a.kernels == "reference":
         if not model.hybrid: raise SystemExit("--kernels reference rebinds the hybrid (Qwen3.5) backbone's kernels")
-        reference_kernels(model); model.graphs = None
+        # the arms train on a bf16 backbone (--weights_dtype bf16), which Checkpoint.load keeps whatever is asked: upcast
+        # it (the same weights computed in fp32; the adapter is already fp32), as chat_speed_check.py does
+        reference_kernels(model); model.graphs = None; model.lm.float()
+        if torch.cuda.is_available(): torch.cuda.empty_cache()
     print(f"kernels ({a.kernels}): {kernel_report(model) if model.hybrid else 'attention only'}; graphs "
           f"{'off' if model.graphs is None else 'on'}; {next(model.lm.parameters()).dtype}")
     recs = records(a.suite, a.n, a.min_k)

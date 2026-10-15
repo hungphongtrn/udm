@@ -416,8 +416,11 @@ Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the t
   1.48e-2, PLh 4.14e-3; max |d reward| .05-.11; argmax flips 0/10 on every arm (10 records, 125 options). That is the
   same situation as G0's bound-kernel FAIL: together (K rows batched and padded) and alone (one row) run different
   shapes through TF32-class kernels, and k1 had no reference mode, so the run cannot separate rounding from a set
-  dependence. `k1 --kernels reference` (added after the run: PyTorch kernels, no TF32, graphs off) applies the
-  threshold as stated; until it runs, the pointwise arms' numbers (D5, D8-D11) stand provisionally. RYh and HBh
+  dependence. `k1 --kernels reference` (added after the run: PyTorch kernels, no TF32, graphs off, the backbone upcast
+  to fp32) applies the threshold as stated; until it runs, the pointwise arms' numbers (D5, D8-D11) stand
+  provisionally. Its first version left the backbone in bf16 (every arm trains with `--weights_dtype bf16`, which
+  `Checkpoint.load` keeps): RYh read max |d sigmoid| 1.96e-02, |d reward| 0.135, no flip in 10 questions, still bf16
+  rounding; the upcast was added after it. RYh and HBh
   (chat_yesno, pointwise as well) were not in the queue's G4 list; the rerun covers them. The differences are ~1% of
   the answerable → allwrong maxr gap (+6 → −7, above), so a rounding reading is unlikely to move an AUROC beyond its
   CI [inference].
