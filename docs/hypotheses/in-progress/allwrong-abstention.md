@@ -326,15 +326,26 @@ Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the t
   9430 Ah maxprob .993 on the allwrong row, maxr +3.31 → −10.05; mnli 1093 Ah 1.000, +6.25 → −8.53 (P2h .877, +4.93 →
   −7.07); agnews 536 Ah .963, +5.62 → −7.81. P2h's shared options keep their reward to ~0.02 (e.g. agnews 536 world
   −10.21 / −10.19), as a pointwise arm should; Ah's move with the set, both ways (dbpedia 17540 officeholder −2.90 →
-  −10.14; dbpedia 35579 plant −13.24 → −4.79). Flag rates on the same 410 v7 pairs, each readout thresholded to keep
-  95% of the answerable rows: Ah maxr (−0.267) flags .920 of the allwrong rows, Ah maxprob (.925) .639; P2h maxr
-  (+1.419) .946, P2h maxprob (.879) .717. The reward flags 25-28 points more than softmax in both arms. Of Ah's 33
-  maxr misses, only 8 have the wrong option that only the allwrong row holds on top (P2h 9 of 22). Those 8 are the
-  arm believing that option over the gold one (dbpedia 35579 gold naturalplace Ah −10.58, allwrong-only village +8.54;
-  mnli 5166 neutral −7.85, contradiction +6.31; trec 99 entity −4.18, number +4.11). That is model error or a
-  mislabelled / ambiguous item, which no readout of the option set can flag. The other 25 (P2h 13) are a wrong
-  option present in both rows scoring above the threshold; the script's "maxr misses with a shared option on top"
-  section prints them (not yet read). The script's first print did not list the allwrong-only option; fixed since.
+  −10.14; dbpedia 35579 plant −13.24 → −4.79). Flag rates on the pairs Ah answers right, each readout thresholded to
+  keep 95% of their answerable rows:
+
+  |Suite (pairs)|Ah maxr|Ah maxprob|P2h maxr|P2h maxprob|Ah / P2h maxr misses (+ option on top)|
+  |---|---|---|---|---|---|
+  |v7 (410)|.920 (−0.267)|.639 (.925)|.946 (+1.419)|.717 (.879)|33 (8) / 22 (9)|
+  |t4 (187)|.647 (−1.991)|.337 (.643)|.658 (−2.353)|.273 (.579)|66 (23) / 64 (19)|
+
+  The reward flags 23-39 points more than softmax in both arms and both suites. The maxr misses are of two kinds. In
+  the fewer, the wrong option that only the allwrong row holds tops it: the arm believes it over the gold one
+  (dbpedia 35579 gold naturalplace Ah −10.58, allwrong-only village +8.54; mnli 5166 neutral −7.85, contradiction
+  +6.31; trec 99 entity −4.18, number +4.11). In the rest, a shared option that already scored high on the answerable
+  row, next to the gold one, tops it. These are mostly near-synonym labels: banking77 2203 transfer_fee_charged
+  +5.59 / top_up_by_bank_transfer_charge +4.39 (Ah; P2h +6.60 / +5.04), 2406 getting_spare_card / get_physical_card,
+  trec 438 abbreviation +5.93 / description +1.25 → +4.49 on the allwrong row, sciq 686 a +2.99 / c +2.97. Either
+  way the arm rates a second option as right; that is model error, an ambiguous item, or a mislabel, not a readout
+  failure, and no readout of the option set can flag it. P2h avoids some Ah misses of the second kind
+  (banking77 3015 unable_to_verify_identity Ah +4.33 / +3.86, P2h −4.95 on both rows; 692 pending_transfer Ah
+  +2.88 / +3.28, P2h −6.61), so the arms differ in which options they rate as also right. The script's first print
+  did not list the allwrong-only option; fixed since.
 - **D1 (anchored training) inconclusive.** F.maxr − A.maxprob +.0254 [+.0123, +.0391] / +.0953 [+.0655, +.1276]:
   positive on both, below the 0.05 bar on v7; F's top1 86.16 passes the guard vs A 87.74. The anchor adds nothing over
   the readout: A.maxr (.9721 / .8525) is at or above F.maxr (.9640 / .8438). A.maxprob across seeds 0-2: v7 .9342-.9445,
