@@ -304,10 +304,17 @@ the minimal pairs, v7 / t4, dAUROC with the 95% CI; top1 is `reward_report.json 
 
 Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the top1 guard (lowest is Ah itself).
 
-- **D1 inconclusive.** F.maxr − A.maxprob +.0254 [+.0123, +.0391] / +.0953 [+.0655, +.1276]: positive on both, below the
-  0.05 bar on v7; F's top1 86.16 passes the guard vs A 87.74. The gain is the readout, not the anchor: A.maxr − A.maxprob
-  +.0336 / +.1041, and A.maxr (.9721 / .8525) is at or above F.maxr (.9640 / .8438). F.maxr − A.pnone −.0103 / +.0136.
-  A.maxprob across seeds 0-2: v7 .9342-.9445, t4 .7379-.7485 (the seed spread is ~0.01).
+- **Readout: the scalar reward beats the slot probability on every arm read** (the "A.maxr − A.maxprob" row of the
+  comparison table): `maxr − maxprob` A +.0336 [+.0225, +.0451] / +.1041 [+.0790, +.1303], Ah +.0690 [+.0530, +.0858] /
+  +.1190 [+.0930, +.1449], C +.0996 / +.1310, F +.0927 / +.1474 (CIs in `report-full`). Only A on v7 is
+  under 0.05. It also transfers a threshold where `maxprob` does not (D6: Ah.maxr passes, Ah.maxprob fails at 0.78x), and
+  it holds on Lu & Wu's benchmark (local detection `maxr` .66-.70 vs `maxprob` .42-.54, `external-luwu-benchmark.md`).
+  It ties the none option rather than beating it (F.maxr − A.pnone −.0103 / +.0136), and unlike the none option it needs
+  no none option in the prompt.
+- **D1 (anchored training) inconclusive.** F.maxr − A.maxprob +.0254 [+.0123, +.0391] / +.0953 [+.0655, +.1276]:
+  positive on both, below the 0.05 bar on v7; F's top1 86.16 passes the guard vs A 87.74. The anchor adds nothing over
+  the readout: A.maxr (.9721 / .8525) is at or above F.maxr (.9640 / .8438). A.maxprob across seeds 0-2: v7 .9342-.9445,
+  t4 .7379-.7485 (the seed spread is ~0.01).
 - **D2 partial (Fh pending).** Rh − Ch +.0255 [+.0157, +.0352] / −.0029 [−.0149, +.0101]: Rh does not beat Ch.
 - **D4: MLP head adopted** on the not-worse branch: R2h − Rh +.0022 [−.0021, +.0067] / +.0042 [−.0078, +.0159], top1
   86.39 vs 85.60.
