@@ -1,6 +1,7 @@
 # Question: do a few target labels restore the reward's abstention threshold on a new task family?
 
-Status: todo (see ../README.md). Commands below are kev-relative: run them from the repo root as ./kev.sh <command>.
+Status: done, supported (see ../README.md). Commands below are kev-relative: run them from the repo root as
+./kev.sh <command>.
 Branch: `hyp/few-label-target-threshold`, cut from `hyp/allwrong-abstention` (not `dev`: the report script and the
 all-wrong evals it reads are unmerged there). No training.
 
@@ -91,4 +92,52 @@ CPU only, numpy; minutes **[estimate]**. Paste the "few-label target fit" block 
 
 ## Results
 
-Not run.
+Run 2026-10-15 on the training machine, command above, seed 0 for both arms and for the draws. Pools: 448 v7 and 240
+t4 questions scored by both arms (answerable row + allwrong twin each). No deviations from the plan.
+
+Lu & Wu policy (answerable false rejection ≤ 5%), allwrong detection / answerable false rejection; few-label cells are
+held-out means over 200 draws, p10–p90 of detection in brackets:
+
+|Arm · readout|v7 in-sample|v7 frozen → t4|t4 ceiling|n=20|n=40|n=80|
+|---|---|---|---|---|---|---|
+|Ah · maxr|.826 / .049|.621 / .154|.467 / .050|.495 / .082|.483 / .069 [.385, .575]|.464 / .057|
+|Ah · maxprob|.507 / .049|.508 / .242|.200 / .050|.228 / .083|.208 / .068 [.110, .305]|.190 / .056|
+|P2h · maxr|.862 / .049|.704 / .221|.421 / .050|.463 / .074|.457 / .070 [.344, .585]|.435 / .059|
+|P2h · maxprob|.484 / .049|.387 / .142|.171 / .050|.228 / .083|.211 / .074 [.085, .355]|.173 / .057|
+
+Rule, at n = 40 on `maxr`:
+
+|Clause|Ah|P2h|
+|---|---|---|
+|(a) false rejection ≤ .08|.069 ✓|.070 ✓|
+|(b) detection ≥ ceiling − .05|.483 ≥ .417 ✓|.457 ≥ .371 ✓|
+|(c) `maxr` − `maxprob` ≥ .05|+.275 ✓|+.246 ✓|
+|Refuted at n = 80?|no (.464 vs ceiling .467; `maxr` > `maxprob`)|no (.435 vs .421)|
+|Smallest n within .05 of ceiling, frr ≤ .08|40 (n = 20 frr .082)|20|
+
+Readings:
+
+- **The frozen v7 threshold over-rejects on t4**: 15% (Ah) and 22% (P2h) of answerable rows, 3–4× the 5% budget.
+  Its higher t4 detection (.621 / .704) is bought with those rejections. 40 target questions bring false rejection
+  back to ~7%, and 80 bring it to ~6%. The fit still runs above 5% on held-out rows (small-sample optimism of an
+  in-sample quantile), and single draws reach p90 .115 at n = 40. A hard 5% guarantee needs a finite-sample
+  (conformal-rank) threshold, not this policy.
+- **The t4 gap is ranking, not offset** (the reported, unjudged reading). At the same 5% false rejection, `maxr`
+  detects .826 / .862 of allwrong rows on v7 but at most .467 / .421 on t4. No t4 threshold closes that gap, so the
+  level does not carry across families up to an offset. Part of it is offset (fixed by labels), and roughly
+  .36–.44 detection is lost in the ranking itself.
+- **The reward still beats softmax after re-fitting**: `maxr` detects 2.2–2.3× what `maxprob` does at n = 40. On
+  t4, `maxprob` cannot exceed .20 / .17 detection at 5% false rejection.
+- `maxr_k`, `noisy_or`, `mass` and `lse` sit within .02 of `maxr` at every n (not judged). Ah and P2h are within
+  .03 of each other.
+- An 80-question v7 sample is worse than the full v7 fit as a transfer source: t4 false rejection is .338 (Ah) and
+  .404 (P2h) `maxr`. Few labels help only when they come from the target family.
+
+## Verdict
+
+**Supported** (pre-registered rule): for both arms, 40 labelled t4 questions recover the t4 ceiling within .05 at
+≤ 8% false rejection, and `maxr` keeps a ≥ .05 lead over `maxprob` (+.25–.28). Scope: this establishes that the
+threshold is cheap to re-fit per family. It does not establish a generalised reward level: the t4 ceiling is
+.36–.44 below v7's detection, so most of the cross-family loss is in the reward's ranking on t4. Raising that
+ceiling is a training question (a reward that ranks t4 allwrong rows lower), not a calibration one. Single seed
+per arm.
