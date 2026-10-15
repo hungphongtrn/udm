@@ -5,8 +5,9 @@
     .venv/bin/python scripts/abstain/fork_check.py parity --base Qwen/Qwen3.5-0.8B-Base --format chat_pointwise --n 10
     # G0 with transformers' PyTorch reference kernels (no fla / causal-conv1d, no TF32): the thresholds apply as stated
     .venv/bin/python scripts/abstain/fork_check.py parity --kernels reference
-    # G4, on a trained pointwise checkpoint: each option scored alone (a batch of one branch) against all K together
-    .venv/bin/python scripts/abstain/fork_check.py k1 --run runs/pref/PRh/seed0 --n 200
+    # G4, on a trained pointwise checkpoint: each option scored alone (a batch of one branch) against all K together,
+    # with the reference kernels (exact fp32, eager; the gate's 1e-3 applies as stated only there)
+    .venv/bin/python scripts/abstain/fork_check.py k1 --run runs/pref/PRh/seed0 --kernels reference
 
 parity: LoRA (rank --lora, every target) on the base, LoRA B and the head drawn at random (zero-initialised B would
 leave A without gradient), dropout off, gradient checkpointing as in training (--checkpointing). The loss is a fixed
@@ -28,7 +29,12 @@ k1: the checkpoint in eval mode, inference path (graphed passes where they fit, 
 the K rewards scored together against each option's branch scored alone from the same prefix: max |d reward|,
 max |d sigmoid(reward)| and how many questions' argmax would change. The same tokens at the same positions, so only
 kernel rounding may differ; a set-dependent number here is a bug, not a property of the model. (Set independence across
-different option sets is allwrong_report.py's shared-option |dr|.)
+different option sets is allwrong_report.py's shared-option |dr|.) With --kernels bound (default) the together and
+alone passes differ in batch shape (the K rows batched and padded vs one row) under fla's TF32-class kernels, so the
+gate reads that rounding as well (the bound run of 2026-10-15 on the seven pointwise h arms: max |d sigmoid| 1.3e-3 to
+1.6e-2, |d reward| 0.05-0.11, no argmax flip, against G0's bound-kernel floor of 3e-3 on an untrained 0.8B);
+--kernels reference rebinds the kernels as parity does and drops any CUDA graphs (KEV_CUDA_GRAPHS=1), so both sides
+run chat_hidden's eager passes in exact fp32 and the 1e-3 threshold applies as stated.
 """
 import argparse
 import functools
@@ -155,6 +161,11 @@ def parity(a):
 def k1(a):
     tok, model = Checkpoint(a.run).load(a.device)
     if model.input_format not in CHAT_FORMATS: raise SystemExit(f"{a.run}: {model.input_format} is not a chat format")
+    if a.kernels == "reference":
+        if not model.hybrid: raise SystemExit("--kernels reference rebinds the hybrid (Qwen3.5) backbone's kernels")
+        reference_kernels(model); model.graphs = None
+    print(f"kernels ({a.kernels}): {kernel_report(model) if model.hybrid else 'attention only'}; graphs "
+          f"{'off' if model.graphs is None else 'on'}; {next(model.lm.parameters()).dtype}")
     recs = records(a.suite, a.n, a.min_k)
     dr = dp = 0.0; flips = nq = nopt = 0
     for rec in recs:
@@ -182,8 +193,10 @@ def main():
     p.add_argument("--format", choices=CHAT_FORMATS, default="chat_pointwise"); p.add_argument("--head", choices=("scalar", "mlp"), default="scalar")
     p.add_argument("--lora", type=int, default=16); p.add_argument("--dtype", choices=("fp32", "bf16"), default="fp32")
     p.add_argument("--checkpointing", type=int, choices=(0, 1), default=1)
-    p.add_argument("--kernels", choices=("bound", "reference"), default="bound",
-                   help="bound: what transformers bound at import (fla / causal-conv1d); reference: its PyTorch functions, no TF32")
+    for s in (p, k):
+        s.add_argument("--kernels", choices=("bound", "reference"), default="bound",
+                       help="bound: what transformers bound at import (fla / causal-conv1d); reference: its PyTorch functions, no TF32"
+                            " (k1: CUDA graphs off as well)")
     k.add_argument("--run", required=True)
     a = ap.parse_args()
     parity(a) if a.cmd == "parity" else k1(a)

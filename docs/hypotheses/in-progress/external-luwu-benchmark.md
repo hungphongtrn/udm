@@ -21,7 +21,7 @@ models do not?
 ## Arms
 
 No training. Score existing checkpoints (`kev/scripts/external/README.md` "Arms to run first"): `A` seed 0 (done), the
-full-data `C`, `D`, `F` (done), then the half-data group `P2h`, `Ah`, `PRh`, `P2Bh` (launched 2026-10-15). P2h is not
+full-data `C`, `D`, `F` (done), then the half-data group `P2h`, `Ah`, `PRh`, `P2Bh` (all done 2026-10-15). P2h is not
 the screen's selected arm (`../done/pointwise-rcr-mlp.md`: not the contribution at seed 0); it runs here to test whether
 its pointwise scores carry a threshold across tasks better than its controls, with Ah as the matched half-data baseline.
 
@@ -166,5 +166,88 @@ published `negative_max` F on the same row in the last column:
   News / DBpedia, 0-2% TREC), and Emotion full-set accuracy drops from 0.517 (`full_plain`) to 0.437-0.462
   (`full_with_none`): offering NONE costs Emotion accuracy rather than catching its errors.
 
-Ah, PRh, P2Bh still running (`kev/runs/dmb-core-h.log`). Question for P2h vs Ah (open until Ah lands): on the
-cross-task rows, is P2h's `maxr_k` false rejection at most Ah's while its detection is higher?
+**PRh seed 0 (2026-10-15; `kev/runs/dmb/prh-s0-core-policies`).** The pasted policies report carried no arm label; it
+is PRh by its temperature: the AG News k2 thresholds `maxprob` 0.930 and `maxprob_T` 0.709 give T = 2.905, PRh's
+fitted 2.908 (Ah's is 1.7-1.85). Rule 3 (scorer validation) was not in the paste. Same rows and columns as P2h:
+
+|Source → target|PRh `maxr_k` D / F (local)|Pass|Jev F|
+|---|---|---|---|
+|AG News → DBpedia|0.995 / 0.029 (0.993)|pass|0.002|
+|AG News → Emotion|0.729 / **0.331** (0.325)|fail|0.120|
+|DBpedia → AG News|0.875 / 0.025 (0.892)|pass|0.142|
+|DBpedia → Emotion|0.693 / **0.301** (0.325)|fail|0.434|
+|Emotion → AG News|**0.683** / 0.025 (0.892)|fail|0.008|
+|Emotion → DBpedia|0.971 / 0.002 (0.993)|pass|0.002|
+|**Passing rows**|**3/6**| | |
+|Rows with F above Jev's|3/6| | |
+
+- 3/6 is not a majority, so rule 2 would be inconclusive with PRh as the selected arm. F is above Jev's on 3/6 rows,
+  also not a majority. PRh is the first arm to pass both A's Emotion → DBpedia row and C/D/F's AG News ↔ DBpedia pair.
+- Against P2h (same half data, linear vs MLP pointwise head): PRh's Emotion-target false rejection is lower (0.331 /
+  0.301 vs 0.476 / 0.554) and Emotion-source detection higher (0.683 / 0.971 vs 0.442 / 0.893); the other rows match
+  within 0.005. The 80-text `maxr_k` thresholds are 2.57 (AG News), 2.87 (DBpedia), 5.05 (Emotion): Emotion still sits
+  off-scale, but at 2x the other tasks rather than P2h's 3-5x.
+- Other readouts, cross-task passing rows: `maxprob_T` 1 (DBpedia → AG News), `pnone_T` 2 (AG News ↔ DBpedia).
+- Within-task transfer (13 rows): `maxr_k` 11 (fails Emotion k2 → k5 D 0.181 vs local 0.331; Emotion k5 natural →
+  neutral F 0.169), `maxprob_T` 10 (Emotion k2 → k4/k5 F 0.373/0.434; Emotion k2 natural → neutral D 0.102 vs 0.223),
+  `pnone_T` 9 (DBpedia k2 → k13 D 0.600 vs 0.986; Emotion k2 → k4/k5 D ≤ 0.024; Emotion k4 natural → neutral F 0.151).
+- Local (16 groups), mean detection `maxr` .701 vs `maxprob` .547 (+.154).
+
+**Ah seed 0 (2026-10-15; `kev/runs/dmb/ah-s0-core-policies`).** Identified by the AG News k2 `maxprob_T` threshold
+−0.808, which the user's `grep` of that file printed; rule 3 was not in the paste. Ah is the half-data Kev pointer arm,
+so `maxr_k` tests its logit, as for A. Same rows and columns as P2h, with `Ah.maxprob_T` (rule 2's in-house softmax
+reference) beside it:
+
+|Source → target|Ah `maxr_k` D / F (local)|Pass|Ah `maxprob_T` D / F (local)|Pass|Jev F|
+|---|---|---|---|---|---|
+|AG News → DBpedia|1.000 / 0.024 (0.995)|pass|**0.571** / 0.000 (0.967)|fail|0.002|
+|AG News → Emotion|0.813 / **0.422** (0.416)|fail|0.458 / **0.277** (0.253)|fail|0.120|
+|DBpedia → AG News|0.858 / 0.025 (0.917)|pass|0.917 / **0.242** (0.375)|fail|0.142|
+|DBpedia → Emotion|0.693 / **0.313** (0.416)|fail|0.952 / **0.735** (0.253)|fail|0.434|
+|Emotion → AG News|**0.733** / 0.008 (0.917)|fail|**0.175** / 0.025 (0.375)|fail|0.008|
+|Emotion → DBpedia|0.981 / 0.010 (0.995)|pass|**0.283** / 0.000 (0.967)|fail|0.002|
+|**Passing rows**|**3/6**| |**0/6**| | |
+|Rows with F above Jev's|3/6 (Emotion → AG News ties at 0.008)| |4/6| | |
+
+- Ah's logit passes the same 3/6 rows as PRh, and its softmax confidence passes none. `maxprob_T` repeats the paper's
+  failure: DBpedia → Emotion F 0.735 (Jev 0.693 in the paper, 0.434 in their published row). The 80-text `maxr_k`
+  thresholds are 1.86 (AG News), 3.26 (DBpedia), 5.81 (Emotion): Emotion's is 3x AG News's, so Emotion as target
+  still over-rejects (F 0.42 / 0.31).
+- **Open question answered: no.** On the cross-task `maxr_k` rows neither pointwise arm has false rejection ≤ Ah's
+  together with higher detection, except DBpedia → AG News (PRh 0.875 / 0.025, P2h 0.908 / 0.025 vs Ah 0.858 / 0.025).
+  PRh's lower Emotion-target F (0.331 / 0.301 vs 0.422 / 0.313) comes with lower detection (0.729 / 0.693 vs
+  0.813 / 0.693), and Emotion → AG News detection is lower (0.683 vs 0.733). P2h is above Ah's F on both Emotion-target
+  rows (0.476 / 0.554). At half data, the pointwise reward does not transfer thresholds better than the Kev logit.
+- Other readouts, cross-task passing rows: `pnone_T` 3 (AG News ↔ DBpedia, Emotion → DBpedia).
+- Within-task transfer (13 rows): `maxr_k` 13/13 (as A), `maxprob_T` 8 (DBpedia k2 → k13 F 0.150 is on the edge;
+  fails Emotion k2 → k4/k5 F 0.367/0.452, Emotion k2 natural → neutral F 0.151, Emotion k4/k5 natural → neutral D
+  0.066/0.084 vs local 0.193/0.205), `pnone_T` 11 (Emotion k2 → k4/k5 D 0.042/0.012).
+- Local (16 groups), mean detection `maxr` .702 vs `maxprob` .495 (+.206; PRh +.154, P2h +.167).
+
+**P2Bh seed 0 (2026-10-15; `kev/runs/dmb/p2bh-s0-core{-scored,-policies}`).** Rule 3 passes (39,168 predictions for
+39,168 requests, 0 interface failures, scorer accepted); the same holds for the Ah and PRh runs in the archive, so their
+"rule 3 not in the paste" above is now confirmed. P2Bh is Hh with the MLP head (Bradley-Terry + BSR on the pointwise
+prompt, no RCR). Same rows and columns as P2h:
+
+|Source → target|P2Bh `maxr_k` D / F (local)|Pass|Jev F|
+|---|---|---|---|
+|AG News → DBpedia|0.974 / 0.021 (0.969)|pass|0.002|
+|AG News → Emotion|0.747 / **0.355** (0.307)|fail|0.120|
+|DBpedia → AG News|0.833 / 0.025 (0.875)|pass|0.142|
+|DBpedia → Emotion|0.705 / **0.301** (0.307)|fail|0.434|
+|Emotion → AG News|**0.592** / 0.017 (0.875)|fail|0.008|
+|Emotion → DBpedia|0.886 / 0.000 (0.969)|pass|0.002|
+|**Passing rows**|**3/6**| | |
+|Rows with F above Jev's|3/6| | |
+
+- The same three rows as PRh and Ah pass; Emotion as target over-rejects and Emotion as source under-detects AG News
+  (0.592; PRh 0.683, Ah 0.733, P2h 0.442). The 80-text `maxr_k` thresholds are 0.088 (AG News), 0.487 (DBpedia),
+  3.321 (Emotion): Emotion sits 7-38x off the other tasks' scale, further than any other arm.
+- Against P2h (RCR vs BT + BSR, both MLP pointwise): P2Bh's Emotion-target F is lower (0.355 / 0.301 vs 0.476 / 0.554)
+  and Emotion → DBpedia passes (0.886 vs P2h's 0.893 failing by .005, on a lower local 0.969), and Emotion → AG News
+  detection is higher (0.592 vs 0.442; both fail). Neither loss puts Emotion on scale.
+- Other readouts, cross-task passing rows: `maxprob_T` 1, `pnone_T` 3.
+- Within-task transfer (13 rows): `maxr_k` 10 (fails Emotion k2 → k4/k5 D 0.145/0.114 vs local 0.247/0.380; Emotion
+  k5 natural → neutral F 0.157), `maxprob_T` 10 (DBpedia k2 → k13 F 0.302; Emotion k2 → k4/k5 F 0.277/0.386),
+  `pnone_T` 10 (DBpedia k2 → k13 D 0.564 vs 0.983; Emotion k2 → k4/k5 D ≤ 0.018).
+- Local (16 groups), mean detection `maxr` .686 vs `maxprob` .518 (+.168).

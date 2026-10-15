@@ -54,8 +54,8 @@ wait_for() { until [ -e "$Q/$1.done" ] || [ -e "$Q/$1.failed" ]; do sleep 300; d
 ( arm P2h 2; arm R2Bh 2; arm R2h 2; arm Rh 2; arm RYh 2; wait_for Ch; arm Fh 2 ) &
 wait
 S=runs/pref; s=seed$SEED
-for a in Hh PBh PRh PUh P2h P2Bh PLh; do
-  [ -f "$S/$a/$s/head.pt" ] && step "G4-$a" 0 .venv/bin/python scripts/abstain/fork_check.py k1 --run "$S/$a/$s" --device cuda
+for a in Hh PBh PRh PUh P2h P2Bh PLh RYh HBh; do
+  [ -f "$S/$a/$s/head.pt" ] && step "G4-$a" 0 .venv/bin/python scripts/abstain/fork_check.py k1 --run "$S/$a/$s" --device cuda --kernels reference
 done
 echo "[$(date -Is)] queue finished: $(ls "$Q" | grep -c '\.done$') done, failed: $(cd "$Q" && ls *.failed 2>/dev/null | tr '\n' ' ')"
 echo "gates: $(cd "$Q" && grep -h -E 'G[04] (PASS|FAIL)' G0-parity.log G4-*.log 2>/dev/null | tr '\n' ' ')"

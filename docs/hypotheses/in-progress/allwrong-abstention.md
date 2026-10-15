@@ -199,8 +199,8 @@ Gates (each a printed line of `fork_check.py` or a column of the report):
   without the true option for every arm; for a pointwise arm it equals masking the true option's reward (checked by the
   shared-option |d reward|).
 - **G3 threshold transfer**: D6, with the K strata.
-- **G4 K = 1**: `fork_check.py k1` on each pointwise checkpoint: every option scored alone vs the K together, max |d
-  sigmoid| < 1e-3 and no argmax change.
+- **G4 K = 1**: `fork_check.py k1 --kernels reference` on each pointwise checkpoint: every option scored alone vs the K
+  together, max |d sigmoid| < 1e-3 and no argmax change.
 
 Rules (half data, seed 0; beats / not worse / guard as above):
 
@@ -234,6 +234,16 @@ the large stratum at the v7 threshold, PRh.maxr_k and PUh.maxr do not; P2h and P
 # of A seeds 0-2 (DI=0 skips), G4) on GPUs 0,1,2:
 nohup scripts/abstain/queue.sh > runs/queue.log 2>&1 &
 # progress: runs/queue.log; per arm runs/queue/<arm>.log and .done/.failed; gates: runs/queue/G0-parity.log, G4-*.log.
+# G4 alone, the nine pointwise arms (chat_pointwise and chat_yesno) on three GPUs (exact fp32, eager; logs
+# runs/queue/G4ref-<arm>.log):
+for g in 0 1 2; do (i=0; for a in Hh PBh PRh PUh P2h P2Bh PLh RYh HBh; do [ $((i++ % 3)) = $g ] && CUDA_VISIBLE_DEVICES=$g \
+  .venv/bin/python scripts/abstain/fork_check.py k1 --run runs/pref/$a/seed0 --kernels reference > runs/queue/G4ref-$a.log 2>&1; done) & done; wait
+grep -H -E 'kernels|K=1|G4' runs/queue/G4ref-*.log
+# RewardBench 2 on the h arms the docs compare (~35 min per pointwise arm on a 3090), then the pooled metrics:
+for g in 0 1 2; do (i=0; for a in PRh P2h P2Bh PLh R2h HBh Ah; do [ $((i++ % 3)) = $g ] && CUDA_VISIBLE_DEVICES=$g \
+  .venv/bin/python scripts/pref/rewardbench2.py --run runs/pref/$a/seed0 --out runs/pref/$a/seed0/rewardbench2.json \
+  > runs/queue/rb2-$a.log 2>&1 && .venv/bin/python scripts/pref/rb2_pooled.py runs/pref/$a/seed0/rewardbench2.json \
+  >> runs/queue/rb2-$a.log 2>&1; done) & done; wait
 # Then the two reports (queue.sh prints them):
 .venv/bin/python scripts/abstain/allwrong_report.py --arm A=runs/pref/A/seed0 --arm A1=runs/pref/A/seed1 \
   --arm A2=runs/pref/A/seed2 --arm C=runs/pref/C/seed0 --arm F=runs/pref/F/seed0 --out runs/allwrong/report-full
@@ -287,11 +297,14 @@ chat arm, ~1.2 h Ah, ~2.3 h per stage 2, ~2 h per Decision Index subset: ~25-30 
   questions, K 2/4/77. The bound-kernel run on CUDA printed FAIL with naive1 itself at 3.25e-03 / 1.40e-03 and the fork
   at 7.60e-03 / 2.19e-03: TF32-class kernel rounding, not a fork error.
 
-### Queue partial (2026-10-15, seed 0; `kev/runs/allwrong/report-full`, `report-half` run on the 12 finished h arms)
+### Queue complete (2026-10-15, seed 0; `kev/runs/allwrong/report-full`, `report-half` on all 18 h arms)
 
-Finished: Ah Ch Rh R2h R2Bh Dh Hh PBh PRh PUh P2h P2Bh, and the D1 evals of A seeds 0-2 / C / F. Still queued: PLh, Sh,
-STh, RYh, Fh, HBh, then G4 and RewardBench 2, so D2 (needs Fh), D3, D5 and D10's PLh half are open. Numbers are AUROC on
-the minimal pairs, v7 / t4, dAUROC with the 95% CI; top1 is `reward_report.json raw.overall.top1` as the report prints it.
+Every arm finished (no `.failed`), HBh last at 14:07 UTC. Numbers are AUROC on the minimal pairs, v7 / t4, dAUROC with
+the 95% CI from the reports; top1 is `reward_report.json raw.overall.top1` as the report prints it. `report-half` has no
+Fh − Ch row: that difference is from Fh's `eval/allwrong-*/rows.json` with the report's formulas (the reimplementation
+reproduces the report's Rh − Fh, STh − R2h and D6 rows to the printed digits; its CIs use another bootstrap stream).
+Open: G4 with reference kernels (the bound-kernel run is not a reading, below) and RewardBench 2 on the h arms (never
+queued); commands in §Commands.
 
 | Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 | | Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 |
 |---|---|---|---|---|---|---|
@@ -301,6 +314,9 @@ the minimal pairs, v7 / t4, dAUROC with the 95% CI; top1 is `reward_report.json 
 | R2h | 86.39 / 76.98 | .9616 / .8455 | | PUh | 86.31 / 75.91 | .9575 / .8476 |
 | R2Bh | 85.76 / 77.59 | .9539 / .8492 | | P2h | 86.16 / 77.74 | .9572 / .8483 |
 | Dh | 86.08 / 77.90 | .9197 / .8577 | | P2Bh | 86.23 / 77.29 | .9390 / .8368 |
+| Sh | 85.21 / 78.51 | .9473 / .8415 | | PLh | 85.44 / 79.73 | .9611 / .8476 |
+| RYh | 85.60 / 77.59 | .9621 / .8501 | | STh | 87.03 / 78.35 | .9539 / .8414 |
+| Fh | 86.23 / 78.05 | .9564 / .8379 | | HBh | 85.76 / 79.73 | .9589 / .8473 |
 
 Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the top1 guard (lowest is Ah itself).
 
@@ -350,28 +366,60 @@ Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the t
   positive on both, below the 0.05 bar on v7; F's top1 86.16 passes the guard vs A 87.74. The anchor adds nothing over
   the readout: A.maxr (.9721 / .8525) is at or above F.maxr (.9640 / .8438). A.maxprob across seeds 0-2: v7 .9342-.9445,
   t4 .7379-.7485 (the seed spread is ~0.01).
-- **D2 partial (Fh pending).** Rh − Ch +.0255 [+.0157, +.0352] / −.0029 [−.0149, +.0101]: Rh does not beat Ch.
-- **D4: MLP head adopted** on the not-worse branch: R2h − Rh +.0022 [−.0021, +.0067] / +.0042 [−.0078, +.0159], top1
-  86.39 vs 85.60.
-- **D6 at risk 0.10** (t4 coverage / risk / t4-fit coverage): Ah.maxprob .158 / .066 / .202 (0.78x, fails); Ah.maxr .250 /
-  .075 / .258 passes; Rh.maxr .281 / .133 / .260, R2h.maxr .256 / .106 / .252, PRh.maxr .258 / .121 / .208, P2h.maxr .240 /
-  .130 / .231 pass; PUh.maxr risk .200, PRh.maxr_k .180 and P2h.maxr_k .212 fail on risk. Judging D6 needs the D2-D5
-  winner (open).
-- **D7 / D11 match the none option** (≥ Ah.pnone − 0.02 on both): Rh.maxr − Ah.pnone −.0089 / +.0148, R2h −.0066 /
-  +.0190, PRh −.0088 [−.0173, −.0008] / +.0129.
-- **D8 refuted: Dh stays.** Hh.maxr − Dh.maxr +.0254 [+.0162, +.0351] / −.0096 [−.0235, +.0049]: the t4 lower end misses
+- **D2: Rh does not replace F's two stages; neither anchor beats Ch.** Rh − Fh +.0029 [−.0033, +.0094] / +.0034
+  [−.0068, +.0133]: not worse, no beat either way. Rh − Ch +.0255 [+.0162, +.0353] / −.0029 [−.0153, +.0094] fails the
+  "beats Ch" clause, and so does the two-stage anchor itself: Fh − Ch +.0225 [+.0123, +.0318] / −.0062 [−.0165,
+  +.0036] (from rows.json, above). Both anchors gain ~.02 on v7 and nothing on t4. Rh and Fh are interchangeable on
+  detection; Rh costs one run instead of two (top1 85.60 vs 86.23, both pass the guard).
+- **D3: R2h preferred, staging does not help.** STh − R2h −.0077 [−.0142, −.0014] / −.0041 [−.0149, +.0064]: STh does
+  not beat R2h (v7 is below 0 with its CI). STh has the highest h-arm v7 top1 (87.03 vs R2h 86.39), which the rule does
+  not weigh. Stage order (reported): STh − Fh −.0025 [−.0089, +.0040] / +.0035 [−.0091, +.0156], level.
+- **D4: MLP head adopted** on the not-worse branch: R2h − Rh +.0022 [−.0020, +.0066] / +.0042 [−.0080, +.0159], top1
+  86.39 vs 85.60. The listwise term's share (reported, not judged): R2h − Sh +.0143 [+.0077, +.0217] / +.0040
+  [−.0058, +.0149].
+- **D5: the listing prompt stays.** RYh − HBh +.0032 [−.0037, +.0105] / +.0029 [−.0044, +.0100] and RYh − Rh +.0027
+  [−.0037, +.0088] / +.0089 [−.0060, +.0258]: no beat in either pair, every pair not worse both ways, so the cheaper Rh
+  stays. HBh (class-balanced BCE on the yes/no prompt) has the highest h-arm t4 top1 (79.73, with PLh) and is level on
+  detection (.9589 / .8473); its maxprob is the best of any arm (.9162 / .7448) and its none option the weakest
+  (pnone .9367 / .7910; it picks none on .57 / .26 of allwrong rows, a pointwise arm's rate).
+- **D2-D5 winner: R2h** (one-stage RCR, MLP head, listing prompt; Rh, Fh, STh, RYh, HBh within noise of it).
+- **D6: R2h.maxr transfers.** At risk 0.10 (t4 coverage / risk / t4-fit coverage) R2h.maxr .256 / .106 / .252 passes
+  (risk ≤ .15, coverage 1.02x) where Ah.maxprob .158 / .066 / .202 fails (0.78x). Other arms, reported: Ah.maxr .250 /
+  .075 / .258, Rh.maxr .281 / .133 / .260, PRh.maxr .258 / .121 / .208, P2h.maxr .240 / .130 / .231, Sh.maxr .252 /
+  .107 / .231, STh.maxr .246 / .110 / .231, PLh.maxr .246 / .127 / .212 and HBh.maxr .219 / .095 / .219 pass; PUh.maxr
+  risk .200, PRh.maxr_k .180, P2h.maxr_k .212, RYh.maxr .312 / .193 / .229 and Fh.maxr .340 / .209 / .246 fail on risk
+  (the v7 threshold over-accepts on t4); Fh.maxprob .200 / .052 / .235 passes. R2h's t4 mid stratum (emotion, K 6) does
+  not hold the threshold: coverage .031 at risk .600 (small .369 / .085; v7 mid .491 / .076).
+- **D7 / D11 match the none option** (≥ Ah.pnone − 0.02 on both): the winner R2h.maxr − Ah.pnone −.0066 [−.0125,
+  −.0007] / +.0190 [−.0000, +.0384]. Reported: Rh −.0089 / +.0148, PRh −.0088 [−.0175, −.0007] / +.0129, RYh −.0062 /
+  +.0237, STh −.0143 [−.0227, −.0070] / +.0149, Fh −.0118 [−.0199, −.0042] / +.0114, HBh −.0094 / +.0208 (point
+  differences; no report row). Sh misses on v7: −.0209 [−.0299, −.0128] / +.0150.
+- **D8 refuted: Dh stays.** Hh.maxr − Dh.maxr +.0254 [+.0162, +.0353] / −.0096 [−.0231, +.0046]: the t4 lower end misses
   −0.02, and banking77 answerable top1 is Hh .775 vs Dh .8125 (−3.75 points, n 80,
   `eval/decision-v7-development/report.json`). Hh.maxprob − Dh.maxprob +.0316 / +.0049.
-- **D9: no pointwise recipe.** PRh − Hh +.0144 [+.0077, +.0217] / −.0087 [−.0177, +.0004]: no beat. PRh is not worse
-  than PBh (−.0008 / −.0066 [−.0145, +.0012]). K balance not adopted: PRh.maxr_k − PUh.maxr −.0047 / −.0140 [−.0220,
-  −.0059] misses not-worse on t4. PRh − Rh +.0001 / −.0019.
-- **D10 (P2h half): P2h does not replace PRh.** P2h − PRh −.0023 [−.0086, +.0038] / +.0089 [+.0007, +.0178], top1 86.16
+- **D9: no pointwise recipe.** PRh − Hh +.0144 [+.0074, +.0211] / −.0087 [−.0180, +.0000]: no beat. PRh is not worse
+  than PBh (−.0008 / −.0066 [−.0151, +.0014]). K balance not adopted: PRh.maxr_k − PUh.maxr −.0047 / −.0140 [−.0221,
+  −.0058] misses not-worse on t4. PRh − Rh +.0001 / −.0019.
+- **D10 (P2h half): P2h does not replace PRh.** P2h − PRh −.0023 [−.0084, +.0038] / +.0089 [+.0002, +.0176], top1 86.16
   vs 86.63. P2h's leave-one-out verdict: `../done/pointwise-rcr-mlp.md`.
+- **D10 (PLh half): PLh does not replace PRh.** PLh − PRh +.0017 [−.0042, +.0071] / +.0083 [−.0001, +.0171]: not worse
+  on both, but its v7 top1 is lower (85.44 vs 86.63), so the second clause fails as well. D10 closes with PRh as the
+  pointwise head.
 - **Predictions:** C.maxr within 0.05 of A.maxprob holds on v7 (+.011) and fails on t4 (+.107); F.maxprob below F.maxr
   holds; Hh within 1 point of Dh's top1 holds, above it on banking77 fails; PRh.maxr over-accepts the large stratum at the
   v7 threshold (risk .250 vs small .083) while PRh.maxr_k and PUh.maxr do not (.095 each): holds; P2h within noise of PRh
-  holds.
-- **Shared-option |Δ reward|** on pointwise arms: mean 3-8e-3 but max .08-.17 on v7 and .558 for PRh on t4, more than bf16
-  rounding should give; listing arms 4-14. G4 (`fork_check.py k1`) decides whether PRh's numbers stand.
-- Pointwise arms rarely pick a none option when it is offered on an allwrong row (v7 .61-.69, t4 .23-.37) against
-  .85-.91 on the listing arms: none rows are dropped from pointwise training.
+  holds; Rh within 0.02 of Fh holds (+.003 / +.003).
+- **Shared-option |Δ reward|** on pointwise arms: mean 3-8e-3 but max .08-.17 on v7 (HBh .110 / .111) and .558 for PRh
+  on t4, more than rounding of an exact pass should give; listing arms 4-14.
+- **G4 not read yet.** The queue ran `fork_check.py k1` with the bound kernels (fla / causal-conv1d, fp32 weights), and
+  every pointwise arm printed FAIL: max |d sigmoid| Hh 1.56e-2, PBh 1.23e-2, PRh 4.71e-3, PUh 5.28e-3, P2h 1.29e-3, P2Bh
+  1.48e-2, PLh 4.14e-3; max |d reward| .05-.11; argmax flips 0/10 on every arm (10 records, 125 options). That is the
+  same situation as G0's bound-kernel FAIL: together (K rows batched and padded) and alone (one row) run different
+  shapes through TF32-class kernels, and k1 had no reference mode, so the run cannot separate rounding from a set
+  dependence. `k1 --kernels reference` (added after the run: PyTorch kernels, no TF32, graphs off) applies the
+  threshold as stated; until it runs, the pointwise arms' numbers (D5, D8-D11) stand provisionally. RYh and HBh
+  (chat_yesno, pointwise as well) were not in the queue's G4 list; the rerun covers them. The differences are ~1% of
+  the answerable → allwrong maxr gap (+6 → −7, above), so a rounding reading is unlikely to move an AUROC beyond its
+  CI [inference].
+- Pointwise arms rarely pick a none option when it is offered on an allwrong row (v7 .57-.69, t4 .23-.37, HBh
+  included) against .85-.91 on the listing arms: none rows are dropped from pointwise training.
