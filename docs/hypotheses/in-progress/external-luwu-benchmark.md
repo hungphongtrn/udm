@@ -136,6 +136,35 @@ local detection in parentheses only where it decides the row:
 - Local (fit and apply on one task, 16 groups), mean detection `maxr` A .672, C .678, D .661, F .695 against `maxprob`
   A .543, C .421, D .461, F .433: the raw-score readout is the gain on every arm, as on the all-wrong pairs.
 
-**Running (2026-10-15):** `GPU=GPU-76303229-... nohup ./kev.sh scripts/external/core.sh P2h Ah PRh P2Bh >
-kev/runs/dmb-core-h.log 2>&1 &` (full GPU id in the launch log). Question for P2h: on the cross-task rows, is its
-`maxr_k` false rejection at most Ah's while its detection is higher?
+**P2h seed 0 (2026-10-15; `kev/runs/dmb/p2h-s0-core{-scored,-policies}`).** Rule 3 passes (39,168 predictions, 0
+interface failures; their scorer accepted the run). Cross-task rows, k2 natural, `maxr_k` D / F, as above; Jev's
+published `negative_max` F on the same row in the last column:
+
+|Source → target|P2h `maxr_k` D / F (local)|Pass|Jev F|
+|---|---|---|---|
+|AG News → DBpedia|0.990 / 0.033 (0.998)|pass|0.002|
+|AG News → Emotion|0.837 / **0.476** (0.271)|fail|0.120|
+|DBpedia → AG News|0.908 / 0.025 (0.883)|pass|0.142|
+|DBpedia → Emotion|0.855 / **0.554** (0.271)|fail|0.434|
+|Emotion → AG News|**0.442** / 0.017 (0.883)|fail|0.008|
+|Emotion → DBpedia|**0.893** / 0.002 (0.998)|fail (by .005)|0.002|
+|**Passing rows**|**2/6**| | |
+|Rows with F above Jev's|4/6| | |
+
+- Same pattern as C/D/F: passes AG News ↔ DBpedia, fails every Emotion row. The 80-text `maxr_k` thresholds are 2.42
+  (AG News), 1.54 (DBpedia), 7.23 (Emotion): the pointwise RCR reward does not put Emotion on the other tasks' scale
+  either. Emotion as target over-rejects (F 0.48 / 0.55, between A's 0.22-0.36 and C/D's 0.43-0.56); Emotion as source
+  under-detects AG News (0.442 vs local 0.883). F is above Jev's on 4/6 rows, a majority, which would meet rule 2's
+  refuted clause had P2h been the selected arm (A 3/6, F 5/6).
+- Other readouts, cross-task passing rows: `maxprob_T` 1, `pnone_T` 2.
+- Within-task transfer (13 rows): `maxr_k` 11 (fails Emotion k2 → k5 D 0.042 vs local 0.301; Emotion k4 natural →
+  neutral D 0.217 vs 0.325), `maxprob_T` 11 (Emotion k2 → k4/k5 F 0.355/0.458), `pnone_T` 10 (DBpedia k2 → k13 D 0.874
+  vs 0.990; Emotion k2 → k4/k5 D ≤ 0.024).
+- Local (16 groups), mean detection `maxr` .686 vs `maxprob` .519: the raw-score gain holds (+.167; A +.129, F
+  +.262).
+- Native with-NONE decisions (their scorer): P2h picks NONE on 26-39% of answerable Emotion test texts (≤ 3.3% on AG
+  News / DBpedia, 0-2% TREC), and Emotion full-set accuracy drops from 0.517 (`full_plain`) to 0.437-0.462
+  (`full_with_none`): offering NONE costs Emotion accuracy rather than catching its errors.
+
+Ah, PRh, P2Bh still running (`kev/runs/dmb-core-h.log`). Question for P2h vs Ah (open until Ah lands): on the
+cross-task rows, is P2h's `maxr_k` false rejection at most Ah's while its detection is higher?
