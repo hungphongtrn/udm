@@ -46,8 +46,10 @@ iff maxr_k > 0) on both pools and every stratum, and a Lu & Wu 2610.03387 policy
 threshold maximising allwrong detection subject to a false rejection rate of answerable rows <= 5% (accept iff
 score > threshold; the largest qualifying score, so a tie block is rejected or accepted whole), fit on the decision-v7
 pool and on a fixed seeded 80-question sample of it (their 80-pair protocol), applied frozen to transfer-v4 and the
-strata, with false rejection and detection reported on the fit and apply sets. Writes <out>/report.json and
-<out>/rc-<suite>.svg.
+strata, with false rejection and detection reported on the fit and apply sets. The same policy is also fit on n = 20 /
+40 / 80 transfer-v4 questions (200 seeded draws each) and scored on the held-out transfer-v4 questions: how many target
+labels close the gap between the frozen decision-v7 threshold and transfer-v4's own in-sample fit. Writes
+<out>/report.json and <out>/rc-<suite>.svg.
 """
 import argparse, json
 from pathlib import Path
@@ -58,6 +60,7 @@ CURVE_READOUTS = ("maxprob", "maxprob_G", "maxr", "maxr_k", "noisy_or", "mass", 
 NONE_READOUTS = ("pnone", "pnone_G")
 ZERO_FIT_READOUTS = ("maxr", "maxr_k")   # accept iff the readout > 0 (maxr's 0 = sigmoid 0.5): no fitting
 FRR_MAX, LUWU_SAMPLE = 0.05, 80   # Lu & Wu 2610.03387: answerable false rejection <= 5%; their 80-pair protocol
+TARGET_NS, DRAWS = (20, 40, 80), 200   # few-label fit on the apply suite itself: questions per fit, seeded draws per n
 COVERAGES = (0.3, 0.5, 0.7, 0.9, 1.0)
 K_STRATA = (("small", 0, 4), ("mid", 5, 14), ("large", 15, 10 ** 9))   # original option count, inclusive bounds
 # The hypothesis doc's decisions (arm names cannot contain "-"; compares naming an arm not given are skipped).
@@ -460,6 +463,35 @@ def main():
                 print(f"{name:5}{r:11} v7 t={m_['threshold']:+.3f} fit frr {f_['false_rejection']:.3f} det {f_['detection']:.3f} "
                       f"-> t4 frr {a_['false_rejection']:.3f} det {a_['detection']:.3f} | 80q t={m80['threshold']:+.3f} "
                       f"fit frr {f8['false_rejection']:.3f} det {f8['detection']:.3f} -> t4 frr {a8['false_rejection']:.3f} det {a8['detection']:.3f}")
+        # Few-label target fit: the same Lu & Wu policy fit on n questions drawn from the apply suite itself (both rows of
+        # each question), scored on that suite's held-out questions; DRAWS seeded draws per n. Beside it the v7 threshold
+        # frozen on the whole apply pool and the apply pool's own in-sample fit (the ceiling). Reported, not judged.
+        T6["target_fit"] = TF = {"ns": list(TARGET_NS), "draws": DRAWS, "seed": SEED}
+        print(f"\n== few-label target fit (Lu & Wu policy fit on n {APPLY_SUITE} questions, scored on the held-out rest; "
+              f"{DRAWS} draws: mean [p10, p90]); beside it {FIT_SUITE} frozen and the {APPLY_SUITE} in-sample ceiling")
+        for name in arms:
+            for r in CURVE_READOUTS:
+                if (APPLY_SUITE, name, r) not in pools: continue
+                tc, _, tn, _ = pools[(APPLY_SUITE, name, r)]
+                ceil = frr_rates(tc, tn, fit_frr_threshold(tc, tn))
+                m_ = {"frozen": FR[name][r]["apply"], "ceiling": ceil, "n": {}}
+                trng = np.random.default_rng(SEED)
+                for n in (n for n in TARGET_NS if n < tn):
+                    det, frr = [], []
+                    for _ in range(DRAWS):
+                        idx = trng.choice(tn, size=n, replace=False); rest = np.setdiff1d(np.arange(tn), idx)
+                        t = fit_frr_threshold(np.concatenate([tc[idx], tc[tn + idx]]), n)
+                        h = frr_rates(np.concatenate([tc[rest], tc[tn + rest]]), len(rest), t)
+                        det.append(h["detection"]); frr.append(h["false_rejection"])
+                    q = lambda v: {"mean": float(np.mean(v)), "p10": float(np.quantile(v, .1)), "p90": float(np.quantile(v, .9))}
+                    m_["n"][n] = {"detection": q(det), "false_rejection": q(frr)}
+                TF.setdefault(name, {})[r] = m_
+                fz = m_["frozen"]
+                print(f"{name:5}{r:11} frozen det {fz['detection']:.3f} frr {fz['false_rejection']:.3f} | ceiling det "
+                      f"{ceil['detection']:.3f} frr {ceil['false_rejection']:.3f} | "
+                      + " | ".join(f"n={n} det {v['detection']['mean']:.3f} [{v['detection']['p10']:.3f}, {v['detection']['p90']:.3f}] "
+                                   f"frr {v['false_rejection']['mean']:.3f} [{v['false_rejection']['p10']:.3f}, {v['false_rejection']['p90']:.3f}]"
+                                   for n, v in m_["n"].items()))
     json.dump(res, open(out / "report.json", "w"), indent=1)
 
 
