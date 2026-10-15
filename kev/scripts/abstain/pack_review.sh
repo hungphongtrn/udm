@@ -4,9 +4,12 @@
 # First reruns the two all-wrong reports (CPU, overwritten in place) on every arm whose all-wrong evals exist, then packs
 # into one tgz: per pref run the logs, training metrics, eval outputs, RewardBench 2 JSONs and Decision Index subset dirs;
 # runs/allwrong/report*/ and the all-wrong data manifests; runs/queue/*.log (G0, G4, every arm) and runs/*.log;
-# runs/dindex/ (comparators); runs/dmb/ (Lu & Wu adapter runs, scores, policies) minus cases.jsonl / requests.jsonl,
-# which are byte-identical to runs/dmb/core-inputs (their digests are in each manifest.json). No weights, no datasets.
-# env: SEED (0), REPORTS (1; 0 packs the existing reports unchanged).
+# runs/dindex/ (comparators); runs/dmb/ (Lu & Wu adapter runs, scored metrics, policies). No weights, no datasets.
+# Per-row bulk is left out unless FULL=1 (~15 MB compressed per dmb arm, plus every DI results.jsonl): dmb
+# predictions.jsonl / raw_rewards.jsonl / policies scores.jsonl and DI results.jsonl*; the review reads the summaries
+# next to them (metrics.json, report.md, policies.json/md, scores.json, benchmark-summary.json). dmb cases.jsonl /
+# requests.jsonl are always left out: byte-identical to runs/dmb/core-inputs (digests in each manifest.json).
+# env: SEED (0), REPORTS (1; 0 packs the existing reports unchanged), FULL (0).
 set -euo pipefail
 cd "$(dirname "$0")/../.."            # kev/
 SEED=${SEED:-0}; S=runs/pref; s=seed$SEED
@@ -27,15 +30,18 @@ if [ "${REPORTS:-1}" = 1 ]; then
   report runs/allwrong/report-half "${half[@]}"
 fi
 git describe --always --dirty > runs/COMMIT
+BULK=(); [ "${FULL:-0}" = 1 ] || BULK=(! -name predictions.jsonl ! -name raw_rewards.jsonl ! -name scores.jsonl ! -name 'results.jsonl*')
 LIST=$(mktemp)
 find runs -name .ipynb_checkpoints -prune -o -path runs/dmb/core-inputs -prune -o -type f \
   ! -name '*.pt' ! -name '*.safetensors' ! -name '*.bin' \( \
     -path "$S/*" \( -name COMMIT -o -name '*.train.log' -o -path '*/seed*/train.log' -o -path '*/seed*/training_*.json' \
-      -o -path '*/eval/*' -o -path '*/seed*/dindex-*' -o -name '*.manifest.json' -o -name 'rewardbench2*.json' \) \
+      -o -path '*/eval/*' -o -path '*/seed*/dindex-*' ${BULK[@]+"${BULK[@]}"} -o -name '*.manifest.json' -o -name 'rewardbench2*.json' \) \
     -o -path 'runs/allwrong/report*' -o -path 'runs/allwrong/data/*/manifest.json' \
-    -o -path 'runs/queue/*.log' -o -regex 'runs/[^/]*\.log' -o -path runs/COMMIT -o -path 'runs/dindex/*' \
-    -o -path 'runs/dmb/*' ! -name cases.jsonl ! -name requests.jsonl \) -print | sort > "$LIST"
+    -o -path 'runs/queue/*.log' -o -regex 'runs/[^/]*\.log' -o -path runs/COMMIT -o -path 'runs/dindex/*' ${BULK[@]+"${BULK[@]}"} \
+    -o -path 'runs/dmb/*' ! -name cases.jsonl ! -name requests.jsonl ${BULK[@]+"${BULK[@]}"} \) -print | sort > "$LIST"
 tar czf "$OUT" -T "$LIST"
+echo "largest dirs (uncompressed MB):"
+tr '\n' '\0' < "$LIST" | du -b --files0-from=- | awk '{n=split($2,p,"/"); k=p[1]"/"p[2]"/"p[3]; s[k]+=$1} END{for(k in s) printf "%9.1f %s\n", s[k]/1e6, k}' | sort -rn | head -12
 rm -f "$LIST"
 echo "queue: $(ls runs/queue/*.done 2>/dev/null | wc -l) done, failed: $(cd runs/queue && ls *.failed 2>/dev/null | tr '\n' ' ')"
 echo "gates: $(cd runs/queue && grep -h -E 'G[04] (PASS|FAIL)' G0-parity.log G4-*.log 2>/dev/null | tr '\n' ' ')"
