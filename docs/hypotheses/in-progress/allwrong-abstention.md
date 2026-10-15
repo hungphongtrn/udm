@@ -311,6 +311,25 @@ Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the t
   it holds on Lu & Wu's benchmark (local detection `maxr` .66-.70 vs `maxprob` .42-.54, `external-luwu-benchmark.md`).
   It ties the none option rather than beating it (F.maxr − A.pnone −.0103 / +.0136), and unlike the none option it needs
   no none option in the prompt.
+- **What the level looks like per pair** (`scripts/abstain/allwrong_examples.py`, Ah vs P2h seed 0, pairs Ah answers
+  right; medians, answerable → allwrong):
+
+  | Suite (pairs) | Arm | maxr | maxprob | mass |
+  |---|---|---|---|---|
+  | v7 (410) | Ah | +6.02 → −7.84 | 1.000 → .762 | 1.00 → .00 |
+  | v7 (410) | P2h | +5.86 → −6.41 | 1.000 → .703 | 1.00 → .00 |
+  | t4 (187) | Ah | +3.88 → −3.71 | .998 → .784 | 1.01 → .04 |
+  | t4 (187) | P2h | +5.33 → −3.93 | .999 → .773 | 1.00 → .03 |
+
+  When the right option is dropped, every remaining score stays low (mass ~1 → ~0, both arms, the pointer arm too), while
+  softmax hands the freed mass to the best wrong option. Pairs where softmax stays confident and maxr does not (v7): mnli
+  9430 Ah maxprob .993 on the allwrong row, maxr +3.31 → −10.05; mnli 1093 Ah 1.000, +6.25 → −8.53 (P2h .877, +4.93 →
+  −7.07); agnews 536 Ah .963, +5.62 → −7.81. P2h's shared options keep their reward to ~0.02 (e.g. agnews 536 world
+  −10.21 / −10.19), as a pointwise arm should; Ah's move with the set, both ways (dbpedia 17540 officeholder −2.90 →
+  −10.14; dbpedia 35579 plant −13.24 → −4.79). The failures, where maxr does not drop, are pairs where the wrong option
+  only the allwrong row holds scores high in both arms (mnli 5166: allwrong maxr Ah +6.31, P2h +5.66, after the gold
+  option scored −7.85 / −6.61 on the answerable row). Model error and a mislabelled or ambiguous item look the same here;
+  the script's first print did not list that option, fixed since.
 - **D1 (anchored training) inconclusive.** F.maxr − A.maxprob +.0254 [+.0123, +.0391] / +.0953 [+.0655, +.1276]:
   positive on both, below the 0.05 bar on v7; F's top1 86.16 passes the guard vs A 87.74. The anchor adds nothing over
   the readout: A.maxr (.9721 / .8525) is at or above F.maxr (.9640 / .8438). A.maxprob across seeds 0-2: v7 .9342-.9445,
