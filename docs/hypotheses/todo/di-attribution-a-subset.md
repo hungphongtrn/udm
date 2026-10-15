@@ -65,4 +65,25 @@ download, 17 GB disk) and `hf auth login` + HLE terms acceptance if not already 
 
 ## Results
 
-Not run.
+**Partial (2026-10-15; seeds 0-1 of 3, seed 2 running; `kev/runs/queue/dindex-A-seed{0,1}.log`,
+`runs/pref/A/seed1/dindex-0.3-sub15000/index.json`).** Same 15,000 rows and engine as D and v7-base.
+
+| Model | Index | Raw | Breadth | Unsupported |
+|---|---:|---:|---:|---:|
+| D seed 0 (chat, scalar head, pref loss) | 36.91 | | | 0 |
+| A seed 0 (Kev format, pointer + CE) | 34.54 | 50.58 | 33.06 | 13 |
+| A seed 1 | 33.05 | 49.87 | 31.51 | not printed |
+| v7-base | 33.60 | | | 12 |
+
+- **Rule read on seed 0: loss effect, by 0.06.** A 34.54 ≤ v7-base + 1 = 34.60, and below D − 1 = 35.91. Seed 1 (33.05)
+  reads the same way with room. D − A = +2.37 (seed 0), +3.86 (seed 1, `dindex_subset.py pair`).
+- The two A seeds differ by 1.49 points, the ±1-2 noise scale this rule assumed, so the seed-0 call sits inside one
+  seed's spread. D has one seed; its own spread is unmeasured.
+- "Loss effect" here means D's recipe as a whole: D differs from A in prompt format (chat), head (scalar) and loss
+  (pref + BSR) at once, the same confound as C vs B (C0 not run). It is not the loss alone.
+- A seed 1 − D per benchmark: 9 up, 26 down, 2 tied (9, 56). D's largest margins over A are the benchmarks where it
+  beat v7-base: RAGTruth (59) −.219, BPoMP (20) −.192, Humicroedit (21) −.150; Arts & Human Taste −.071, Language
+  −.065. A leads where D lost to v7-base: BANKING77 (4) +.067, BFCL (1) +.046. So D's per-benchmark gain pattern is not
+  something retraining the Kev recipe reproduces.
+- Not yet: seed 2; A − v7-base per benchmark (`pair runs/dindex/kev4b-v7base-sub15000 runs/pref/A/seed<S>/...`); A
+  seed 0 − D per benchmark.

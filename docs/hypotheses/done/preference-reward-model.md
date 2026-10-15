@@ -316,7 +316,9 @@ Readings:
 - Dev and index disagree in sign: D trails A on v7 dev (-0.79, 3 seeds) yet beats v7-base on the index. Consistent with
   `docs/studies/README.md` finding that in-distribution validation is a weak proxy for the index.
 
-Pending to attribute the gain: A seed 0 on the same subset (`dindex.sh subset runs/pref/A/seed0`), paired with D.
+Attribution (partial, `../todo/di-attribution-a-subset.md`): A seed 0 34.54, seed 1 33.05 on the same rows, so D − A
+= +2.37 / +3.86. The retrained Kev baseline does not reproduce D's index. The gain belongs to D's recipe (format, head
+and loss together), not to retraining. Seed 2 is pending.
 
 ### Inference speed (chat format)
 
@@ -389,5 +391,6 @@ Further ideas, ranked by expected gain over risk:
 
 Verdict: **inconclusive** (rule 5) on the pre-registered dev rule. Best scalar-pref arm D: 3-seed top1 v7 -0.79 vs A
 (fails the -0.5 margin), t4 +0.15; not refuted. Externally D seed 0 scores 36.91 on the Decision Index 0.3 subset,
-+3.31 over the published base recipe (v7-base) and level with the board's r10; whether that comes from the pref
-loss / scalar head or from our training run awaits A on the subset.
++3.31 over the published base recipe (v7-base) and level with the board's r10. A retrained on the same Kev recipe
+scores 34.54 / 33.05 (seeds 0 / 1), so the gain comes from D's recipe (chat format, scalar head and pref loss, not
+separated), not from retraining (seed 2 pending).
