@@ -20,7 +20,7 @@ restored, the RCR loss replaced by BT + BSR, the head linear — and which compo
 - Loss: `rcr_loss` = (1 − α)·point + α·ListCE(sigmoid), α = 0.5; `--rcr_point balanced` gives a question's positives and
   wrong options half the question each (α = 0, β = 0 is `balanced_bce_loss`), where the mean point term is minimised at
   sigmoid(r_i) = P(option i right) and so a K = 77 question's rewards sit ~log 76 below a K = 2 question's
-  (`kev/kev/pref.py:82-99`, `in-progress/allwrong-abstention.md` §PF-RCR wave).
+  (`kev/kev/pref.py:82-99`, `allwrong-abstention.md` §PF-RCR wave).
 
 P2h already sits in the PF-RCR wave as "PRh: the head (H-RCR-2L)" (phase 2, rule D10). This doc frames the combination
 as the claim and states the ablations it must beat.
@@ -57,7 +57,7 @@ R2Bh holds the point term fixed. R2Bh is a listing arm, so it is not in the G4 K
 
 ## Decision rule (pre-registered, seed 0, half data)
 
-Terms from `in-progress/allwrong-abstention.md` §Decision rules, unchanged: X **beats** Y when dAUROC(X − Y) ≥ 0.03 with
+Terms from `allwrong-abstention.md` §Decision rules, unchanged: X **beats** Y when dAUROC(X − Y) ≥ 0.03 with
 the 95% CI above 0 on both v7 and t4 (AUROC on the minimal pairs, readout `maxr`); X is **not worse** when the CI's
 lower end is ≥ −0.02 on both; the **top1 guard** is v7 development top1 (`reward_report.json raw.overall.top1`) at most
 2 points below `Ah`'s.
@@ -102,7 +102,7 @@ BATCH_FALLBACK=1 ./kev.sh scripts/pref/run_arm.sh P2h 0 2
 
 ## Results
 
-2026-10-15, seed 0, half data (`kev/runs/allwrong/report-half`; full tables in `../in-progress/allwrong-abstention.md`
+2026-10-15, seed 0, half data (`kev/runs/allwrong/report-half`; full tables in `allwrong-abstention.md`
 §Results). AUROC `maxr`, v7 / t4; dAUROC with the 95% CI:
 
 | Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 | P2h − arm, v7 | P2h − arm, t4 |
@@ -123,7 +123,7 @@ BATCH_FALLBACK=1 ./kev.sh scripts/pref/run_arm.sh P2h 0 2
   (PRh .084), not the 0 a pointwise arm should give up to rounding. RewardBench 2 (allwrong doc §RewardBench 2): P2h
   .6651 overall / .8618 pooled AUROC vs P2Bh .6789 / .8696 and PRh .6780 / .8589; the probe is exactly 0 on all three.
   RCR does not lead on RB2 either.
-- **Gates:** G0 passed. G4 (K = 1, reference kernels, fp32) passed on P2Bh, PRh, PLh, PUh, PBh (max |Δ sigmoid|
-  ≤ 2.5e-6, no argmax change); P2h and Hh ran out of GPU memory and still need their run (allwrong doc §Results).
+- **Gates:** G0 passed. G4 (K = 1, reference kernels, fp32) passed on every pointwise arm here (P2h, P2Bh, PRh, PLh,
+  PUh, PBh, Hh): max |Δ sigmoid| ≤ 2.5e-6, no argmax change (allwrong doc §Results).
 - The Lu & Wu benchmark still scores P2h with Ah, PRh and P2Bh (`../in-progress/external-luwu-benchmark.md`), to see
   whether its pointwise score carries a threshold across tasks; that does not reopen this doc's rule.

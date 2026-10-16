@@ -19,7 +19,7 @@ if [ "${ROW_BUDGET:-0}" != 0 ]; then _CHAT="$_CHAT --row_budget $ROW_BUDGET"; fi
 COMMON="--suite evals/v7/decision-v7 --base Qwen/Qwen3.5-4B-Base --base_revision 1001bb4d826a52d1f399e183466143f4da7b741b \
 --epochs 2 --lr 5e-5 --dtype bf16 --checkpointing 1 --p_none_pair 0.25 --weights_dtype bf16 --device cuda"
 ARMS_ALL="A B C0 C D E F H HP HL HB HBL Ah Ch Fh HBh Rh R2h R2Bh Sh STh RYh Dh Hh PBh PRh PUh P2h P2Bh PLh"
-# Half-data screen (docs/hypotheses/in-progress/allwrong-abstention.md): an arm name ending in a lowercase "h" trains on the
+# Half-data screen (docs/hypotheses/done/allwrong-abstention.md): an arm name ending in a lowercase "h" trains on the
 # HALF_FRAC (default 0.5) per-source subsample of the training records (kev.train --train_frac, keyed on --seed, so every
 # h arm of a seed, and a warm start from one, sees the same records). Everything else is the full arm's recipe.
 _H="--train_frac ${HALF_FRAC:-0.5}"
@@ -75,7 +75,7 @@ arm_flags() {
          echo "$COMMON --seed $seed --head mlp --input_format chat --loss pref $_CHAT --init_from runs/pref/Sh/seed$seed --bce_w ${BCE_W:-0.5} --epochs ${F_EPOCHS:-1} $_H" ;;
     RYh) # RCR on the yes/no prompt, linear head started at W_yes - W_no (vs HBh: the loss; vs Rh: the prompt + init)
          echo "$COMMON --seed $seed --head scalar --input_format chat_yesno --head_init yesno --loss rcr --rcr_alpha 0.5 $_CHAT $_H" ;;
-    # PF-RCR wave (docs/hypotheses/in-progress/allwrong-abstention.md, phase 1-2): the option listing leaves the prompt (chat_pointwise,
+    # PF-RCR wave (docs/hypotheses/done/allwrong-abstention.md, phase 1-2): the option listing leaves the prompt (chat_pointwise,
     # each question's prefix runs once and its options are branches from it, kev.shared_prefix), then one thing changes
     # per step. Dh/Hh carry D's --reg bsr, computed per pass: run both at the same microbatch (BATCH_FALLBACK) and ROW_BUDGET.
     Dh)  echo "$(arm_flags D "$seed") $_H" ;;                                    # listing + BT + BSR (Hh's reference)

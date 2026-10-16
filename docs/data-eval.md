@@ -15,7 +15,7 @@ Conventions:
 Hypothesis docs (linked at their post-restructure paths):
 - `docs/hypotheses/done/preference-reward-model.md` — arms A–G, D/E/F/H results, DI subset.
 - `docs/hypotheses/done/pointwise-chat-input.md` — arms H/HP/HL/HB/HBL, RewardBench 2, position effect.
-- `docs/hypotheses/in-progress/allwrong-abstention.md` — all-wrong abstention, PF-RCR wave.
+- `docs/hypotheses/done/allwrong-abstention.md` — all-wrong abstention, PF-RCR wave.
 - `docs/studies/data.md` — dataset build/push, row counts, context/truncation, epoch arithmetic.
 
 ---
@@ -31,14 +31,14 @@ The suite (`--suite evals/v7/decision-v7`) supplies the training partition for e
 | A, B, C0, C, D, E, H, HL, HB, HBL | decision-v7 train | 12,576 | 2 | 25,152 | 3,144 | **not recorded** | `kev/evals/v7/decision-v7/manifest.json`; `kev/scripts/pref/arms.sh` (`--epochs 2`, `COMMON`) |
 | F | decision-v7 train | 12,576 | 1 (`F_EPOCHS` default 1) | 12,576 | 1,572 | **not recorded** | `kev/scripts/pref/arms.sh` (arm `F`: `--epochs ${F_EPOCHS:-1}`) |
 | HP | decision-v7 train + HelpSteer3 pairs | 12,576 + 12,000 = 24,576 | 2 | 49,152 | 6,144 | **not recorded** | `kev/scripts/pref/arms.sh` (arm `HP`: `--data $PREF_DATA --replay ${PREF_REPLAY:-12576}`); `docs/hypotheses/done/pointwise-chat-input.md` (`--cap 12000`) |
-| h-screen arms (Ah, Ch, Fh, HBh, Rh, R2h, Sh, STh, RYh, Dh, Hh, PBh, PRh, PUh, P2h, PLh) | decision-v7 train, half | 6,288 | 2 (Fh, STh: 1) | 12,576 (Fh, STh: 6,288) | 1,572 (Fh, STh: 786) | **not recorded** | `kev/scripts/pref/arms.sh` (`_H="--train_frac ${HALF_FRAC:-0.5}"`); `docs/hypotheses/in-progress/allwrong-abstention.md` |
+| h-screen arms (Ah, Ch, Fh, HBh, Rh, R2h, Sh, STh, RYh, Dh, Hh, PBh, PRh, PUh, P2h, PLh) | decision-v7 train, half | 6,288 | 2 (Fh, STh: 1) | 12,576 (Fh, STh: 6,288) | 1,572 (Fh, STh: 786) | **not recorded** | `kev/scripts/pref/arms.sh` (`_H="--train_frac ${HALF_FRAC:-0.5}"`); `docs/hypotheses/done/allwrong-abstention.md` |
 
 - Optimizer-step counts are arithmetic: `records × epochs ÷ 8`. Effective batch 8 records per optimizer step for every
   arm (`kev/scripts/pref/arms.sh` header; `docs/hypotheses/done/preference-reward-model.md`: "batch 4 x accum 2" Kev
   format, "batch 2 × accum 4" chat arms, `BATCH_FALLBACK=1` halves to 2×4 / 1×8 — the effective batch is 8 either way).
 - Half-data screen (`HALF_FRAC` default 0.5): a per-source subsample of every training record keyed on `--seed`, so
   every h arm of a seed — and a warm start from one — sees the same records (`kev/kev/train.py` `--train_frac`;
-  `kev/scripts/pref/arms.sh` comment; `docs/hypotheses/in-progress/allwrong-abstention.md`).
+  `kev/scripts/pref/arms.sh` comment; `docs/hypotheses/done/allwrong-abstention.md`).
 - Training tokens are not recorded anywhere in the repo (**not recorded**). RewardBench 2 records per-run input-token
   totals in its JSON (`kev/scripts/pref/rewardbench2.py` — "input-token totals").
 
@@ -229,11 +229,11 @@ Suites: `evals/v7/decision-v7` (primary) and `evals/v4/transfer-v4` (eval-only, 
 ### d. All-wrong abstention eval
 
 - What it measures: whether an anchored reward can detect that *no* option is right (an all-wrong set), and whether that
-  threshold transfers (`docs/hypotheses/in-progress/allwrong-abstention.md`).
+  threshold transfers (`docs/hypotheses/done/allwrong-abstention.md`).
 - Data (`kev/scripts/abstain/build_allwrong.py`): from decision-v7 development and transfer-v4 development, every clean
   Choice question (not `unknowable`, hard label, ≥ 3 options, no none key): **448 questions on v7** (banking77, agnews,
   mnli, trec, dbpedia14 80 each, contrastive 48; K = 77/4/3/6/14/3) and **240 on t4** (mmlu, emotion, sciq 80 each;
-  K = 4/6/4) (`docs/hypotheses/in-progress/allwrong-abstention.md`). Four conditions per question: `answerable`,
+  K = 4/6/4) (`docs/hypotheses/done/allwrong-abstention.md`). Four conditions per question: `answerable`,
   `allwrong`, `answerable_none`, `allwrong_none`, as minimal pairs (`kev/scripts/abstain/build_allwrong.py`;
   `kev/scripts/abstain/eval_allwrong.sh` runs one `kev.benchmark --data` pass per condition).
 - Readouts per question from the recorded rewards `r` (`kev/scripts/abstain/allwrong_report.py`): `maxprob`,
@@ -250,14 +250,14 @@ Suites: `evals/v7/decision-v7` (primary) and `evals/v4/transfer-v4` (eval-only, 
   policies (accept iff `maxr > 0` / `maxr_k > 0`) and Lu & Wu's rule (max detection s.t. answerable false rejection
   ≤ 5%, strict `score > threshold`), fit on the whole v7 pool and on a seeded 80-question sample, applied frozen to t4.
 - K = 1 check (G4): `fork_check.py k1` scores each option alone vs all K together, `max |Δ sigmoid| < 1e-3` and no argmax
-  change (`kev/scripts/abstain/fork_check.py`; `docs/hypotheses/in-progress/allwrong-abstention.md` gate G4).
+  change (`kev/scripts/abstain/fork_check.py`; `docs/hypotheses/done/allwrong-abstention.md` gate G4).
 - Commands: build `./kev.sh scripts/abstain/build_allwrong.py --suite evals/v7/decision-v7 --out
   runs/allwrong/data/decision-v7-development`; score `./kev.sh scripts/abstain/eval_allwrong.sh runs/pref/<ARM>/seed<N>`;
   report `./kev.sh scripts/abstain/allwrong_report.py --arm Ah=runs/pref/Ah/seed0 … --out runs/allwrong/report-half`.
   `run_arm.sh` also runs `eval_allwrong.sh` automatically unless `ALLWRONG=0` (`kev/scripts/pref/run_arm.sh`).
 - Output: `RUN/eval/allwrong-<suite>/<condition>/{rows.json, report.json}` and `<out>/{report.json, rc-<suite>.svg}`
   (`kev/scripts/abstain/eval_allwrong.sh`; `kev/scripts/abstain/allwrong_report.py`).
-- Cost / wall: three-GPU screen ~25–30 h total [estimate] (`docs/hypotheses/in-progress/allwrong-abstention.md`
+- Cost / wall: three-GPU screen ~25–30 h total [estimate] (`docs/hypotheses/done/allwrong-abstention.md`
   Compute); per half chat arm ~4.5 h, Ah ~1.2 h, stage 2 ~2.3 h, DI subset ~2 h (same doc).
 
 ### e. Position-bias analysis (offline, from RB2 shuffled runs)
@@ -282,7 +282,7 @@ construction (one request per candidate). No separate command — the analysis i
     1e-4 and every LoRA/head gradient within 1e-3 (`--n 10`, `--format chat_pointwise`, 0.8B base). Commands:
     `./kev.sh scripts/abstain/fork_check.py parity --base Qwen/Qwen3.5-0.8B-Base --format chat_pointwise --n 10`.
   - `k1` (G4): each option alone vs all K (see 2d).
-  A failed parity stops the PF arms' interpretation, not the queue (`docs/hypotheses/in-progress/allwrong-abstention.md`
+  A failed parity stops the PF arms' interpretation, not the queue (`docs/hypotheses/done/allwrong-abstention.md`
   gates G0/G4).
 
 ### g. Evaluation aspects: what each one asks, where it is measured
@@ -294,7 +294,7 @@ attack, the Decision 1.0 paper's own limitation). Status: **built** = code exist
 
 | # | Aspect | Question it answers | Source of the aspect | Measured by | Status |
 |---|---|---|---|---|---|
-| 1 | Ranking non-inferiority | does the change keep top-1 (gate 1)? | PF-RCR gate 1 (≥ −0.5 vs A on v7 dev, t4 dev, DI 15k) | 2a top1, 2b DI subset; the allwrong screen's guard is 2 points vs `Ah` (`in-progress/allwrong-abstention.md`) | built |
+| 1 | Ranking non-inferiority | does the change keep top-1 (gate 1)? | PF-RCR gate 1 (≥ −0.5 vs A on v7 dev, t4 dev, DI 15k) | 2a top1, 2b DI subset; the allwrong screen's guard is 2 points vs `Ah` (`done/allwrong-abstention.md`) | built |
 | 2 | Many-option task loss | is banking77 (K = 77) still below A (D: −5.8 on v7 dev)? | PF-RCR component 1; `done/preference-reward-model.md` | per-task top1 in `reward_report.json`; D8 clause on banking77 | built |
 | 3 | All-wrong detection | does the score flag a set with no right option? | LTR note #3, "shift" note, gate 2, Zhong et al. (menu choice rejects 7% vs 99% for isolated verification) | 2d AUROC, FPR@95TPR, paired win rate | built |
 | 4 | Shift, not scale | can the score tell "best of good" from "best of bad"? softmax is shift-invariant, so is BT | "shift" note | 2d `maxr` / `mass` vs `maxprob`; `pnone` with a none option offered (D7/D11) | built |

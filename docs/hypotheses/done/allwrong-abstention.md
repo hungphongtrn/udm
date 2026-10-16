@@ -1,6 +1,6 @@
 # Hypothesis: an anchored reward knows when no option is right (all-wrong detection, readout and training screen)
 
-Status: in-progress (see ../README.md). Commands below are kev-relative: run them from the repo root as ./kev.sh <command>.
+Status: done (see ../README.md). Commands below are kev-relative: run them from the repo root as ./kev.sh <command>.
 
 Branch `hyp/allwrong-abstention`, cut from `dev` at `a80515f`. The code was built on `idea/allwrong-abstention`, cut from
 `hyp/preference-reward-model` at `4668509` (its arms, checkpoints and wave-1 numbers:
@@ -303,8 +303,8 @@ Every arm finished (no `.failed`), HBh last at 14:07 UTC. Numbers are AUROC on t
 the 95% CI from the reports; top1 is `reward_report.json raw.overall.top1` as the report prints it. `report-half` has no
 Fh − Ch row: that difference is from Fh's `eval/allwrong-*/rows.json` with the report's formulas (the reimplementation
 reproduces the report's Rh − Fh, STh − R2h and D6 rows to the printed digits; its CIs use another bootstrap stream).
-G4 with reference kernels passed on 6 of the 9 pointwise arms; Hh, P2h and HBh ran out of GPU memory and are open
-(below). RewardBench 2 on the h arms: §RewardBench 2 (half data).
+G4 with reference kernels passed on all 9 pointwise arms (below). RewardBench 2 on the h arms: §RewardBench 2 (half
+data).
 
 | Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 | | Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 |
 |---|---|---|---|---|---|---|
@@ -401,7 +401,7 @@ Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the t
   than PBh (−.0008 / −.0066 [−.0151, +.0014]). K balance not adopted: PRh.maxr_k − PUh.maxr −.0047 / −.0140 [−.0221,
   −.0058] misses not-worse on t4. PRh − Rh +.0001 / −.0019.
 - **D10 (P2h half): P2h does not replace PRh.** P2h − PRh −.0023 [−.0084, +.0038] / +.0089 [+.0002, +.0176], top1 86.16
-  vs 86.63. P2h's leave-one-out verdict: `../done/pointwise-rcr-mlp.md`.
+  vs 86.63. P2h's leave-one-out verdict: `pointwise-rcr-mlp.md`.
 - **D10 (PLh half): PLh does not replace PRh.** PLh − PRh +.0017 [−.0042, +.0071] / +.0083 [−.0001, +.0171]: not worse
   on both, but its v7 top1 is lower (85.44 vs 86.63), so the second clause fails as well. D10 closes with PRh as the
   pointwise head.
@@ -411,12 +411,12 @@ Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the t
   holds; Rh within 0.02 of Fh holds (+.003 / +.003).
 - **Shared-option |Δ reward|** on pointwise arms: mean 3-8e-3 but max .08-.17 on v7 (HBh .110 / .111) and .558 for PRh
   on t4, more than rounding of an exact pass should give; listing arms 4-14.
-- **G4: 6 of 9 PASS, 3 not run** (2026-10-16, `fork_check.py k1 --kernels reference` at 34b44a2, exact fp32, 10
-  records, 125 options each; `kev/runs/queue/G4ref-<arm>.log`). Max |d sigmoid| / |d reward|, 0 argmax flips on each:
-  PBh 1.70e-6 / 1.14e-5, PRh 1.37e-6 / 1.53e-5, PUh 1.15e-6 / 1.43e-5, P2Bh 2.50e-6 / 1.16e-5, PLh 2.38e-7 / 1.53e-5,
-  RYh 1.13e-6 / 2.29e-5. Hh, P2h and HBh (all three on nvidia-smi GPU 0, which another process held 3.78 GB of) died
-  with CUDA out-of-memory at 19.7 GB in `_replicate`, before any comparison: they still need a run on a free 3090. The
-  six passes sit at fp32 rounding (1e-6), so each option scores the same alone as in its set on those arms. The
+- **G4: 9 of 9 PASS** (2026-10-16, `fork_check.py k1 --kernels reference` at 34b44a2, exact fp32, 10 records, 125
+  options each; `kev/runs/queue/G4ref-<arm>.log`). Max |d sigmoid| / |d reward|, 0 argmax flips on each: Hh 1.19e-6 /
+  9.78e-6, PBh 1.70e-6 / 1.14e-5, PRh 1.37e-6 / 1.53e-5, PUh 1.15e-6 / 1.43e-5, P2h 1.19e-7 / 7.15e-6, P2Bh 2.50e-6 /
+  1.16e-5, PLh 2.38e-7 / 1.53e-5, RYh 1.13e-6 / 2.29e-5, HBh 2.53e-6 / 1.84e-5. Hh, P2h and HBh first died with CUDA
+  out-of-memory at 19.7 GB in `_replicate` (all three on nvidia-smi GPU 0, which another process held 3.78 GB of) and
+  were rerun one per free 3090. Every arm sits at fp32 rounding, so each option scores the same alone as in its set. The
   queue's first G4 ran on the bound kernels (fla / causal-conv1d) and printed FAIL on the seven arms it covered (max
   |d sigmoid| Hh 1.56e-2, PBh 1.23e-2, PRh 4.71e-3, PUh 5.28e-3, P2h 1.29e-3, P2Bh 1.48e-2, PLh 4.14e-3; |d reward|
   .05-.11; no argmax flip), and a first reference run with the backbone still in bf16 (every arm trains with

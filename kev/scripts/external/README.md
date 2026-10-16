@@ -120,7 +120,7 @@ from the comparisons entirely, or, with `--drop-overlapping-cases`, only the fla
 1. `runs/pref/Ah/seed0` — the arm the abstention plan is built around (Kev pointer, Hh prompt), pointwise, the D1
    reference the readouts `maxprob` / `maxr` / `lse` / `pnone` were defined against.
 2. `runs/pref/A/seed0` — A seed 0, the second reference point (pointer head + CE).
-3. The arm D9 selects (PRh if it beats Hh and clears the top1 guard; `docs/hypotheses/in-progress/allwrong-abstention.md`, D9), once
+3. The arm D9 selects (PRh if it beats Hh and clears the top1 guard; `docs/hypotheses/done/allwrong-abstention.md`, D9), once
    its `seed0` sweep is scored.
 
 One `luwu_run.py` invocation per arm; each arm's `T` comes from its own `reward_report.json`, so a single `--temperature`

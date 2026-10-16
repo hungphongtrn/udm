@@ -32,7 +32,7 @@ is the same number that report prints. `negative_max`, `normalized_entropy` and 
 same calls their scorer uses (confirmation_analysis.py:plain_scores / none_probability): the three confidence readouts on
 the PLAIN (no-NONE) request of a pair, pnone on the with-NONE request. maxprob/maxr/maxr_k/noisy_or have no counterpart
 in their release and carry no reference column; they are the readouts the all-wrong hypothesis is stated in
-(docs/hypotheses/in-progress/allwrong-abstention.md).
+(docs/hypotheses/done/allwrong-abstention.md).
 
 The released reference metrics (resources/reference/core-{jev,laya,qwen}/metrics.json) are read for the three mapped
 scores and printed beside ours; nothing is selected by target test outcomes.

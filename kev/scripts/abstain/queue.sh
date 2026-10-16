@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The all-wrong abstention screen on three GPUs (docs/hypotheses/in-progress/allwrong-abstention.md). One line, from
+# The all-wrong abstention screen on three GPUs (docs/hypotheses/done/allwrong-abstention.md). One line, from
 # the repo root:   nohup ./kev.sh scripts/abstain/queue.sh > kev/runs/queue.log 2>&1 &
 # env: GPUS (default 0,1,2: overrides an exported CUDA_VISIBLE_DEVICES), SEED (0), HALF_FRAC (0.5), DI (1; 0 skips the
 # Decision Index subsets), plus run_arm.sh's. Chat-format arms run at BATCH_FALLBACK=1 (1 record x accum 8, what C-F

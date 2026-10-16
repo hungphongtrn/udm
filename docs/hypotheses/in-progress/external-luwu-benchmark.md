@@ -14,7 +14,7 @@ models do not?
 - Their headline: a Jev threshold calibrated on DBpedia falsely rejects 69.3% of covered Emotion test inputs, and an
   Emotion threshold moved to DBpedia loses detection (paper abstract, quoted in the study notes summarised in
   `docs/data-eval.md` §2g row 7). The paper states it is descriptive and proposes no rejection method.
-- Our internal version of the same test is D6 in `../in-progress/allwrong-abstention.md` (v7 → t4); this doc is its
+- Our internal version of the same test is D6 in `../done/allwrong-abstention.md` (v7 → t4); this doc is its
   external replication against published Jev / Laya / Qwen numbers.
 - The adapter is built: `kev/scripts/external/` (`luwu_run.py`, `luwu_policies.py`, `overlap.py`, README).
 

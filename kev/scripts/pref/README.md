@@ -30,7 +30,7 @@ HP also reads the preference pairs that `convert_pref_data.py` writes (see "Poin
 | P2Bh / R2Bh | P2h's leave-one-out ablations: P2Bh = P2h with Hh's loss (`--loss pref --reg bsr --reg_w 1e-3`); R2Bh = P2h on the listing prompt (`--input_format chat`) = R2h with `--rcr_point balanced` |
 | PLh | PRh's loss on `chat_yesno` with `--head_init yesno` |
 
-The h arms are the all-wrong abstention screen ([`docs/hypotheses/in-progress/allwrong-abstention.md`](../../../docs/hypotheses/in-progress/allwrong-abstention.md));
+The h arms are the all-wrong abstention screen ([`docs/hypotheses/done/allwrong-abstention.md`](../../../docs/hypotheses/done/allwrong-abstention.md));
 `scripts/abstain/queue.sh` runs them on three GPUs. `run_arm.sh` also scores every arm on the all-wrong minimal pairs
 (`scripts/abstain/eval_allwrong.sh`; `ALLWRONG=0` skips it).
 
