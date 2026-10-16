@@ -120,8 +120,10 @@ BATCH_FALLBACK=1 ./kev.sh scripts/pref/run_arm.sh P2h 0 2
   on v7 and +.009 on t4; D10 does not adopt it (not worse, lower top1).
 - **Rule 3:** top1 guard passes (Ah 85.21). Threshold transfer at risk 0.10 (t4 coverage / risk / t4-fit coverage):
   P2h.maxr .240 / .130 / .231; P2h.maxr_k .304 / .212 fails risk. Shared-option |Δ reward| on v7: max .081, mean .0041
-  (PRh .084), not the 0 a pointwise arm should give up to rounding; RewardBench 2 not run yet.
-- **Gates:** G0 passed and G4 (K = 1, reference kernels, fp32) passed on every pointwise arm here (P2h, P2Bh, PRh,
-  PLh, PUh, PBh, Hh): max |Δ sigmoid| < 1e-3, no argmax change (allwrong doc §Results).
+  (PRh .084), not the 0 a pointwise arm should give up to rounding. RewardBench 2 (allwrong doc §RewardBench 2): P2h
+  .6651 overall / .8618 pooled AUROC vs P2Bh .6789 / .8696 and PRh .6780 / .8589; the probe is exactly 0 on all three.
+  RCR does not lead on RB2 either.
+- **Gates:** G0 passed. G4 (K = 1, reference kernels, fp32) passed on P2Bh, PRh, PLh, PUh, PBh (max |Δ sigmoid|
+  ≤ 2.5e-6, no argmax change); P2h and Hh ran out of GPU memory and still need their run (allwrong doc §Results).
 - The Lu & Wu benchmark still scores P2h with Ah, PRh and P2Bh (`../in-progress/external-luwu-benchmark.md`), to see
   whether its pointwise score carries a threshold across tasks; that does not reopen this doc's rule.

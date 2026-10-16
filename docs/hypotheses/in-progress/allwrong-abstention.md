@@ -303,7 +303,8 @@ Every arm finished (no `.failed`), HBh last at 14:07 UTC. Numbers are AUROC on t
 the 95% CI from the reports; top1 is `reward_report.json raw.overall.top1` as the report prints it. `report-half` has no
 Fh − Ch row: that difference is from Fh's `eval/allwrong-*/rows.json` with the report's formulas (the reimplementation
 reproduces the report's Rh − Fh, STh − R2h and D6 rows to the printed digits; its CIs use another bootstrap stream).
-G4 passed with reference kernels (below). Open: RewardBench 2 on the h arms (never queued); commands in §Commands.
+G4 with reference kernels passed on 6 of the 9 pointwise arms; Hh, P2h and HBh ran out of GPU memory and are open
+(below). RewardBench 2 on the h arms: §RewardBench 2 (half data).
 
 | Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 | | Arm | v7 / t4 dev top1 | maxr AUROC v7 / t4 |
 |---|---|---|---|---|---|---|
@@ -410,14 +411,52 @@ Ah.maxprob is .8943 / .7349 and Ah.pnone .9683 / .8265. Every h arm passes the t
   holds; Rh within 0.02 of Fh holds (+.003 / +.003).
 - **Shared-option |Δ reward|** on pointwise arms: mean 3-8e-3 but max .08-.17 on v7 (HBh .110 / .111) and .558 for PRh
   on t4, more than rounding of an exact pass should give; listing arms 4-14.
-- **G4 PASS** (2026-10-15, `fork_check.py k1 --kernels reference` at 34b44a2, exact fp32, on all nine pointwise arms:
-  Hh, PBh, PRh, PUh, P2h, P2Bh, PLh, RYh, HBh; 10 records, 125 options each): max |d sigmoid| < 1e-3 and 0 argmax
-  flips on every arm (`kev/runs/queue/G4ref-<arm>.log`). Each option scores the same alone as in its set, so the
-  pointwise arms' numbers (D5, D8-D11) stand. The queue's first G4 ran on the bound kernels (fla / causal-conv1d) and
-  printed FAIL on the seven arms it covered (max |d sigmoid| Hh 1.56e-2, PBh 1.23e-2, PRh 4.71e-3, PUh 5.28e-3, P2h
-  1.29e-3, P2Bh 1.48e-2, PLh 4.14e-3; |d reward| .05-.11; no argmax flip), and a first reference run with the
-  backbone still in bf16 (every arm trains with `--weights_dtype bf16`, which `Checkpoint.load` keeps) printed FAIL on
-  RYh (1.96e-2, |d reward| .135, no flip). Both were rounding: the together pass (K rows batched and padded) and the
-  alone pass (one row) round differently in TF32-class kernels or bf16, as in G0's bound-kernel FAIL.
+- **G4: 6 of 9 PASS, 3 not run** (2026-10-16, `fork_check.py k1 --kernels reference` at 34b44a2, exact fp32, 10
+  records, 125 options each; `kev/runs/queue/G4ref-<arm>.log`). Max |d sigmoid| / |d reward|, 0 argmax flips on each:
+  PBh 1.70e-6 / 1.14e-5, PRh 1.37e-6 / 1.53e-5, PUh 1.15e-6 / 1.43e-5, P2Bh 2.50e-6 / 1.16e-5, PLh 2.38e-7 / 1.53e-5,
+  RYh 1.13e-6 / 2.29e-5. Hh, P2h and HBh (all three on nvidia-smi GPU 0, which another process held 3.78 GB of) died
+  with CUDA out-of-memory at 19.7 GB in `_replicate`, before any comparison: they still need a run on a free 3090. The
+  six passes sit at fp32 rounding (1e-6), so each option scores the same alone as in its set on those arms. The
+  queue's first G4 ran on the bound kernels (fla / causal-conv1d) and printed FAIL on the seven arms it covered (max
+  |d sigmoid| Hh 1.56e-2, PBh 1.23e-2, PRh 4.71e-3, PUh 5.28e-3, P2h 1.29e-3, P2Bh 1.48e-2, PLh 4.14e-3; |d reward|
+  .05-.11; no argmax flip), and a first reference run with the backbone still in bf16 (every arm trains with
+  `--weights_dtype bf16`, which `Checkpoint.load` keeps) printed FAIL on RYh (1.96e-2, |d reward| .135, no flip). Both
+  were rounding: the same arms read 1e-6 in fp32.
 - Pointwise arms rarely pick a none option when it is offered on an allwrong row (v7 .57-.69, t4 .23-.37, HBh
   included) against .85-.91 on the listing arms: none rows are dropped from pointwise training.
+
+### RewardBench 2 (half data, seed 0; 2026-10-16)
+
+`kev/runs/pref/<arm>/seed0/rewardbench2.json` and `.pooled.json` (`rb2_pooled.py`), 1,865 prompts, 0 unsupported on
+every arm. RB2 is a reading beside the rules here, not one of them. The full-data arms (`done/pointwise-chat-input.md`
+§RewardBench 2) are listed for scale; their training set is twice the h arms'.
+
+| Arm | Prompt | Overall | no-Ties | Fact. | Prec. IF | Math | Safety | Focus | Ties | Pooled AUROC | ECE prior | Probe max \|Δ\| / flips |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| A (full) | kev | .7550 | .7960 | .813 | .469 | .907 | .838 | .954 | .550 | .8629 | .034 | .30 / 0 |
+| D (full) | chat | .6964 | .7004 | .733 | .369 | .661 | .820 | .919 | .676 | .8701 | .189 | 1.65 / 5 |
+| H (full) | chat_pointwise | .6653 | .6583 | .606 | .312 | .699 | .762 | .911 | .700 | .8551 | .291 | 0 / 0 |
+| Ah | kev | .5009 | .5148 | .373 | .294 | .503 | .611 | .794 | .431 | .7698 | .216 | 5.03 / 11 |
+| R2h | chat | .6231 | .6019 | .568 | .325 | .519 | .787 | .810 | .729 | .8703 | .038 | 6.12 / 7 |
+| PRh | chat_pointwise | .6780 | .6719 | .638 | .400 | .667 | .780 | .875 | .708 | .8589 | .228 | 0 / 0 |
+| P2h | chat_pointwise | .6651 | .6500 | .566 | .356 | .634 | .809 | .885 | .740 | .8618 | .270 | 0 / 0 |
+| P2Bh | chat_pointwise | .6789 | .6741 | .613 | .344 | .683 | .820 | .911 | .703 | .8696 | .250 | 0 / 0 |
+| PLh | chat_yesno | .6130 | .5846 | .474 | .263 | .579 | .707 | .901 | .755 | .8145 | .304 | 0 / 0 |
+| HBh | chat_yesno | .6574 | .6356 | .537 | .312 | .596 | .798 | .935 | .766 | .8605 | .290 | 0 / 0 |
+
+- **The pointwise arms are exactly set-independent on RB2:** probe max |Δ| 0 and 0 flips in 64 prompts on all five,
+  the same reading as full-data H; the listing arms move (R2h 7 flips, Ah 11).
+- **R2h (the D2-D5 winner) ranks worst of the chat h arms but pools and calibrates best.** Overall .623 is 4-6 points
+  under the pointwise arms (Math .519, Focus .810 are its low subsets), yet its pooled AUROC .8703 ties P2Bh (.8696)
+  and full-data D (.8701), and its ECE with the prior .038 is 6-8x lower than every pointwise arm's (.228-.304) and
+  level with full-data A's .034. That is the readout D2-D7 selected for (one reward scale across questions); within-
+  prompt ranking is what it gave up.
+- **Within the pointwise arms, RCR is not ahead on RB2 either:** P2h − P2Bh −.014 overall, −.008 pooled AUROC (the
+  allwrong maxr gain was +.018 / +.012); P2h − PRh (the MLP head) −.013 / +.003. PRh and P2Bh are level (.678 / .679),
+  both above full-data H's .665 on half the data. PLh (yes/no prompt, `W_yes − W_no` init, PRh's loss) is the lowest
+  pointwise arm (.613, pooled .8145); HBh (same prompt, BCE) .657 / .8605.
+- **Ah collapses on RB2:** .501 overall and .770 pooled AUROC against full-data A's .755 / .863, the largest half-data
+  drop of any arm (Factuality .373 vs .813, Math .503 vs .907). Its v7 / t4 dev top1 (85.21, above the guard) does not
+  show this, so the Kev recipe's RB2 ranking needs the full data, or is fragile to the seed [inference: one seed per
+  arm, no Ah seed spread].
+- One seed per arm and no CIs: differences under ~.02 overall are not read.
